@@ -1,10 +1,18 @@
 // CameraControlPanel.swift — remote camera control for the selected channel.
 //
-// The Blackmagic-style control surface: AE / AWB / AF toggles (which grey out
-// their manual sliders), then ISO / shutter / WB / tint / focus sliders, a lens
-// picker, a zoom slider, and a LUT toggle.  Every knob sends a `ControlMessage`
-// to the iPhone via `channel.send(_:)`; every value LABEL reads back from
-// `channel.remote` (the camera's reported StateSnapshot).
+// The Blackmagic-style control surface, top to bottom (each block is its OWN
+// tidy card so the eye groups them without hunting for dividers):
+//
+//   • LENS      — card-style quick-select tiles (0.5× / 1× / …).
+//   • EXPOSURE  — ISO-compensation pill, then an AE pill that greys ISO +
+//                 Shutter sliders while auto is on.
+//   • WHITE BAL — an AWB pill that greys WB(K) + Tint while auto is on.
+//   • FOCUS     — an AF pill that greys the Focus slider while auto is on.
+//   • FRAMING   — Zoom slider + Preview-LUT pill.
+//
+// Every knob sends a `ControlMessage` to the iPhone via `channel.send(_:)`;
+// every value LABEL reads back from `channel.remote` (the camera's reported
+// StateSnapshot).
 //
 // Local @State vs readback
 // ------------------------
@@ -29,14 +37,19 @@ struct CameraControlPanel: View {
     @State private var focus: Double = 0.5
     @State private var zoom: Double = 1
 
-    // Auto-mode mirrors (the toggles grey out the matching sliders).
+    // Toggle mirrors (the auto pills grey out their matching sliders).
     @State private var exposureAuto = true
     @State private var whiteBalanceAuto = true
     @State private var focusAuto = true
+    @State private var isoCompensation = false
     @State private var lutEnabled = false
 
+    /// Canonical iPhone lens ladder — used only when the camera hasn't reported
+    /// its own `availableLenses` yet, so the picker always has tiles to show.
+    private static let fallbackLenses = ["0.5x", "1x", "2x", "3x", "5x"]
+
     var body: some View {
-        VStack(alignment: .leading, spacing: Spacing.lg) {
+        VStack(alignment: .leading, spacing: Spacing.md) {
             SectionLabel(text: "Camera control")
             if channel.remote == nil {
                 waitingNotice
@@ -44,105 +57,139 @@ struct CameraControlPanel: View {
                 content
             }
         }
-        .padding(Spacing.lg)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .panelSurface()
         .onAppear { seed(from: channel.remote) }
         // Re-seed when a NEW snapshot lands so labels + slider rest positions
         // track the camera's auto-readback / our own confirmed commands.
-        .onChange(of: channel.remote) { newValue in
+        .onChange(of: channel.remote) { _, newValue in
             seed(from: newValue)
         }
     }
 
     private var waitingNotice: some View {
-        HStack(spacing: Spacing.sm) {
-            Image(systemName: "wifi.slash")
-                .foregroundColor(Theme.textFaint)
-            Text("Connect an iPhone to control its camera.")
-                .font(.system(size: 12))
-                .foregroundColor(Theme.textFaint)
+        Card {
+            HStack(spacing: Spacing.sm) {
+                Image(systemName: "wifi.slash")
+                    .foregroundColor(Theme.textFaint)
+                Text("Connect an iPhone to control its camera.")
+                    .font(.system(size: 12))
+                    .foregroundColor(Theme.textFaint)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, Spacing.sm)
     }
 
-    // MARK: - Content
+    // MARK: - Content (each control is its own card)
 
     private var content: some View {
-        VStack(alignment: .leading, spacing: Spacing.lg) {
-            autoTogglesRow
-            Divider().background(Theme.strokeDivider)
-            exposureControls
-            Divider().background(Theme.strokeDivider)
-            whiteBalanceControls
-            Divider().background(Theme.strokeDivider)
-            focusControls
-            Divider().background(Theme.strokeDivider)
-            lensControls
-            Divider().background(Theme.strokeDivider)
-            lutControl
-        }
-    }
-
-    // MARK: Auto toggles
-
-    private var autoTogglesRow: some View {
-        HStack(spacing: Spacing.sm) {
-            AutoToggle(title: "AE", isAuto: $exposureAuto) { on in
-                channel.send(.setExposureAuto(on))
-            }
-            AutoToggle(title: "AWB", isAuto: $whiteBalanceAuto) { on in
-                channel.send(.setWhiteBalanceAuto(on))
-            }
-            AutoToggle(title: "AF", isAuto: $focusAuto) { on in
-                channel.send(.setFocusAuto(on))
-            }
-        }
-    }
-
-    // MARK: Exposure (ISO + shutter) — greyed while AE on
-
-    private var exposureControls: some View {
         VStack(alignment: .leading, spacing: Spacing.md) {
-            SliderRow(label: "ISO",
-                      valueText: "\(Int(iso))",
-                      value: $iso,
-                      range: 25...6400,
-                      step: 1,
-                      enabled: !exposureAuto) { v in
-                channel.send(.setISO(Float(v)))
-            }
-            SliderRow(label: "Shutter",
-                      valueText: "1/\(Int(shutterDenom))",
-                      value: $shutterDenom,
-                      range: 24...8000,
-                      step: 1,
-                      enabled: !exposureAuto) { v in
-                channel.send(.setShutter(Float(v)))
+            lensCard
+            exposureCard
+            whiteBalanceCard
+            focusCard
+            framingCard
+        }
+    }
+
+    // MARK: Lens (top)
+
+    private var lensCard: some View {
+        Card {
+            VStack(alignment: .leading, spacing: Spacing.sm) {
+                SectionLabel(text: "Lens")
+                TileRow {
+                    ForEach(lensLadder, id: \.self) { label in
+                        QuickTile(title: label,
+                                  selected: channel.remote?.lens == label) {
+                            channel.send(.setLens(label))
+                        }
+                    }
+                }
             }
         }
     }
 
-    // MARK: White balance (kelvin + tint) — greyed while AWB on
+    private var lensLadder: [String] {
+        let reported = channel.remote?.availableLenses ?? []
+        return reported.isEmpty ? Self.fallbackLenses : reported
+    }
 
-    private var whiteBalanceControls: some View {
-        VStack(alignment: .leading, spacing: Spacing.md) {
-            SliderRow(label: "White balance",
-                      valueText: "\(Int(wbKelvin))K",
-                      value: $wbKelvin,
-                      range: 2500...10000,
-                      step: 50,
-                      enabled: !whiteBalanceAuto) { v in
-                channel.send(.setWB(Float(v)))
+    // MARK: Exposure (ISO comp + AE-gated ISO / shutter)
+
+    private var exposureCard: some View {
+        Card {
+            VStack(alignment: .leading, spacing: Spacing.md) {
+                HStack {
+                    SectionLabel(text: "Exposure")
+                    Spacer()
+                    PillToggle(title: exposureAuto ? "Auto" : "Manual",
+                               isOn: $exposureAuto,
+                               accent: Theme.accentBlue) { on in
+                        channel.send(.setExposureAuto(on))
+                    }
+                    .frame(width: 96)
+                }
+
+                // ISO compensation rides above the manual sliders — it only
+                // biases the camera's auto-exposure, so it lives with exposure
+                // but stays usable whether AE is on or off.
+                PillToggle(title: "ISO compensation",
+                           isOn: $isoCompensation,
+                           accent: Theme.accentYellow) { on in
+                    channel.send(.setIsoCompensation(on))
+                }
+
+                SliderRow(label: "ISO",
+                          valueText: "\(Int(iso))",
+                          value: $iso,
+                          range: 25...6400,
+                          step: 1,
+                          enabled: !exposureAuto) { v in
+                    channel.send(.setISO(Float(v)))
+                }
+                SliderRow(label: "Shutter",
+                          valueText: "1/\(Int(shutterDenom))",
+                          value: $shutterDenom,
+                          range: 24...8000,
+                          step: 1,
+                          enabled: !exposureAuto) { v in
+                    channel.send(.setShutter(Float(v)))
+                }
             }
-            SliderRow(label: "Tint",
-                      valueText: tintLabel,
-                      value: $tint,
-                      range: -150...150,
-                      step: 1,
-                      enabled: !whiteBalanceAuto) { v in
-                channel.send(.setTint(Float(v)))
+        }
+    }
+
+    // MARK: White balance (AWB-gated kelvin / tint)
+
+    private var whiteBalanceCard: some View {
+        Card {
+            VStack(alignment: .leading, spacing: Spacing.md) {
+                HStack {
+                    SectionLabel(text: "White balance")
+                    Spacer()
+                    PillToggle(title: whiteBalanceAuto ? "Auto" : "Manual",
+                               isOn: $whiteBalanceAuto,
+                               accent: Theme.accentBlue) { on in
+                        channel.send(.setWhiteBalanceAuto(on))
+                    }
+                    .frame(width: 96)
+                }
+                SliderRow(label: "Temperature",
+                          valueText: "\(Int(wbKelvin))K",
+                          value: $wbKelvin,
+                          range: 2500...10000,
+                          step: 50,
+                          enabled: !whiteBalanceAuto) { v in
+                    channel.send(.setWB(Float(v)))
+                }
+                SliderRow(label: "Tint",
+                          valueText: tintLabel,
+                          value: $tint,
+                          range: -150...150,
+                          step: 1,
+                          enabled: !whiteBalanceAuto) { v in
+                    channel.send(.setTint(Float(v)))
+                }
             }
         }
     }
@@ -152,15 +199,29 @@ struct CameraControlPanel: View {
         return v > 0 ? "+\(v)" : "\(v)"
     }
 
-    // MARK: Focus — greyed while AF on
+    // MARK: Focus (AF-gated focus position)
 
-    private var focusControls: some View {
-        SliderRow(label: "Focus",
-                  valueText: focusLabel,
-                  value: $focus,
-                  range: 0...1,
-                  enabled: !focusAuto) { v in
-            channel.send(.setFocusPosition(Float(v)))
+    private var focusCard: some View {
+        Card {
+            VStack(alignment: .leading, spacing: Spacing.md) {
+                HStack {
+                    SectionLabel(text: "Focus")
+                    Spacer()
+                    PillToggle(title: focusAuto ? "Auto" : "Manual",
+                               isOn: $focusAuto,
+                               accent: Theme.accentBlue) { on in
+                        channel.send(.setFocusAuto(on))
+                    }
+                    .frame(width: 96)
+                }
+                SliderRow(label: "Focus",
+                          valueText: focusLabel,
+                          value: $focus,
+                          range: 0...1,
+                          enabled: !focusAuto) { v in
+                    channel.send(.setFocusPosition(Float(v)))
+                }
+            }
         }
     }
 
@@ -170,63 +231,28 @@ struct CameraControlPanel: View {
         "\(Int(focus * 100))%"
     }
 
-    // MARK: Lens + zoom
+    // MARK: Framing (zoom + preview LUT)
 
-    private var lensControls: some View {
-        VStack(alignment: .leading, spacing: Spacing.md) {
-            lensPicker
-            SliderRow(label: "Zoom",
-                      valueText: String(format: "%.1f×", zoom),
-                      value: $zoom,
-                      range: 1...10,
-                      step: 0.1,
-                      enabled: true) { v in
-                channel.send(.setZoom(Float(v)))
+    private var framingCard: some View {
+        Card {
+            VStack(alignment: .leading, spacing: Spacing.md) {
+                SectionLabel(text: "Framing")
+                SliderRow(label: "Zoom",
+                          valueText: String(format: "%.1f×", zoom),
+                          value: $zoom,
+                          range: 1...10,
+                          step: 0.1,
+                          enabled: true) { v in
+                    channel.send(.setZoom(Float(v)))
+                }
+                lutRow
             }
         }
     }
 
-    private var lensPicker: some View {
-        VStack(alignment: .leading, spacing: Spacing.sm) {
-            Text("Lens")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(Theme.textPrimary)
-            HStack(spacing: Spacing.sm) {
-                ForEach(lensLadder, id: \.self) { label in
-                    lensPill(label)
-                }
-                if lensLadder.isEmpty {
-                    Text("No lenses reported")
-                        .font(.system(size: 11))
-                        .foregroundColor(Theme.textFaint)
-                }
-            }
-        }
-    }
-
-    private var lensLadder: [String] {
-        channel.remote?.availableLenses ?? []
-    }
-
-    private func lensPill(_ label: String) -> some View {
-        let selected = channel.remote?.lens == label
-        return Button {
-            channel.send(.setLens(label))
-        } label: {
-            Text(label)
-                .font(.system(size: 12, weight: .semibold))
-                .frame(minWidth: 44)
-                .frame(height: 32)
-                .padding(.horizontal, Spacing.sm)
-        }
-        .bridgeButton(selected: selected)
-    }
-
-    // MARK: LUT
-
-    private var lutControl: some View {
-        HStack(spacing: Spacing.sm) {
-            VStack(alignment: .leading, spacing: 2) {
+    private var lutRow: some View {
+        HStack(alignment: .center, spacing: Spacing.md) {
+            VStack(alignment: .leading, spacing: Spacing.xxs) {
                 Text("Preview LUT")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(Theme.textPrimary)
@@ -236,18 +262,14 @@ struct CameraControlPanel: View {
                     .lineLimit(1)
             }
             Spacer()
-            Toggle("", isOn: Binding(
-                get: { lutEnabled },
-                set: { newValue in
-                    lutEnabled = newValue
-                    channel.send(.setLUT(name: channel.remote?.lutName,
-                                         enabled: newValue))
-                }
-            ))
-            .toggleStyle(.switch)
-            .tint(Theme.accentBlue)
-            .labelsHidden()
-            .disabled(channel.remote?.lutName == nil)
+            PillToggle(title: lutEnabled ? "On" : "Off",
+                       isOn: $lutEnabled,
+                       accent: Theme.accentBlue) { on in
+                channel.send(.setLUT(name: channel.remote?.lutName, enabled: on))
+            }
+            .frame(width: 72)
+            .opacity(channel.remote?.lutName == nil ? 0.45 : 1)
+            .allowsHitTesting(channel.remote?.lutName != nil)
         }
     }
 
@@ -271,6 +293,7 @@ struct CameraControlPanel: View {
         exposureAuto = s.exposureAuto
         whiteBalanceAuto = s.whiteBalanceAuto
         focusAuto = s.focusAuto
+        isoCompensation = s.isoCompensation
         lutEnabled = s.lutEnabled
     }
 }

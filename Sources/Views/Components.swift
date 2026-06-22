@@ -1,21 +1,66 @@
-// Components.swift — shared themed view vocabulary.
+// Components.swift — the shared themed view vocabulary for Bridge.
 //
-// One place for the small, repeated UI pieces every zone uses: the flat panel
-// surface, the inline button style, the labelled slider row, the status pill,
-// the connection dot.  Keeping them here means a button looks identical in the
-// Channels rail and the Outputs rail with no copy-paste drift, and the theme
-// (Theme.swift tokens) is the single source of truth for colour/spacing.
+// One place for every repeated UI piece, so a control looks identical in the
+// Channels rail, the center panel, and the Outputs rail with no copy-paste
+// drift.  Theme.swift tokens (colour / spacing / radius / control sizes) are the
+// single source of truth — nothing here hardcodes a hex or a magic dimension.
 //
 // Discipline carried from Studio's StudioDesign: FLAT surfaces (no gradients),
-// 1 pt low-contrast strokes, depth from brightness steps + borders only.
+// 1 pt low-contrast strokes, depth from brightness steps + borders only.  Two
+// rules this kit enforces that the previous revision violated:
+//
+//   • NO native NSSlider.  `Slider` on macOS draws stray white tick marks under
+//     its track in dark mode; the custom `StyledSlider` here is a track + knob +
+//     drag gesture with nothing else, so there is no AppKit chrome to leak.
+//   • EQUAL-width segments.  `SegmentedBar` lays its segments out with
+//     `frame(maxWidth: .infinity)` inside one HStack, so they share the row
+//     evenly and can never overflow it — the old `.segmented` Picker rendered
+//     uneven, crooked widths.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// Public component vocabulary (what the zone views consume):
+//
+//   Card { … }                         rounded panel container
+//   SectionLabel(text:)                small uppercase muted caption (no rule)
+//   PillToggle(title:isOn:onChange:)   clear on/off pill (accent fill when on)
+//   SegmentedBar(selection:options:)   equal-width segmented control
+//   StyledSlider(value:in:step:onChange:)  custom dark slider, no tick artifacts
+//   QuickTile(title:subtitle:selected:action:)  card-style quick-select tile
+//   TileRow(items:) { … }              evenly-spaced row of tiles
+//
+// Retained helpers (used across the rails — kept stable, internals upgraded):
+//   .cardSurface() / .panelSurface()   card surface modifier (alias kept)
+//   .bridgeButton(selected:accent:)    standard inline button look
+//   StatusPill / ConnectionDot         LIVE/OFF pill + connection dot
+//   SliderRow(…)                       label + readback + StyledSlider row
+//   AutoToggle(…)                      AE/AWB/AF toggle (wraps PillToggle)
+// ─────────────────────────────────────────────────────────────────────────────
 
 import SwiftUI
 
-// MARK: - Panel surface
+// MARK: - Card (rounded panel container)
 
-/// A flat card: panel-tier fill, 1 pt stroke, panel radius.  Used to lift the
-/// center control panel and the output cards off the canvas.
-struct PanelSurface: ViewModifier {
+/// A flat card: panel-tier fill, 1 pt stroke, panel radius, consistent inner
+/// padding.  This is the standard container for any grouped block of controls —
+/// the center control panel, the output cards.  Padding lives INSIDE the card so
+/// every call site gets the same inner rhythm for free.
+struct Card<Content: View>: View {
+    var corner: CGFloat = Radius.panel
+    var padding: CGFloat = Spacing.md
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        content()
+            .padding(padding)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .cardSurface(corner: corner)
+    }
+}
+
+/// The card SURFACE as a modifier (fill + stroke, no padding) for places that
+/// must control their own padding — e.g. a card whose content already manages
+/// edge-to-edge sections.  `Card` is preferred; this is the escape hatch.
+struct CardSurface: ViewModifier {
     var corner: CGFloat = Radius.panel
 
     func body(content: Content) -> some View {
@@ -32,16 +77,307 @@ struct PanelSurface: ViewModifier {
 }
 
 extension View {
+    /// Apply the card surface (fill + 1 pt stroke) without padding.
+    func cardSurface(corner: CGFloat = Radius.panel) -> some View {
+        modifier(CardSurface(corner: corner))
+    }
+
+    /// Back-compat alias — existing call sites use `.panelSurface()`.  Same
+    /// surface as `cardSurface`; kept so the rails compile unchanged.
     func panelSurface(corner: CGFloat = Radius.panel) -> some View {
-        modifier(PanelSurface(corner: corner))
+        modifier(CardSurface(corner: corner))
     }
 }
 
-// MARK: - Inline button
+// MARK: - Section label (no underline divider)
+
+/// A small uppercase muted caption titling a group of controls.  Deliberately
+/// has NO trailing rule / divider — section grouping is carried by spacing and
+/// the card edge, not by a line under the caption.
+struct SectionLabel: View {
+    let text: String
+
+    var body: some View {
+        Text(text.uppercased())
+            .font(.system(size: 10, weight: .semibold))
+            .tracking(1.0)
+            .foregroundColor(Theme.textFaint)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+// MARK: - Pill toggle (clear on/off)
+
+/// A clear on/off pill with an obvious active state.  ON = accent fill + white
+/// text; OFF = quiet outlined neutral chip.  Used for AE / AWB / AF and the
+/// ISO-compensation toggle.  `accent` defaults to blue; tally-style callers can
+/// pass red / yellow.
+///
+/// The whole pill is one tap target (`contentShape`), so the padded area around
+/// the label is live, not just the glyph.
+struct PillToggle: View {
+    let title: String
+    @Binding var isOn: Bool
+    var accent: Color = Theme.accentBlue
+    /// Called with the new value after the toggle flips — the moment to send a
+    /// control command (commit, not per-keystroke).
+    var onChange: (Bool) -> Void = { _ in }
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button {
+            isOn.toggle()
+            onChange(isOn)
+        } label: {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(isOn ? .white : Theme.textSecondary)
+                .frame(maxWidth: .infinity)
+                .frame(height: ControlMetrics.pillHeight)
+                .background(
+                    RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+                        .fill(fill)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+                        .stroke(isOn ? Color.clear : Theme.stroke, lineWidth: 1)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: Radius.control,
+                                               style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: isOn)
+        .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+
+    private var fill: Color {
+        if isOn { return accent }
+        return hovering ? Theme.bgHover : Theme.bgSelected.opacity(0.6)
+    }
+}
+
+// MARK: - Segmented bar (equal-width segments)
+
+/// A clean segmented control whose segments are EQUAL width and never overflow
+/// their row.  Each segment is `frame(maxWidth: .infinity)` inside one HStack on
+/// a tracked background, so the row divides evenly however many options it holds
+/// — no crooked, ragged widths.  Used for Tally and Output delay.
+///
+/// `Option` is anything `Hashable & Identifiable`; the caller supplies a label
+/// for each.  The selected segment gets the accent fill (per-option accent is
+/// supported so a Program segment can read red while Preview reads yellow).
+struct SegmentedBar<Option: Hashable & Identifiable>: View {
+    @Binding var selection: Option
+    let options: [Option]
+    let label: (Option) -> String
+    /// Per-segment accent for the selected fill; defaults to blue for every
+    /// option.  Pass a closure to colour Program red / Preview yellow.
+    var accent: (Option) -> Color = { _ in Theme.accentBlue }
+    var onChange: (Option) -> Void = { _ in }
+
+    var body: some View {
+        HStack(spacing: Spacing.xxs) {
+            ForEach(options) { option in
+                segment(option)
+            }
+        }
+        .padding(Spacing.xxs)
+        .background(
+            RoundedRectangle(cornerRadius: Radius.control + Spacing.xxs,
+                             style: .continuous)
+                .fill(Theme.bgApp)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Radius.control + Spacing.xxs,
+                             style: .continuous)
+                .stroke(Theme.stroke, lineWidth: 1)
+        )
+    }
+
+    private func segment(_ option: Option) -> some View {
+        let isSelected = option == selection
+        let tint = accent(option)
+        return Button {
+            selection = option
+            onChange(option)
+        } label: {
+            Text(label(option))
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(isSelected ? .white : Theme.textSecondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .frame(maxWidth: .infinity)
+                .frame(height: ControlMetrics.segmentHeight)
+                .background(
+                    RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+                        .fill(isSelected ? tint : Color.clear)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: Radius.control,
+                                               style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .animation(.easeOut(duration: 0.12), value: isSelected)
+    }
+}
+
+// MARK: - Styled slider (custom, no tick-mark artifacts)
+
+/// A custom horizontal slider: filled track + round knob, nothing else.  Renders
+/// cleanly on macOS in dark mode — there is NO native NSSlider involved, so none
+/// of the stray white tick lines AppKit draws under `Slider` in a dark theme.
+///
+/// Binds to a `Double` with `min...max` and an optional `step`.  `onChange` (if
+/// supplied) fires on the editing-END (mouse-up) only — a drag sends ONE value,
+/// not one per pixel — matching the cheap-control-packet rule.
+struct StyledSlider: View {
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    var step: Double = 0
+    var tint: Color = Theme.accentBlue
+    /// Called once when the drag ends, with the final (stepped) value.
+    var onChange: (Double) -> Void = { _ in }
+
+    @State private var dragging = false
+
+    var body: some View {
+        GeometryReader { geo in
+            let knob = ControlMetrics.sliderKnob
+            let usable = max(0, geo.size.width - knob)
+            let fraction = normalizedFraction()
+            let knobX = usable * fraction
+
+            ZStack(alignment: .leading) {
+                // Empty track — full width, centred vertically.
+                Capsule()
+                    .fill(Theme.bgApp)
+                    .overlay(Capsule().stroke(Theme.stroke, lineWidth: 1))
+                    .frame(height: ControlMetrics.sliderTrack)
+
+                // Filled portion up to the knob centre.
+                Capsule()
+                    .fill(tint)
+                    .frame(width: knobX + knob / 2, height: ControlMetrics.sliderTrack)
+
+                // Knob.
+                Circle()
+                    .fill(Theme.textPrimary)
+                    .overlay(Circle().stroke(tint, lineWidth: dragging ? 2 : 1))
+                    .frame(width: knob, height: knob)
+                    .offset(x: knobX)
+                    .shadow(color: .black.opacity(0.35), radius: 2, y: 1)
+            }
+            .frame(maxHeight: .infinity, alignment: .center)
+            .contentShape(Rectangle())   // whole row is draggable, not just the knob
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { g in
+                        dragging = true
+                        update(toX: g.location.x, usable: usable, knob: knob)
+                    }
+                    .onEnded { _ in
+                        dragging = false
+                        onChange(value)
+                    }
+            )
+        }
+        .frame(height: ControlMetrics.sliderKnob)   // GeometryReader needs a height
+    }
+
+    /// Where the knob sits, 0...1, clamped.
+    private func normalizedFraction() -> Double {
+        let span = range.upperBound - range.lowerBound
+        guard span > 0 else { return 0 }
+        return min(1, max(0, (value - range.lowerBound) / span))
+    }
+
+    /// Translate a drag x-position into a (stepped, clamped) value.
+    private func update(toX x: CGFloat, usable: CGFloat, knob: CGFloat) {
+        guard usable > 0 else { return }
+        let clampedX = min(max(0, x - knob / 2), usable)
+        let fraction = Double(clampedX / usable)
+        let span = range.upperBound - range.lowerBound
+        var raw = range.lowerBound + fraction * span
+        if step > 0 {
+            raw = (raw / step).rounded() * step
+        }
+        value = min(range.upperBound, max(range.lowerBound, raw))
+    }
+}
+
+// MARK: - Quick tile + tile row (card-style quick-select)
+
+/// A card-style quick-select tile: a title (and optional subtitle) on a small
+/// rounded card.  Tap to select; the selected tile gets an accent border + a
+/// faint accent-tinted fill.  Used for the lens picker.
+struct QuickTile: View {
+    let title: String
+    var subtitle: String? = nil
+    var selected: Bool = false
+    var accent: Color = Theme.accentBlue
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: Spacing.xxs) {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(selected ? .white : Theme.textPrimary)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.system(size: 9, weight: .regular))
+                        .foregroundColor(selected ? .white.opacity(0.8)
+                                                  : Theme.textFaint)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: ControlMetrics.tileHeight)
+            .background(
+                RoundedRectangle(cornerRadius: Radius.tile, style: .continuous)
+                    .fill(fill)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Radius.tile, style: .continuous)
+                    .stroke(selected ? accent : Theme.stroke,
+                            lineWidth: selected ? 1.5 : 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: Radius.tile,
+                                           style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: selected)
+        .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+
+    private var fill: Color {
+        if selected { return accent.opacity(0.18) }
+        return hovering ? Theme.bgHover : Theme.bgSelected.opacity(0.5)
+    }
+}
+
+/// An evenly-spaced row of quick tiles.  Each child shares the row width via the
+/// tile's own `maxWidth: .infinity`, so a row of N tiles divides evenly and
+/// never overflows.  Caller supplies the tiles as content.
+struct TileRow<Content: View>: View {
+    var spacing: CGFloat = Spacing.sm
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        HStack(spacing: spacing) {
+            content()
+        }
+    }
+}
+
+// MARK: - Inline button (standard tappable look)
 
 /// The app's standard button look: flat neutral fill that brightens on hover,
-/// switches to the supplied accent when `selected`.  `accent` defaults to blue
-/// (the primary-action accent); tally buttons pass red / yellow.
+/// switches to the supplied accent when `selected`.  `accent` defaults to blue;
+/// tally buttons pass red / yellow.  Kept stable for the rails / center pane.
 struct BridgeButtonStyle: ButtonStyle {
     var selected: Bool = false
     var accent: Color = Theme.accentBlue
@@ -72,9 +408,11 @@ struct BridgeButtonStyle: ButtonStyle {
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: corner, style: .continuous)
-                        .stroke(selected ? accent.opacity(0.0) : Theme.stroke,
+                        .stroke(selected ? Color.clear : Theme.stroke,
                                 lineWidth: 1)
                 )
+                .contentShape(RoundedRectangle(cornerRadius: corner,
+                                               style: .continuous))
                 .opacity(configuration.isPressed ? 0.85 : 1)
                 .onHover { hovering = $0 }
                 .animation(.easeOut(duration: 0.12), value: hovering)
@@ -128,8 +466,8 @@ struct StatusPill: View {
 
 // MARK: - Connection dot
 
-/// Small filled circle: green-ish (we use blue accent) when connected, faint
-/// grey when not.  A faint ring keeps it visible against any surface.
+/// Small filled circle: accent-blue when connected, faint grey when not.  A
+/// faint ring keeps it visible against any surface.
 struct ConnectionDot: View {
     let connected: Bool
 
@@ -137,35 +475,19 @@ struct ConnectionDot: View {
         Circle()
             .fill(connected ? Theme.accentBlue : Theme.textFaint)
             .frame(width: 8, height: 8)
-            .overlay(
-                Circle().stroke(Theme.bgApp, lineWidth: 1)
-            )
-    }
-}
-
-// MARK: - Section header
-
-/// A small uppercase faint label that titles a group of controls.
-struct SectionLabel: View {
-    let text: String
-
-    var body: some View {
-        Text(text.uppercased())
-            .font(.system(size: 10, weight: .semibold))
-            .tracking(1.0)
-            .foregroundColor(Theme.textFaint)
+            .overlay(Circle().stroke(Theme.bgApp, lineWidth: 1))
     }
 }
 
 // MARK: - Labelled slider row
 
 /// One manual-control row: a leading label, a trailing read-back value, and a
-/// slider underneath.  Greys out + disables when `enabled` is false (the AE /
-/// AWB / AF auto modes drive this — manual sliders go inert while auto is on).
+/// `StyledSlider` underneath.  Greys out + disables when `enabled` is false (the
+/// AE / AWB / AF auto modes drive this — manual sliders go inert while auto is
+/// on).
 ///
-/// The slider commits CONTINUOUSLY via `onChange` is avoided — instead it
-/// reports on editing-end so we don't flood the control channel with a packet
-/// per pixel of drag (cheap-control-packet rule: commit, not per-keystroke).
+/// The slider commits on editing-END via `onCommit` — a drag sends ONE packet,
+/// not one per pixel (cheap-control-packet rule).
 struct SliderRow: View {
     let label: String
     let valueText: String
@@ -188,54 +510,27 @@ struct SliderRow: View {
                     .font(.system(size: 12, weight: .regular).monospacedDigit())
                     .foregroundColor(enabled ? Theme.textSecondary : Theme.textFaint)
             }
-            slider
+            StyledSlider(value: $value,
+                         range: range,
+                         step: step,
+                         onChange: { v in if enabled { onCommit(v) } })
+                .allowsHitTesting(enabled)
         }
         .opacity(enabled ? 1 : 0.45)
     }
-
-    @ViewBuilder
-    private var slider: some View {
-        if step > 0 {
-            Slider(value: $value, in: range, step: step) { editing in
-                if !editing { onCommit(value) }
-            }
-            .tint(Theme.accentBlue)
-            .disabled(!enabled)
-        } else {
-            Slider(value: $value, in: range) { editing in
-                if !editing { onCommit(value) }
-            }
-            .tint(Theme.accentBlue)
-            .disabled(!enabled)
-        }
-    }
 }
 
-// MARK: - Auto toggle chip
+// MARK: - Auto toggle (AE / AWB / AF)
 
-/// A compact AUTO / MANUAL toggle for exposure / white-balance / focus.  When
-/// `isAuto` the chip reads AUTO in the accent; manual is a quiet neutral chip.
+/// A compact auto toggle for exposure / white-balance / focus, wrapping
+/// `PillToggle`.  ON = accent (auto active); OFF = quiet neutral (manual).
+/// Signature kept stable for CameraControlPanel.
 struct AutoToggle: View {
     let title: String
     @Binding var isAuto: Bool
     var onChange: (Bool) -> Void
 
     var body: some View {
-        Button {
-            isAuto.toggle()
-            onChange(isAuto)
-        } label: {
-            HStack(spacing: Spacing.xs) {
-                Text(title)
-                    .font(.system(size: 11, weight: .medium))
-                Text(isAuto ? "AUTO" : "MANUAL")
-                    .font(.system(size: 10, weight: .bold))
-                    .tracking(0.5)
-            }
-            .padding(.horizontal, Spacing.sm)
-            .frame(height: 26)
-            .frame(maxWidth: .infinity)
-        }
-        .bridgeButton(selected: isAuto)
+        PillToggle(title: title, isOn: $isAuto, onChange: onChange)
     }
 }

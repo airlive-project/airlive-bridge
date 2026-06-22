@@ -15,7 +15,6 @@ struct ChannelsRail: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider().background(Theme.strokeDivider)
             list
         }
         .frame(width: 240)
@@ -23,42 +22,42 @@ struct ChannelsRail: View {
     }
 
     // MARK: - Header
+    //
+    // Studio's add-source idiom: the title carries a small inline `+` right
+    // beside it (no big full-width "create" button under the list, no rule under
+    // the header).  Pressing `+` opens a channel's receiver slot immediately.
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: Spacing.md) {
-            HStack {
-                Text("Channels")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(Theme.textPrimary)
-                Spacer()
-                Text("\(model.channels.count)")
-                    .font(.system(size: 12, weight: .medium).monospacedDigit())
-                    .foregroundColor(Theme.textFaint)
-            }
-            createButton
+        HStack(spacing: Spacing.sm) {
+            Text("Channels")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(Theme.textPrimary)
+            addButton
+            Spacer()
+            Text("\(model.channels.count)")
+                .font(.system(size: 12, weight: .medium).monospacedDigit())
+                .foregroundColor(Theme.textFaint)
         }
-        .padding(Spacing.lg)
+        .padding(.horizontal, Spacing.lg)
+        .padding(.top, Spacing.md)
+        .padding(.bottom, Spacing.sm)
     }
 
-    private var createButton: some View {
+    /// Small inline `+` next to the title — the Studio add-source affordance.
+    /// `addChannel` builds the model object; `start()` brings the receiver slot
+    /// + Bonjour advert online so the iPhone can connect immediately (DESIGN.md).
+    private var addButton: some View {
         Button {
-            // Creating a channel opens its receiver slot + Bonjour advert so the
-            // iPhone can connect immediately (DESIGN.md).  `addChannel` only
-            // builds the model object; `start()` brings the listener online.
             let channel = model.addChannel()
             channel.start()
         } label: {
-            HStack(spacing: Spacing.sm) {
-                Image(systemName: "plus")
-                    .font(.system(size: 12, weight: .bold))
-                Text("Create channel")
-                    .font(.system(size: 13, weight: .medium))
-                Spacer()
-            }
-            .padding(.horizontal, Spacing.md)
-            .frame(height: 34)
+            Image(systemName: "plus")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(Theme.textPrimary)
+                .frame(width: 22, height: 22)
         }
-        .bridgeButton(selected: true)   // primary action — always accent-filled
+        .bridgeButton(corner: Radius.control)
+        .help("Create channel")
     }
 
     // MARK: - List
@@ -83,7 +82,8 @@ struct ChannelsRail: View {
                     }
                 }
                 .padding(.horizontal, Spacing.md)
-                .padding(.vertical, Spacing.md)
+                .padding(.top, Spacing.xs)
+                .padding(.bottom, Spacing.md)
             }
         }
     }
@@ -174,8 +174,13 @@ private struct ChannelRow: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(Theme.textPrimary)
                     .focused($nameFocused)
-                    .onSubmit { commitRename() }
-                    .onExitCommand { editing = false }   // Esc cancels
+                    .onSubmit { commitRename() }            // Enter commits
+                    .onExitCommand { cancelRename() }       // Esc cancels
+                    // Commit on focus loss too — clicking another row, the list,
+                    // or anywhere else ends the edit and saves, not only Enter.
+                    .onChange(of: nameFocused) { _, focused in
+                        if !focused && editing { commitRename() }
+                    }
             } else {
                 Text(channel.name)
                     .font(.system(size: 13, weight: .semibold))
@@ -254,7 +259,14 @@ private struct ChannelRow: View {
     }
 
     private func commitRename() {
+        // `editing = false` first so the `onChange(of: nameFocused)` blur-commit
+        // that fires as the field tears down sees `editing == false` and doesn't
+        // re-enter this (a harmless second `rename`, but cleaner to guard).
+        editing = false
         channel.rename(draftName)
+    }
+
+    private func cancelRename() {
         editing = false
     }
 }

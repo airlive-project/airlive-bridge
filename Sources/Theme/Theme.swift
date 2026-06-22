@@ -69,7 +69,12 @@ enum Theme {
 
 /// Layout spacing scale (pt).  Named steps so padding is intentional rhythm,
 /// not a scatter of magic numbers.
+///
+/// `xxs` was added for the tight stacks the component kit uses (label-to-control
+/// gaps, segmented-control inner inset) — the previous minimum (`xs` = 4) left
+/// section labels floating too far from their controls.
 enum Spacing {
+    static let xxs: CGFloat = 2
     static let xs: CGFloat  = 4
     static let sm: CGFloat  = 8
     static let md: CGFloat  = 12
@@ -77,11 +82,26 @@ enum Spacing {
     static let xl: CGFloat  = 24
 }
 
-/// Corner-radius scale (pt) — panels soft-card, buttons soft-pill, matching
-/// the Studio / Linear / Raycast scale.
+/// Corner-radius scale (pt) — panels soft-card, buttons soft-pill, tiles a hair
+/// softer than buttons, matching the Studio / Linear / Raycast scale.
 enum Radius {
-    static let button: CGFloat = 8
-    static let panel: CGFloat  = 12
+    static let control: CGFloat = 6   // small inner controls (pills, segments)
+    static let button: CGFloat  = 8
+    static let tile: CGFloat    = 10
+    static let panel: CGFloat   = 12
+}
+
+/// Fixed control heights (pt).  A single source of truth so a pill, a segment,
+/// and a tile read at the same rhythm across every zone — the "crooked" feel of
+/// the old controls came from each one inventing its own height.
+/// Named `ControlMetrics` (not `ControlSize`) so it never shadows SwiftUI's own
+/// `ControlSize` type used by the `.controlSize(_:)` modifier.
+enum ControlMetrics {
+    static let pillHeight: CGFloat    = 28
+    static let segmentHeight: CGFloat = 30
+    static let tileHeight: CGFloat    = 40
+    static let sliderKnob: CGFloat    = 14
+    static let sliderTrack: CGFloat   = 4
 }
 
 // MARK: - Hex initialiser

@@ -19,13 +19,14 @@ struct OutputsRail: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider().background(Theme.strokeDivider)
             content(for: model.selectedChannel)
         }
         .frame(width: 280)
         .background(Theme.bgRail)
     }
 
+    // No rule under the header — section grouping is carried by spacing and the
+    // output cards' own edges, matching the Channels rail and Studio's panels.
     private var header: some View {
         HStack {
             Text("Publish to")
@@ -33,7 +34,9 @@ struct OutputsRail: View {
                 .foregroundColor(Theme.textPrimary)
             Spacer()
         }
-        .padding(Spacing.lg)
+        .padding(.horizontal, Spacing.lg)
+        .padding(.top, Spacing.md)
+        .padding(.bottom, Spacing.sm)
     }
 
     @ViewBuilder
@@ -72,7 +75,12 @@ private struct ChannelOutputs: View {
                         }
                     }
                 }
-                .padding(Spacing.lg)
+                // Top padding stays small so the first card sits just under the
+                // header (which already adds an 8 pt bottom gap); horizontal /
+                // bottom keep the rail's normal inset.
+                .padding(.horizontal, Spacing.lg)
+                .padding(.top, Spacing.sm)
+                .padding(.bottom, Spacing.lg)
             }
             Divider().background(Theme.strokeDivider)
             addButton
@@ -145,14 +153,14 @@ private struct OutputCard: View {
         // Forces body re-evaluation when `refresh` increments (VideoOutput is
         // not an ObservableObject, so SwiftUI has no other dependency on it).
         let _ = refresh
-        return VStack(alignment: .leading, spacing: Spacing.md) {
-            headerRow
-            labelField
-            configField
-            footerRow
+        return Card {
+            VStack(alignment: .leading, spacing: Spacing.md) {
+                headerRow
+                labelField
+                configField
+                footerRow
+            }
         }
-        .padding(Spacing.md)
-        .panelSurface()
         .onAppear { draftLabel = output.label }
     }
 

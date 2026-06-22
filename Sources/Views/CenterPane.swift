@@ -1,10 +1,14 @@
 // CenterPane.swift — CENTER zone: the selected channel.
 //
-// Top to bottom: the 16:9 preview (tally border + ON AIR / PREVIEW badge +
-// hide-preview eye), the tally button row (Program / Preview / Off — sends
-// `setCue`), a delay-preset picker, then the camera CONTROL panel
+// Top to bottom, inside one ScrollView so the full control stack fits any window
+// size without overflow: the 16:9 preview (tally border + ON AIR / PREVIEW badge
+// + hide-preview eye), the Tally row (Off / Preview / Program — sends `setCue`),
+// the Output-delay row (LatencyPreset), then the camera CONTROL panel
 // (CameraControlPanel).  Everything here drives one channel; when no channel is
 // selected it shows a quiet empty state.
+//
+// Tally and Output-delay use the kit `SegmentedBar` so their segments are EQUAL
+// width and aligned (the old native `.segmented` Picker rendered crooked).
 //
 // Readback vs control: value labels come from `channel.remote` (the camera's
 // reported StateSnapshot); every knob sends a `ControlMessage` via
@@ -56,13 +60,17 @@ private struct ChannelDetail: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: Spacing.lg) {
+            VStack(alignment: .leading, spacing: Spacing.md) {
                 previewSection
                 tallyRow
                 delayRow
                 CameraControlPanel(channel: channel)
             }
-            .padding(Spacing.xl)
+            // Tight top padding; generous-but-compact around the rest.  The
+            // ScrollView lets the stack grow past the window without overflow.
+            .padding(.horizontal, Spacing.lg)
+            .padding(.top, Spacing.md)
+            .padding(.bottom, Spacing.xl)
         }
     }
 
@@ -99,9 +107,7 @@ private struct ChannelDetail: View {
     private var previewPane: some View {
         ZStack {
             if channel.previewEnabled {
-                PreviewView(frame: channel.latestFrame,
-                            rotation: channel.remote?.outputRotation ?? 0,
-                            enabled: true)
+                PreviewView(channel: channel)
                 if channel.latestFrame == nil {
                     noSignalOverlay
                 }
@@ -187,49 +193,60 @@ private struct ChannelDetail: View {
         currentTally == .off ? 1 : 3
     }
 
-    // MARK: Tally buttons
+    // MARK: Tally (equal-width segmented bar)
 
     private var tallyRow: some View {
-        VStack(alignment: .leading, spacing: Spacing.sm) {
-            SectionLabel(text: "Tally")
-            HStack(spacing: Spacing.sm) {
-                ForEach(TallyState.allCases) { state in
-                    tallyButton(state)
-                }
+        Card {
+            VStack(alignment: .leading, spacing: Spacing.sm) {
+                SectionLabel(text: "Tally")
+                SegmentedBar(
+                    selection: Binding(
+                        get: { currentTally },
+                        set: { setTally($0) }
+                    ),
+                    options: TallyState.allCases,
+                    label: { $0.label },
+                    // Program red, Preview yellow, Off neutral blue.
+                    accent: { $0 == .off ? Theme.accentBlue : $0.accent }
+                )
             }
         }
     }
 
-    private func tallyButton(_ state: TallyState) -> some View {
-        let isCurrent = currentTally == state
-        return Button {
-            tally.set(state, for: channel.id)
-            channel.send(.setCue(state.rawValue))
-        } label: {
-            Text(state.label)
-                .font(.system(size: 13, weight: .semibold))
-                .frame(maxWidth: .infinity)
-                .frame(height: 34)
-        }
-        .bridgeButton(selected: isCurrent,
-                      accent: state == .off ? Theme.accentBlue : state.accent)
+    /// Record the cue locally (so both surfaces agree) and ship it to the iPhone.
+    private func setTally(_ state: TallyState) {
+        tally.set(state, for: channel.id)
+        channel.send(.setCue(state.rawValue))
     }
 
-    // MARK: Delay
+    // MARK: Output delay (equal-width segmented bar)
 
     private var delayRow: some View {
-        VStack(alignment: .leading, spacing: Spacing.sm) {
-            SectionLabel(text: "Output delay")
-            Picker("", selection: Binding(
-                get: { channel.delay },
-                set: { channel.delay = $0 }
-            )) {
-                ForEach(LatencyPreset.allCases) { preset in
-                    Text(preset.label).tag(preset)
-                }
+        Card {
+            VStack(alignment: .leading, spacing: Spacing.sm) {
+                SectionLabel(text: "Output delay")
+                SegmentedBar(
+                    selection: Binding(
+                        get: { channel.delay },
+                        set: { channel.delay = $0 }
+                    ),
+                    options: LatencyPreset.allCases,
+                    // Short labels so four segments share the row without
+                    // overflow — the full "Normal (+120 ms)" rides in the help.
+                    label: { delayShortLabel($0) }
+                )
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
+        }
+    }
+
+    /// Compact, segment-friendly label for a latency preset (the full label is
+    /// long; equal segments need a tight string).
+    private func delayShortLabel(_ preset: LatencyPreset) -> String {
+        switch preset {
+        case .lowest: return "Lowest"
+        case .normal: return "Normal"
+        case .smooth: return "Smooth"
+        case .safe:   return "Safe"
         }
     }
 }

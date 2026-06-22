@@ -18,9 +18,18 @@ struct AirliveBridgeApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(model)
-                .frame(minWidth: 980, minHeight: 620)
+                // Min size keeps the three zones (Channels 240 + center + Outputs
+                // 280, plus dividers) from overlapping; the center still has room
+                // for the 16:9 preview + control panel at the floor.  Ideal size
+                // is the comfortable default the window opens at on first launch
+                // so nothing overflows out of the box (the center pane scrolls).
+                .frame(minWidth: 1040, idealWidth: 1200,
+                       minHeight: 680, idealHeight: 760)
                 .preferredColorScheme(.dark)
         }
         .windowStyle(.hiddenTitleBar)
+        // First-launch window size — matches the ideal content frame so the
+        // operator never has to resize to see all three zones.
+        .defaultSize(width: 1200, height: 760)
     }
 }

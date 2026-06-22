@@ -25,6 +25,16 @@ then Windows.
 2. **Output order** — proposed NDI → SRT/RTSP, since NDI alone unlocks
    vMix / ProPresenter / Wirecast.
 
+## Backlog (post-MVP)
+
+- **Multiview + program routing (switcher-lite).** Show all channels in a
+  multiview; choose what goes to air; route a *selected* camera to a *selected*
+  output seamlessly — don't blindly publish every signal, pick which camera goes
+  where and switch without glitches.
+- **Control-panel / settings UX redesign.** Card-based quick-select, lens-first
+  with ISO-compensation, clean sliders (no track artifacts), tidy segmented
+  controls, tighter spacing, window auto-fit. (First UX pass — in progress.)
+
 ## Out of scope
 
 Editing the camera / studio / AirliveCore apps. The wire protocol is frozen;

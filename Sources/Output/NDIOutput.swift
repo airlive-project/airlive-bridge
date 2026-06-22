@@ -75,9 +75,13 @@ private struct NDIlib_video_frame_v2_t {
 // C function-pointer typealiases for the five entry points we resolve.
 private typealias NDIlib_initialize_t        = @convention(c) () -> Bool
 private typealias NDIlib_destroy_t           = @convention(c) () -> Void
-private typealias NDIlib_send_create_t_fn    = @convention(c) (UnsafePointer<NDIlib_send_create_t>?) -> OpaquePointer?
+// NOTE: @convention(c) function types may only reference C-representable
+// parameter types — a pointer to a Swift struct is NOT (hence the "not
+// representable in Objective-C" errors). We pass the descriptor/frame structs
+// as UnsafeRawPointer and bridge with withUnsafePointer(to:) at the call sites.
+private typealias NDIlib_send_create_t_fn    = @convention(c) (UnsafeRawPointer?) -> OpaquePointer?
 private typealias NDIlib_send_destroy_t      = @convention(c) (OpaquePointer?) -> Void
-private typealias NDIlib_send_send_video_v2_t = @convention(c) (OpaquePointer?, UnsafePointer<NDIlib_video_frame_v2_t>?) -> Void
+private typealias NDIlib_send_send_video_v2_t = @convention(c) (OpaquePointer?, UnsafeRawPointer?) -> Void
 
 // MARK: - Runtime loader
 
@@ -289,7 +293,7 @@ final class NDIOutput: VideoOutput {
 
         // send_send_video_v2 reads p_data synchronously here; safe to unlock on
         // return (defer above).  We never retain pixelBuffer past this call.
-        withUnsafePointer(to: &frame) { sendVideo(sender, $0) }
+        withUnsafePointer(to: &frame) { sendVideo(sender, UnsafeRawPointer($0)) }
     }
 
     // MARK: Sender lifecycle (lock held by callers)
@@ -316,7 +320,7 @@ final class NDIOutput: VideoOutput {
                 clock_video: true,   // pace sends to the video frame rate
                 clock_audio: false
             )
-            return withUnsafePointer(to: &desc) { create($0) }
+            return withUnsafePointer(to: &desc) { create(UnsafeRawPointer($0)) }
         }
 
         guard let created else {

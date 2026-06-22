@@ -10,8 +10,12 @@
 //   • Bytes → PacketParser → VTDecompressionSession → CVPixelBuffer, with the
 //     jitter / playout-delay buffer (lower-envelope minimum-delay skew tracking)
 //     ported verbatim so frames present on a stable, operator-chosen delay.
-//   • Per presented frame: publish to the channel's `latestFrame` (when
-//     `previewEnabled`) AND forward the buffer to every `VideoOutput`.
+//   • Per presented frame: push the buffer down the channel's DIRECT preview
+//     pipe (`channel.onFrame`, when `previewEnabled`) AND forward it to every
+//     `VideoOutput`.  Per-frame pixels NEVER go through a `@Published` property
+//     (that froze the preview on one frame and risked publish-during-update
+//     warnings); only the low-frequency `latestFrame` gate / `isConnected` /
+//     `remote` are published, on the main queue.
 //   • Control channel (`.control` packets) is full-duplex on the SAME socket:
 //     inbound `state` snapshots update `channel.remote`; outbound `set...` /
 //     tally `setCue` commands are framed and written back.
@@ -35,9 +39,10 @@ import QuartzCore
 
 /// One channel's network receiver — listener, Bonjour advertisement, H.264
 /// decoder, jitter buffer, and control duplex.  Owned by its `BridgeChannel`;
-/// pushes decoded frames / state / connection status back onto the channel's
-/// `@Published` properties on the main queue, and fans every decoded frame out
-/// to the channel's `VideoOutput`s.
+/// pushes decoded frames down the channel's direct preview pipe
+/// (`onFrame`/`onClear`), publishes only the low-frequency state / connection
+/// status onto the channel's `@Published` properties on the main queue, and
+/// fans every decoded frame out to the channel's `VideoOutput`s.
 final class BridgeChannelReceiver: ChannelReceiver {
 
     // ── Identity ──────────────────────────────────────────────────────────
@@ -361,7 +366,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
         anchorSet = false
         formatDescription = nil
         publishConnected(false)
-        publishFrame(nil)                         // UI clears to "no signal"
+        publishSignalCleared()                    // UI returns to "no signal"
     }
 
     private func receive(from conn: NWConnection) {
@@ -652,8 +657,8 @@ final class BridgeChannelReceiver: ChannelReceiver {
         }
     }
 
-    /// Promote the freshest now-due frame: publish it to the channel's
-    /// `latestFrame` (when `previewEnabled`) and forward it to every output.
+    /// Promote the freshest now-due frame: push it down the channel's direct
+    /// preview pipe (when `previewEnabled`) and forward it to every output.
     private func promoteDue() {
         let now = CACurrentMediaTime()
         var promoted: CVPixelBuffer?
@@ -669,24 +674,39 @@ final class BridgeChannelReceiver: ChannelReceiver {
     }
 
     /// Single presentation point: forward to ALL outputs (always — a hidden
-    /// preview must still publish downstream), and update the preview frame only
-    /// when the operator is watching this channel (`previewEnabled`).
+    /// preview must still publish downstream), and push the frame into the
+    /// preview's DIRECT pipe (`channel.onFrame`) when the operator is watching
+    /// this channel (`previewEnabled`).
+    ///
+    /// The per-frame pixels go through `onFrame` — a plain closure straight to a
+    /// hosted CALayer — NOT through any `@Published` property, so the preview
+    /// repaints smoothly at the capture frame rate and a `@Published` write
+    /// never lands during a SwiftUI view update.  The only published flip here
+    /// is the LOW-FREQUENCY `latestFrame` gate (first frame in), guarded so it
+    /// fires once, not per frame.
     private func present(_ buffer: CVPixelBuffer) {
         // monotonic host time in ns for output pacing/stamping.
         let timeNs = UInt64(CACurrentMediaTime() * 1_000_000_000.0)
 
-        // Output fan-out runs on the main queue because `BridgeChannel.outputs`
-        // is `@Published` (UI-bound, main-isolated); reading it off-main is UB.
-        // The buffer is IOSurface-backed, so handing it across threads is a
+        // Output fan-out + preview push run on the main queue: `onFrame` drives
+        // an AppKit CALayer (best touched on main; the hosted layer makes it
+        // safe but we keep it main for simplicity), and `BridgeChannel.outputs`
+        // is `@Published` (UI-bound, main-isolated) so reading it off-main is
+        // UB.  The buffer is IOSurface-backed, so handing it across threads is a
         // retained-CF pass, not a copy.
         DispatchQueue.main.async { [weak self] in
             guard let self, let channel = self.channel else { return }
             for output in channel.outputs where output.isLive {
                 output.send(buffer, timeNs: timeNs)
             }
-            if channel.previewEnabled {
-                channel.latestFrame = buffer
-            }
+            guard channel.previewEnabled else { return }
+            // Per-frame: direct pipe, zero SwiftUI state.
+            channel.onFrame?(buffer)
+            // Once-per-session: flip the published "no signal" gate on the
+            // first frame only (guarded — never a per-frame published write).
+            // We store the FIRST buffer so a legacy `PreviewView(frame:)` caller
+            // still shows something; the live path uses `onFrame`.
+            if channel.latestFrame == nil { channel.latestFrame = buffer }
         }
     }
 
@@ -696,8 +716,15 @@ final class BridgeChannelReceiver: ChannelReceiver {
         DispatchQueue.main.async { [weak self] in self?.channel?.isConnected = connected }
     }
 
-    private func publishFrame(_ buffer: CVImageBuffer?) {
-        DispatchQueue.main.async { [weak self] in self?.channel?.latestFrame = buffer }
+    /// Disconnect / format-change cleanup on the main queue: clear the published
+    /// `latestFrame` gate (returns the UI to "no signal") and clear the preview
+    /// layer directly so no stale frame lingers under the overlay.
+    private func publishSignalCleared() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let channel = self.channel else { return }
+            channel.latestFrame = nil
+            channel.onClear?()
+        }
     }
 
     private func publishRemote(_ snapshot: StateSnapshot) {

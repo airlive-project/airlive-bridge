@@ -32,9 +32,34 @@ final class BridgeChannel: ObservableObject, Identifiable {
     /// True while an iPhone is connected to this channel's receiver.
     @Published var isConnected: Bool = false
 
-    /// Latest decoded frame, for the preview surface.  Updated by the receiver
-    /// on the main queue; nil until the first frame (or after disconnect).
+    /// "Has a live picture" gate for the preview overlay — a LOW-FREQUENCY
+    /// published flag, NOT a per-frame buffer.  It is set (to the first decoded
+    /// buffer) exactly once when video starts, and cleared (nil) on disconnect /
+    /// format change; it does NOT change per frame.  The actual per-frame pixels
+    /// flow through `onFrame` (a direct CALayer pipe), never through this
+    /// `@Published` — routing video frames through `@Published` only repaints on
+    /// SwiftUI's diff cycle and froze the preview on one frame.  Views read
+    /// `latestFrame == nil` only to decide whether to show the "no signal"
+    /// overlay; they must NOT use it as the live frame source (use
+    /// `PreviewView(channel:)`).
     @Published var latestFrame: CVImageBuffer?
+
+    /// DIRECT per-frame sink — the thermal-/repaint-safe video pipe.  The
+    /// `PreviewView` registers a closure here on appear and clears it on
+    /// disappear; the receiver calls it (on the main queue, when
+    /// `previewEnabled`) for EVERY decoded frame, pushing the buffer straight
+    /// into a hosted `CALayer` and bypassing SwiftUI state entirely.  This is
+    /// deliberately NOT `@Published`: per-frame data routed through `@Published`
+    /// only repaints on SwiftUI's diff cycle, so the preview froze on one frame.
+    /// Plain stored property → mutating it never triggers a view update, and
+    /// invoking it pushes pixels with zero SwiftUI involvement.
+    var onFrame: ((CVImageBuffer) -> Void)?
+
+    /// Companion to `onFrame`: clear the preview layer to black ("no signal").
+    /// Called by the receiver on disconnect / format change so a stale last
+    /// frame doesn't linger under the overlay.  Also NOT `@Published` — it's a
+    /// direct CALayer pipe, same as `onFrame`.
+    var onClear: (() -> Void)?
 
     /// The camera's last-reported state (ISO, lens, fps, …).  Drives the remote
     /// control UI.  nil until the first `.control` snapshot arrives.
@@ -96,6 +121,7 @@ final class BridgeChannel: ObservableObject, Identifiable {
         receiver?.stop()
         isConnected = false
         latestFrame = nil
+        onClear?()
     }
 
     // MARK: - Remote control
