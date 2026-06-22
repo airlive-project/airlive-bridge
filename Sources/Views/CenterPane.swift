@@ -1,0 +1,235 @@
+// CenterPane.swift — CENTER zone: the selected channel.
+//
+// Top to bottom: the 16:9 preview (tally border + ON AIR / PREVIEW badge +
+// hide-preview eye), the tally button row (Program / Preview / Off — sends
+// `setCue`), a delay-preset picker, then the camera CONTROL panel
+// (CameraControlPanel).  Everything here drives one channel; when no channel is
+// selected it shows a quiet empty state.
+//
+// Readback vs control: value labels come from `channel.remote` (the camera's
+// reported StateSnapshot); every knob sends a `ControlMessage` via
+// `channel.send(_:)`.  The two are deliberately separate — the operator turns a
+// knob, the command goes to the iPhone, and the iPhone's next snapshot confirms
+// the new value back into the labels.
+
+import SwiftUI
+
+struct CenterPane: View {
+    @ObservedObject var model: BridgeModel
+
+    var body: some View {
+        Group {
+            if let channel = model.selectedChannel {
+                ChannelDetail(channel: channel)
+                    // Re-create the detail subtree per channel so its local
+                    // @State (preview pane sizing, slider drafts) resets cleanly
+                    // when the selection changes.
+                    .id(channel.id)
+            } else {
+                emptyState
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.bgApp)
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: Spacing.md) {
+            Image(systemName: "rectangle.on.rectangle.angled")
+                .font(.system(size: 40))
+                .foregroundColor(Theme.textFaint)
+            Text("No channel selected")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundColor(Theme.textSecondary)
+            Text("Create or select a channel on the left.")
+                .font(.system(size: 12))
+                .foregroundColor(Theme.textFaint)
+        }
+    }
+}
+
+// MARK: - One channel's detail
+
+private struct ChannelDetail: View {
+    @ObservedObject var channel: BridgeChannel
+    @ObservedObject private var tally = TallyStore.shared
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: Spacing.lg) {
+                previewSection
+                tallyRow
+                delayRow
+                CameraControlPanel(channel: channel)
+            }
+            .padding(Spacing.xl)
+        }
+    }
+
+    // MARK: Preview
+
+    private var previewSection: some View {
+        VStack(alignment: .leading, spacing: Spacing.sm) {
+            HStack {
+                SectionLabel(text: channel.name)
+                Spacer()
+                hidePreviewToggle
+            }
+            previewPane
+        }
+    }
+
+    private var hidePreviewToggle: some View {
+        Button {
+            channel.previewEnabled.toggle()
+        } label: {
+            HStack(spacing: Spacing.xs) {
+                Image(systemName: channel.previewEnabled ? "eye" : "eye.slash")
+                    .font(.system(size: 11))
+                Text(channel.previewEnabled ? "Hide preview" : "Show preview")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .padding(.horizontal, Spacing.sm)
+            .frame(height: 26)
+        }
+        .bridgeButton(selected: !channel.previewEnabled)
+        .help("Stop rendering this preview to save GPU/CPU while it isn't being watched.")
+    }
+
+    private var previewPane: some View {
+        ZStack {
+            if channel.previewEnabled {
+                PreviewView(frame: channel.latestFrame,
+                            rotation: channel.remote?.outputRotation ?? 0,
+                            enabled: true)
+                if channel.latestFrame == nil {
+                    noSignalOverlay
+                }
+            } else {
+                hiddenPlaceholder
+            }
+            tallyBadge
+        }
+        .aspectRatio(16.0 / 9.0, contentMode: .fit)
+        .frame(maxWidth: .infinity)
+        .background(Color.black)
+        .clipShape(RoundedRectangle(cornerRadius: Radius.panel, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: Radius.panel, style: .continuous)
+                .stroke(tallyBorderColor, lineWidth: tallyBorderWidth)
+        )
+    }
+
+    private var noSignalOverlay: some View {
+        VStack(spacing: Spacing.sm) {
+            Image(systemName: channel.isConnected ? "hourglass" : "wifi.slash")
+                .font(.system(size: 26))
+                .foregroundColor(Theme.textFaint)
+            Text(channel.isConnected ? "Connected — waiting for video"
+                                     : "Waiting for camera to connect")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(Theme.textSecondary)
+        }
+    }
+
+    private var hiddenPlaceholder: some View {
+        VStack(spacing: Spacing.sm) {
+            Image(systemName: "eye.slash")
+                .font(.system(size: 26))
+                .foregroundColor(Theme.textFaint)
+            Text("Preview hidden — saving GPU")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(Theme.textSecondary)
+            Text("Frames are still received and published downstream.")
+                .font(.system(size: 10))
+                .foregroundColor(Theme.textFaint)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.bgPanel)
+    }
+
+    // MARK: Tally badge / border
+
+    private var currentTally: TallyState { tally.state(for: channel.id) }
+
+    @ViewBuilder
+    private var tallyBadge: some View {
+        if currentTally != .off {
+            VStack {
+                HStack {
+                    HStack(spacing: Spacing.xs) {
+                        Circle()
+                            .fill(Color.white)
+                            .frame(width: 6, height: 6)
+                        Text(currentTally == .program ? "ON AIR" : "PREVIEW")
+                            .font(.system(size: 11, weight: .bold))
+                            .tracking(0.5)
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, Spacing.sm)
+                    .padding(.vertical, Spacing.xs)
+                    .background(
+                        Capsule(style: .continuous).fill(currentTally.accent)
+                    )
+                    Spacer()
+                }
+                Spacer()
+            }
+            .padding(Spacing.md)
+        }
+    }
+
+    private var tallyBorderColor: Color {
+        currentTally == .off ? Theme.stroke : currentTally.accent
+    }
+
+    private var tallyBorderWidth: CGFloat {
+        currentTally == .off ? 1 : 3
+    }
+
+    // MARK: Tally buttons
+
+    private var tallyRow: some View {
+        VStack(alignment: .leading, spacing: Spacing.sm) {
+            SectionLabel(text: "Tally")
+            HStack(spacing: Spacing.sm) {
+                ForEach(TallyState.allCases) { state in
+                    tallyButton(state)
+                }
+            }
+        }
+    }
+
+    private func tallyButton(_ state: TallyState) -> some View {
+        let isCurrent = currentTally == state
+        return Button {
+            tally.set(state, for: channel.id)
+            channel.send(.setCue(state.rawValue))
+        } label: {
+            Text(state.label)
+                .font(.system(size: 13, weight: .semibold))
+                .frame(maxWidth: .infinity)
+                .frame(height: 34)
+        }
+        .bridgeButton(selected: isCurrent,
+                      accent: state == .off ? Theme.accentBlue : state.accent)
+    }
+
+    // MARK: Delay
+
+    private var delayRow: some View {
+        VStack(alignment: .leading, spacing: Spacing.sm) {
+            SectionLabel(text: "Output delay")
+            Picker("", selection: Binding(
+                get: { channel.delay },
+                set: { channel.delay = $0 }
+            )) {
+                ForEach(LatencyPreset.allCases) { preset in
+                    Text(preset.label).tag(preset)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+        }
+    }
+}
