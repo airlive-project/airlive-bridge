@@ -16,10 +16,14 @@ targets:
       properties:
         CFBundleDisplayName: Airlive Bridge
         LSMinimumSystemVersion: "13.0"
-        # Receiving the camera stream needs Bonjour + local-network access.
-        NSLocalNetworkUsageDescription: "Airlive Bridge discovers and receives Airlive Camera streams on your local network."
+        # Local-network access is needed twice: to receive the iPhone stream
+        # (_airlive._tcp) AND for NDI's mDNS discovery (_ndi._tcp) — without the
+        # NDI service type declared, macOS can block the NDI source from being
+        # discovered by receivers like OBS/DistroAV.
+        NSLocalNetworkUsageDescription: "Airlive Bridge discovers Airlive Camera streams and publishes NDI on your local network."
         NSBonjourServices:
           - _airlive._tcp
+          - _ndi._tcp
     settings:
       base:
         PRODUCT_NAME: Airlive Bridge
