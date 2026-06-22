@@ -35,6 +35,31 @@ then Windows.
   with ISO-compensation, clean sliders (no track artifacts), tidy segmented
   controls, tighter spacing, window auto-fit. (First UX pass — in progress.)
 
+## Security (P1 — cross-cutting, needs the apps team)
+
+**Threat model (deliberately narrow):** the LAN stream is NOT secret — anyone may
+watch the video. The only real risk is a **prankster on the same network with the
+same app** grabbing a channel slot or mixing a fake feed into someone's multiview.
+This is an **access** problem, not a confidentiality one.
+
+**P1 — receiver-password auth (challenge-response, HMAC).** "Like a WiFi password":
+the receiver owns the password; the iPhone enters it once (cached in Keychain),
+re-prompts only on first connect or after a password change; rotating the password
+revokes everyone. **Off by default** (current open behaviour unchanged).
+- Wire: receiver sends a one-shot `nonce`; camera replies `HMAC-SHA256(password, nonce)`;
+  receiver verifies before accepting video. Password never crosses the wire; nonce is
+  single-use (replay-proof). New optional packet types in AirliveCore (version byte
+  keeps back-compat).
+- Receiver adds: "Require password" toggle + field, anti-brute-force backoff, optional
+  "disconnect connected cameras now" on change. We implement this side in Bridge + the
+  OBS plugin once AirliveCore + camera ship the handshake.
+- **Cost: one HMAC per connection — zero per-frame, zero thermal impact.**
+
+**NOT doing — TLS / stream encryption.** The video isn't secret, so encrypting it
+buys nothing for our threat model and costs thermal budget. We accept that a deep,
+equipped attacker could sniff the plaintext feed; password auth filters the 99%
+(pranksters / accidental cross-connects) that actually matter.
+
 ## Out of scope
 
 Editing the camera / studio / AirliveCore apps. The wire protocol is frozen;
