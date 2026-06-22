@@ -276,6 +276,10 @@ private struct OutputCard: View {
             set: { newValue in
                 if newValue { output.start() } else { output.stop() }
                 refresh += 1
+                // `output.isLive` changed but the `outputs` array didn't, so the
+                // channel row's "→ NDI / Not publishing" line won't refresh on its
+                // own — nudge the channel so its observers re-read live outputs.
+                channel.objectWillChange.send()
             }
         ))
         .toggleStyle(.switch)

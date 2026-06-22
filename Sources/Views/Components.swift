@@ -497,10 +497,20 @@ struct SliderRow: View {
     @Binding var value: Double
     let range: ClosedRange<Double>
     var step: Double = 0
+    /// How much the ◀ / ▶ stepper arrows add or subtract per click.  0 falls
+    /// back to `step` (or 1/20 of the range when there's no step), so callers
+    /// only set this when the arrows should jump in coarser units than the drag.
+    var arrowStep: Double = 0
     var enabled: Bool = true
-    /// Called once when the operator finishes dragging (mouse-up), with the
-    /// final value — this is the moment to send a control command.
+    /// Called once when the operator finishes dragging (mouse-up) OR taps an
+    /// arrow, with the final value — the moment to send a control command.
     var onCommit: (Double) -> Void
+
+    private var stepAmount: Double {
+        if arrowStep > 0 { return arrowStep }
+        if step > 0 { return step }
+        return Swift.max((range.upperBound - range.lowerBound) / 20, 0.01)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.xs) {
@@ -513,13 +523,36 @@ struct SliderRow: View {
                     .font(.system(size: 12, weight: .regular).monospacedDigit())
                     .foregroundColor(enabled ? Theme.textSecondary : Theme.textFaint)
             }
-            StyledSlider(value: $value,
-                         range: range,
-                         step: step,
-                         onChange: { v in if enabled { onCommit(v) } })
-                .allowsHitTesting(enabled)
+            HStack(spacing: Spacing.sm) {
+                arrow("chevron.left") { adjust(by: -stepAmount) }
+                StyledSlider(value: $value,
+                             range: range,
+                             step: step,
+                             onChange: { v in if enabled { onCommit(v) } })
+                    .allowsHitTesting(enabled)
+                arrow("chevron.right") { adjust(by: stepAmount) }
+            }
         }
         .opacity(enabled ? 1 : 0.45)
+    }
+
+    /// A compact stepper-arrow button flanking the slider.
+    private func arrow(_ system: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: system)
+                .font(.system(size: 11, weight: .bold))
+                .frame(width: 26, height: ControlMetrics.sliderKnob)
+        }
+        .bridgeButton(corner: Radius.control)
+        .disabled(!enabled)
+    }
+
+    /// Step the value by `delta`, clamped to the range, and commit it.
+    private func adjust(by delta: Double) {
+        guard enabled else { return }
+        let next = Swift.min(range.upperBound, Swift.max(range.lowerBound, value + delta))
+        value = next
+        onCommit(next)
     }
 }
 

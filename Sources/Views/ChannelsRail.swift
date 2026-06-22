@@ -133,7 +133,6 @@ private struct ChannelRow: View {
         HStack(spacing: Spacing.sm) {
             VStack(alignment: .leading, spacing: Spacing.xs) {
                 nameLine
-                specLine
                 transferLine
             }
             Spacer(minLength: 0)
@@ -195,23 +194,6 @@ private struct ChannelRow: View {
                 }
             }
         }
-    }
-
-    /// Mini spec line read from the camera snapshot, e.g. "4K · 30 · Apple Log".
-    private var specLine: some View {
-        Text(specText)
-            .font(.system(size: 10, weight: .regular))
-            .foregroundColor(Theme.textFaint)
-            .lineLimit(1)
-    }
-
-    private var specText: String {
-        guard let remote = channel.remote else {
-            return channel.isConnected ? "Connected · waiting for state" : "Waiting for camera…"
-        }
-        let res = remote.resolution
-        let fps = remote.fps
-        return "\(res) · \(fps)fps · \(remote.colorSpace)"
     }
 
     /// Transfer status — WHERE this channel's video is going (the live outputs),

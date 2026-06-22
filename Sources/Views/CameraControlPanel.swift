@@ -135,7 +135,8 @@ struct CameraControlPanel: View {
                           valueText: "\(Int(iso))",
                           value: $iso,
                           range: 25...6400,
-                          step: 1,
+                          step: 10,            // drag snaps to 10
+                          arrowStep: 50,       // arrows jump ±50
                           enabled: !exposureAuto) { v in
                     channel.send(.setISO(Float(v)))
                 }
@@ -144,6 +145,7 @@ struct CameraControlPanel: View {
                           value: $shutterDenom,
                           range: 24...8000,
                           step: 1,
+                          arrowStep: 10,
                           enabled: !exposureAuto) { v in
                     channel.send(.setShutter(Float(v)))
                 }
@@ -200,6 +202,7 @@ struct CameraControlPanel: View {
                           value: $wbKelvin,
                           range: 2500...10000,
                           step: 50,
+                          arrowStep: 100,
                           enabled: !whiteBalanceAuto) { v in
                     channel.send(.setWB(Float(v)))
                 }
@@ -208,6 +211,7 @@ struct CameraControlPanel: View {
                           value: $tint,
                           range: -150...150,
                           step: 1,
+                          arrowStep: 5,
                           enabled: !whiteBalanceAuto) { v in
                     channel.send(.setTint(Float(v)))
                 }
@@ -240,6 +244,7 @@ struct CameraControlPanel: View {
                           valueText: focusLabel,
                           value: $focus,
                           range: 0...1,
+                          arrowStep: 0.05,
                           enabled: !focusAuto) { v in
                     channel.send(.setFocusPosition(Float(v)))
                 }
@@ -264,6 +269,7 @@ struct CameraControlPanel: View {
                           value: $zoom,
                           range: 1...10,
                           step: 0.1,
+                          arrowStep: 0.5,
                           enabled: true) { v in
                     channel.send(.setZoom(Float(v)))
                 }
