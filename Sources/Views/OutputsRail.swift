@@ -1,9 +1,22 @@
 // OutputsRail.swift — RIGHT zone: "Publish to".
 //
-// One card per downstream output on the selected channel (NDI for now; SRT /
-// RTSP land in later phases).  Each card: an on/off control, a RENAMEABLE output
-// label ("what it sends" — the NDI source name), a config field, and a LIVE/OFF
-// status pill.  A footer button adds a new NDI output.
+// One card per downstream output on the selected channel.  NDI is FUNCTIONAL:
+// real `VideoOutput`s from `channel.outputs`, each with an on/off control, a
+// renameable source name, a config field and a LIVE/OFF pill.  Below them sit
+// PLACEHOLDER cards for the not-yet-shipped transports (SRT, RTSP, Virtual
+// Camera) so the operator can see the full protocol surface — they match the
+// kit's Card styling, carry a "Soon" pill, a representative (disabled) config
+// field and a disabled toggle.  A footer "Add output" menu lists all four kinds,
+// with NDI enabled and the rest marked "Soon".
+//
+// WHY the placeholders are NOT in `channel.outputs`: that array is the real
+// frame fan-out (the channel calls `send(_:timeNs:)` on every entry).  A
+// bûtaphoric SRT/RTSP/VCam card has no `VideoOutput` to fan frames to, so it is
+// a pure presentational view driven by `OutputKind` alone — adding a fake entry
+// to the model would mean a no-op sink in the live path and a broken add/remove
+// contract.  The placeholder kinds are derived from `OutputKind.allCases` minus
+// the implemented ones, so adding a real transport later automatically promotes
+// it from placeholder to a real card with zero edits here.
 //
 // Output model note: `VideoOutput` (NDIOutput) is a plain reference type, not an
 // ObservableObject — its `label`/`isLive` are stored properties.  The channel's
@@ -63,16 +76,33 @@ struct OutputsRail: View {
 private struct ChannelOutputs: View {
     @ObservedObject var channel: BridgeChannel
 
+    /// The not-yet-shipped transports, shown as placeholder cards under the real
+    /// NDI outputs.  Derived from the enum so it tracks `OutputKind` automatically.
+    private var placeholderKinds: [OutputKind] {
+        OutputKind.allCases.filter { !$0.isImplemented }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(spacing: Spacing.md) {
+                    // Real, functional NDI outputs first.
                     if channel.outputs.isEmpty {
-                        emptyState
+                        emptyNDIState
                     } else {
                         ForEach(channel.outputs, id: \.id) { output in
                             OutputCard(channel: channel, output: output)
                         }
+                    }
+
+                    // A quiet caption separating the live outputs from the
+                    // coming-soon protocols, so the placeholders never read as
+                    // broken real outputs.
+                    comingSoonHeader
+
+                    // Bûtaphoric placeholder cards — visually complete, inert.
+                    ForEach(placeholderKinds) { kind in
+                        PlaceholderOutputCard(kind: kind)
                     }
                 }
                 // Top padding stays small so the first card sits just under the
@@ -87,7 +117,9 @@ private struct ChannelOutputs: View {
         }
     }
 
-    private var emptyState: some View {
+    /// Empty-state shown when the channel has no NDI outputs yet.  (The
+    /// placeholder cards still appear below it so the rail is never empty.)
+    private var emptyNDIState: some View {
         VStack(spacing: Spacing.sm) {
             Image(systemName: "antenna.radiowaves.left.and.right")
                 .font(.system(size: 24))
@@ -104,20 +136,46 @@ private struct ChannelOutputs: View {
         .padding(.vertical, Spacing.xl)
     }
 
+    /// Caption above the placeholder block.
+    private var comingSoonHeader: some View {
+        HStack {
+            SectionLabel(text: "More protocols")
+            Spacer()
+            SoonPill()
+        }
+        .padding(.top, Spacing.xs)
+    }
+
+    /// "Add output" menu: NDI is enabled and adds a real output; SRT / RTSP /
+    /// Virtual Camera are listed but disabled ("Soon") so the operator sees the
+    /// full roadmap of where a channel will be publishable.
     private var addButton: some View {
-        Button {
-            let name = defaultOutputName()
-            channel.addOutput(NDIOutput(label: name))
+        Menu {
+            ForEach(OutputKind.allCases) { kind in
+                Button {
+                    guard kind.isImplemented else { return }
+                    channel.addOutput(NDIOutput(label: defaultOutputName()))
+                } label: {
+                    if kind.isImplemented {
+                        Label("Add \(kind.displayName) output", systemImage: kind.symbolName)
+                    } else {
+                        Label("\(kind.displayName) — Soon", systemImage: kind.symbolName)
+                    }
+                }
+                .disabled(!kind.isImplemented)
+            }
         } label: {
             HStack(spacing: Spacing.sm) {
                 Image(systemName: "plus")
                     .font(.system(size: 12, weight: .bold))
-                Text("Add NDI output")
+                Text("Add output")
                     .font(.system(size: 13, weight: .medium))
             }
             .frame(maxWidth: .infinity)
             .frame(height: 36)
         }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
         .bridgeButton(selected: false)
         .padding(Spacing.lg)
     }
@@ -132,7 +190,109 @@ private struct ChannelOutputs: View {
     }
 }
 
-// MARK: - One output card
+// MARK: - "Soon" pill
+
+/// A small "Soon" badge for not-yet-shipped protocols.  Yellow (caution/staged)
+/// fill with DARK text — yellow + white would be the worst contrast in the kit,
+/// so the on-yellow text is the app canvas colour, matching `PillToggle`'s
+/// `onText` discipline for light accents.
+private struct SoonPill: View {
+    var body: some View {
+        Text("SOON")
+            .font(.system(size: 9, weight: .bold))
+            .tracking(0.5)
+            .foregroundColor(Theme.bgApp)
+            .padding(.horizontal, Spacing.sm)
+            .padding(.vertical, 2)
+            .background(Capsule(style: .continuous).fill(Theme.accentYellow))
+    }
+}
+
+// MARK: - Placeholder (non-functional) output card
+
+/// A visually-complete but INERT card for a transport that isn't implemented
+/// yet.  Same `Card` surface and layout as a real `OutputCard` — kind badge +
+/// "Soon" pill, a representative config field, and a disabled toggle — but every
+/// control is non-interactive and the whole card is dimmed so the operator reads
+/// it as "coming soon", not "broken".  Drives entirely off `OutputKind`; it owns
+/// no `VideoOutput` and never touches the channel.
+private struct PlaceholderOutputCard: View {
+    let kind: OutputKind
+
+    var body: some View {
+        Card {
+            VStack(alignment: .leading, spacing: Spacing.md) {
+                headerRow
+                configField
+            }
+        }
+        // Dim the whole card so it reads as inactive, and block all hit-testing
+        // so nothing inside is tappable / editable — bûtaphoric by construction.
+        .opacity(0.6)
+        .allowsHitTesting(false)
+    }
+
+    // MARK: Header — kind badge + "Soon" + disabled toggle
+
+    private var headerRow: some View {
+        HStack(spacing: Spacing.sm) {
+            kindBadge
+            Spacer()
+            SoonPill()
+            // A real-looking but disabled switch, locked off.
+            Toggle("", isOn: .constant(false))
+                .toggleStyle(.switch)
+                .tint(Theme.accentRed)
+                .labelsHidden()
+                .disabled(true)
+        }
+    }
+
+    private var kindBadge: some View {
+        HStack(spacing: Spacing.xs) {
+            Image(systemName: kind.symbolName)
+                .font(.system(size: 10, weight: .semibold))
+            Text(kind.displayName.uppercased())
+                .font(.system(size: 10, weight: .bold))
+                .tracking(1.0)
+        }
+        .foregroundColor(Theme.textSecondary)
+        .padding(.horizontal, Spacing.sm)
+        .padding(.vertical, 3)
+        .background(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(Theme.bgSelected)
+        )
+    }
+
+    // MARK: Representative (disabled) config field
+
+    private var configField: some View {
+        VStack(alignment: .leading, spacing: Spacing.xs) {
+            SectionLabel(text: kind.configFieldLabel)
+            // Static text styled like the real TextField, never editable.
+            HStack {
+                Text(kind.configFieldExample)
+                    .font(.system(size: 12).monospaced())
+                    .foregroundColor(Theme.textFaint)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, Spacing.sm)
+            .frame(height: 28)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+                    .fill(Theme.bgApp)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+                    .stroke(Theme.stroke, lineWidth: 1)
+            )
+        }
+    }
+}
+
+// MARK: - One output card (real, functional — NDI today)
 
 /// A single output card.  Because `VideoOutput` is not observable, we keep a
 /// local `refresh` token bumped on every mutation so the pill / field re-read
@@ -152,7 +312,7 @@ private struct OutputCard: View {
         // re-read the output's fresh `isLive` / `label`.
         // Forces body re-evaluation when `refresh` increments (VideoOutput is
         // not an ObservableObject, so SwiftUI has no other dependency on it).
-        let _ = refresh
+        _ = refresh
         return Card {
             VStack(alignment: .leading, spacing: Spacing.md) {
                 headerRow
@@ -178,16 +338,20 @@ private struct OutputCard: View {
     }
 
     private var kindBadge: some View {
-        Text(output.kind.rawValue.uppercased())
-            .font(.system(size: 10, weight: .bold))
-            .tracking(1.0)
-            .foregroundColor(Theme.textSecondary)
-            .padding(.horizontal, Spacing.sm)
-            .padding(.vertical, 3)
-            .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(Theme.bgSelected)
-            )
+        HStack(spacing: Spacing.xs) {
+            Image(systemName: output.kind.symbolName)
+                .font(.system(size: 10, weight: .semibold))
+            Text(output.kind.displayName.uppercased())
+                .font(.system(size: 10, weight: .bold))
+                .tracking(1.0)
+        }
+        .foregroundColor(Theme.textSecondary)
+        .padding(.horizontal, Spacing.sm)
+        .padding(.vertical, 3)
+        .background(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(Theme.bgSelected)
+        )
     }
 
     private var onOffToggle: some View {
@@ -238,8 +402,8 @@ private struct OutputCard: View {
 
     private var configField: some View {
         VStack(alignment: .leading, spacing: Spacing.xs) {
-            SectionLabel(text: configLabel)
-            TextField(configPlaceholder, text: $config)
+            SectionLabel(text: output.kind.configFieldLabel)
+            TextField(output.kind.configFieldExample, text: $config)
                 .textFieldStyle(.plain)
                 .font(.system(size: 12).monospaced())
                 .foregroundColor(Theme.textSecondary)
@@ -253,22 +417,6 @@ private struct OutputCard: View {
                     RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
                         .stroke(Theme.stroke, lineWidth: 1)
                 )
-        }
-    }
-
-    private var configLabel: String {
-        switch output.kind {
-        case .ndi:  return "NDI group (optional)"
-        case .srt:  return "SRT destination"
-        case .rtsp: return "RTSP mount point"
-        }
-    }
-
-    private var configPlaceholder: String {
-        switch output.kind {
-        case .ndi:  return "public"
-        case .srt:  return "srt://host:port"
-        case .rtsp: return "/live/cam"
         }
     }
 
@@ -289,6 +437,32 @@ private struct OutputCard: View {
                 .foregroundColor(Theme.accentRed)
             }
             .buttonStyle(.plain)
+        }
+    }
+}
+
+// MARK: - Per-kind config field copy
+
+/// The config field's caption and example value, per transport.  ONE source of
+/// truth shared by the real `OutputCard` (label + text-field placeholder) and the
+/// placeholder cards (label + static example), so the SRT/RTSP/VCam wording can
+/// never drift between the two.
+private extension OutputKind {
+    var configFieldLabel: String {
+        switch self {
+        case .ndi:  return "NDI group (optional)"
+        case .srt:  return "SRT destination"
+        case .rtsp: return "RTSP mount point"
+        case .vcam: return "Virtual Camera name"
+        }
+    }
+
+    var configFieldExample: String {
+        switch self {
+        case .ndi:  return "public"
+        case .srt:  return "srt://host:port"
+        case .rtsp: return "rtsp://0.0.0.0:8554/live/cam"
+        case .vcam: return "Airlive Camera"
         }
     }
 }

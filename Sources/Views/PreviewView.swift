@@ -1,51 +1,50 @@
-// PreviewView.swift — DIRECT live-frame surface for one channel.
+// PreviewView.swift — live-frame surface for one channel.
 //
-// Renders a `BridgeChannel`'s decoded frames by pointing a hosted CALayer's
-// `contents` straight at each IOSurface-backed `CVPixelBuffer` the receiver
-// decodes — the thermal-safe "decode once → show" path ported from Studio's
-// MirrorVideoView.  The CRITICAL difference from a naïve SwiftUI binding:
+// Renders a `BridgeChannel`'s decoded frames by HOSTING the channel's own
+// `AVSampleBufferDisplayLayer` — the canonical Apple path for a continuous
+// CVPixelBuffer / CMSampleBuffer stream, ported from Studio's `LiveVideoView`
+// (which hosts a provider-owned layer).  The design points that keep the
+// preview live and re-creation-proof:
 //
-//   • The per-frame buffer is pushed through the channel's DIRECT pipe
-//     (`channel.onFrame`), NOT a `@Published` property.  A `@Published` frame
-//     only repaints on SwiftUI's diff cycle, so the preview froze on one
-//     frame; routing pixels through a plain closure straight into the layer
-//     gives smooth, continuous video with zero SwiftUI involvement per frame.
-//   • `CALayer.contents = pixelBuffer` is ZERO-COPY — Core Animation samples
-//     the IOSurface in the WindowServer, no per-frame blit on our side.
-//   • `contentsGravity = .resizeAspect` letterboxes / downscales on the GPU
-//     for free, so a 4K buffer in a small pane costs nothing extra.
-//   • We HOST the layer (`self.layer = contentLayer` BEFORE `wantsLayer`) so
-//     `contents` is ours to mutate without touching any NSView API — a busy
-//     main thread can never freeze the preview.
+//   • The display layer is owned by the CHANNEL (`channel.displayLayer`), not
+//     by this view.  SwiftUI re-instantiates `NSViewRepresentable`s freely;
+//     because the layer outlives the view, a re-created `PreviewView` just
+//     re-attaches the SAME layer (no frame pipe to re-wire, nothing to go nil).
+//     The receiver enqueues every decoded frame straight into that layer.
+//   • `AVSampleBufferDisplayLayer` is Metal-backed and owns its display timing;
+//     we enqueue frames for IMMEDIATE display (the receiver's jitter ring
+//     already gated latency), so the layer paints what it's handed.
+//   • `videoGravity = .resizeAspect` letterboxes / downscales on the GPU for
+//     free, so a 4K buffer in a small pane costs nothing extra.
+//   • The low-frequency rotation hint (`StateSnapshot.outputRotation`) flows the
+//     normal SwiftUI way via `updateNSView` — it changes a handful of times per
+//     session, not per frame.
 //
-// Wiring: a `Coordinator` registers the channel's `onFrame` / `onClear` sinks
-// on appear (in `makeNSView`) and clears them on disappear
-// (`dismantleNSView`), so exactly the channel currently shown receives frames.
-// The low-frequency rotation hint (`StateSnapshot.outputRotation`) flows the
-// normal SwiftUI way via `updateNSView` — it changes a handful of times per
-// session, not per frame.
+// A legacy `PreviewView(frame:rotation:enabled:)` initialiser is kept for
+// callers that hand a single buffer; it hosts its OWN plain `CALayer` and points
+// `contents` straight at the (IOSurface-backed) buffer — the zero-copy path
+// Studio's `MirrorVideoView` ships.  Prefer `PreviewView(channel:)` for live
+// video.
 
 import SwiftUI
 import AppKit
+import AVFoundation
 import CoreVideo
-import CoreImage
 
-/// SwiftUI wrapper that streams a channel's decoded frames into a hosted CALayer
-/// via the channel's direct `onFrame` pipe.
+/// SwiftUI wrapper that renders a channel's decoded frames.
 ///
-/// Primary use is `PreviewView(channel:)` — the direct pipe.  A
+/// Primary use is `PreviewView(channel:)` — hosts the channel-owned
+/// `AVSampleBufferDisplayLayer` the receiver enqueues into.  A
 /// `PreviewView(frame:rotation:enabled:)` initialiser is kept for callers that
-/// still hand a single buffer; it routes through the same hosted layer but is
-/// driven by `updateNSView` (one buffer per body eval), so prefer the channel
-/// initialiser for live video.
+/// still hand a single buffer.
 struct PreviewView: NSViewRepresentable {
 
-    /// The channel to stream from, when using the direct-pipe path.  nil for the
-    /// legacy single-frame initialiser.
+    /// The channel to stream from, when using the display-layer path.  nil for
+    /// the legacy single-frame initialiser.
     private let channel: BridgeChannel?
 
     /// Legacy single-frame value (only set by the `frame:` initialiser).
-    private let staticFrame: CVImageBuffer?
+    private let staticFrame: CVPixelBuffer?
 
     /// Clockwise rotation hint (StateSnapshot.outputRotation): 0 / 90 / 180 /
     /// 270.  The iPhone always sends landscape pixels; we rotate at present.
@@ -55,8 +54,8 @@ struct PreviewView: NSViewRepresentable {
     /// caller shows its own placeholder, this just avoids holding a buffer).
     private let enabled: Bool
 
-    /// DIRECT pipe — preferred for live video.  Registers `channel.onFrame` so
-    /// every decoded frame paints straight into the hosted layer.
+    /// Live path — preferred for video.  Hosts `channel.displayLayer`, which the
+    /// receiver enqueues every decoded frame into.
     init(channel: BridgeChannel) {
         self.channel = channel
         self.staticFrame = nil
@@ -64,139 +63,119 @@ struct PreviewView: NSViewRepresentable {
         self.enabled = channel.previewEnabled
     }
 
-    /// Legacy single-frame init — kept so existing call sites compile.  No
-    /// direct pipe; the buffer is whatever the caller passes per body eval.
-    init(frame: CVImageBuffer?, rotation: Int = 0, enabled: Bool = true) {
+    /// Legacy single-frame init — kept so existing call sites compile.  Hosts a
+    /// plain layer and points its `contents` at the buffer the caller passes per
+    /// body eval.
+    init(frame: CVPixelBuffer?, rotation: Int = 0, enabled: Bool = true) {
         self.channel = nil
         self.staticFrame = frame
         self.rotation = rotation
         self.enabled = enabled
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
-
     func makeNSView(context: Context) -> Surface {
         let surface = Surface()
-        // Register the direct pipe NOW (on appear) so frames flow into THIS
-        // surface for as long as it lives.  Cleared in dismantleNSView.
-        if let channel {
-            context.coordinator.bind(channel: channel, to: surface)
-        }
+        configure(surface)
         return surface
     }
 
     func updateNSView(_ nsView: Surface, context: Context) {
-        if channel != nil {
-            // Direct-pipe path: per-frame pixels arrive via onFrame; here we
-            // only push the (low-frequency) rotation + enabled state, and clear
-            // the layer when preview is disabled so a hidden pane holds nothing.
-            context.coordinator.update(rotation: rotation, enabled: enabled)
+        configure(nsView)
+    }
+
+    /// Push the current attachment + rotation into the surface.  For the live
+    /// path that's the channel's display layer (re-attached idempotently so a
+    /// re-created view re-hosts the same layer); for the legacy path it's the
+    /// single static buffer.
+    private func configure(_ surface: Surface) {
+        if let channel {
+            surface.attach(displayLayer: channel.displayLayer, rotation: rotation)
         } else {
-            // Legacy path: paint the single static frame.
-            nsView.update(frame: enabled ? staticFrame : nil, rotation: rotation)
-        }
-    }
-
-    static func dismantleNSView(_ nsView: Surface, coordinator: Coordinator) {
-        coordinator.unbind()
-    }
-
-    // MARK: - Coordinator (owns the channel↔surface frame wiring)
-
-    /// Holds the weak surface + channel and the registered sinks, so the direct
-    /// pipe is torn down cleanly when the view goes away (no retain cycle, no
-    /// stale closure firing into a dead layer).
-    final class Coordinator {
-        private weak var surface: Surface?
-        private weak var channel: BridgeChannel?
-        private var rotation: Int = 0
-
-        /// Register `onFrame` / `onClear` so the receiver streams straight into
-        /// `surface`.  Called on appear (main thread).
-        func bind(channel: BridgeChannel, to surface: Surface) {
-            self.surface = surface
-            self.channel = channel
-            self.rotation = channel.remote?.outputRotation ?? 0
-
-            // Per-frame pipe: capture the surface + current rotation weakly and
-            // paint directly.  The receiver invokes this on the main queue.
-            channel.onFrame = { [weak surface, weak self] buffer in
-                surface?.update(frame: buffer, rotation: self?.rotation ?? 0)
-            }
-            channel.onClear = { [weak surface] in
-                surface?.update(frame: nil, rotation: 0)
-            }
-        }
-
-        /// Push a low-frequency rotation / enabled change.  When preview is
-        /// disabled we clear the layer (the caller shows its own placeholder).
-        func update(rotation: Int, enabled: Bool) {
-            self.rotation = rotation
-            guard let surface else { return }
-            if !enabled {
-                surface.update(frame: nil, rotation: rotation)
-            }
-            // When enabled, the next onFrame call repaints with the new
-            // rotation — no need to force a paint of a possibly-stale buffer.
-        }
-
-        /// Clear the registered sinks on disappear so the channel never holds a
-        /// closure into a torn-down surface.
-        func unbind() {
-            channel?.onFrame = nil
-            channel?.onClear = nil
-            surface = nil
-            channel = nil
+            surface.show(staticFrame: enabled ? staticFrame : nil, rotation: rotation)
         }
     }
 
     // MARK: - Surface (hosted-layer NSView)
 
-    /// NSView hosting one CALayer we own, so its `contents` is ours to set.
-    /// SwiftUI re-instantiates representables freely, but the NSView (and its
-    /// layer) is reused across `updateNSView` calls, so frame swaps are
-    /// flicker-free.
+    /// NSView that hosts either the channel's `AVSampleBufferDisplayLayer` (live
+    /// path) or a plain `CALayer` whose `contents` we set (legacy single-frame
+    /// path).  The hosted layer is laid out to fill `bounds` and the rotation
+    /// transform is applied to it.
     final class Surface: NSView {
-        private let contentLayer = CALayer()
-        // Fallback rasterizer for the rare frame that isn't IOSurface-backed.
-        private let ciContext = CIContext()
+        /// The currently-hosted layer (channel display layer OR the legacy plain
+        /// layer).  Weak for the channel-owned case (the channel owns it);
+        /// `legacyLayer` keeps the legacy one alive.
+        private weak var hostedLayer: CALayer?
+        /// Owned plain layer for the legacy `frame:` path only.
+        private var legacyLayer: CALayer?
+        private var rotation: Int = 0
 
         override init(frame frameRect: NSRect) {
             super.init(frame: frameRect)
-            contentLayer.contentsGravity = .resizeAspect
-            contentLayer.backgroundColor = NSColor.black.cgColor
-            // Layer-HOSTING: set the layer BEFORE wantsLayer so we own it.
-            self.layer = contentLayer
-            self.wantsLayer = true
+            wantsLayer = true
+            layer?.backgroundColor = NSColor.black.cgColor
         }
 
         @available(*, unavailable)
         required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
 
-        /// Point the owned layer at `frame` and apply the rotation hint.  No-
-        /// animation transaction so frame swaps don't cross-fade.  Safe to call
-        /// per frame — it's two atomic CALayer property writes inside one
-        /// committed transaction.
-        func update(frame: CVImageBuffer?, rotation: Int) {
+        /// Host the channel-owned display layer (live path).  Idempotent — a
+        /// re-created `PreviewView` re-attaches the SAME layer, so we no-op if
+        /// it's already hosted (beyond refreshing the rotation).
+        func attach(displayLayer: AVSampleBufferDisplayLayer, rotation: Int) {
+            self.rotation = rotation
+            if hostedLayer !== displayLayer {
+                swapHosted(displayLayer)
+            }
+            applyRotation()
+        }
+
+        /// Legacy path: host a plain layer and point its `contents` at `buffer`.
+        /// `CALayer.contents = <IOSurface-backed CVPixelBuffer>` is the zero-copy
+        /// path Studio's MirrorVideoView ships — no CIContext / CGImage copy.
+        func show(staticFrame buffer: CVPixelBuffer?, rotation: Int) {
+            self.rotation = rotation
+            let plain: CALayer
+            if let legacyLayer, hostedLayer === legacyLayer {
+                plain = legacyLayer
+            } else {
+                plain = CALayer()
+                plain.contentsGravity = .resizeAspect
+                plain.backgroundColor = NSColor.black.cgColor
+                legacyLayer = plain
+                swapHosted(plain)
+            }
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            // Render via a COPIED CGImage each frame. Setting contents straight to
-            // a CVPixelBuffer doesn't reliably display, and pointing at the buffer's
-            // IOSurface risks VideoToolbox recycling it after our async hop (→ black/
-            // garbage). createCGImage copies the pixels, so the layer owns them.
-            if let pb = frame {
-                let ci = CIImage(cvPixelBuffer: pb)
-                if let cg = ciContext.createCGImage(ci, from: ci.extent) {
-                    contentLayer.contents = cg
-                }
-            } else {
-                contentLayer.contents = nil // black
-            }
-            // Option B vertical-stream: present the landscape buffer rotated.
-            // NEGATED angle — a hosting (non-flipped, y-up) layer rotates CCW for
-            // a positive angle, so negate to get the clockwise rotation the
-            // phone's upright preview expects.
-            contentLayer.transform = (rotation == 0)
+            plain.contents = buffer   // nil → black (no signal)
+            CATransaction.commit()
+            applyRotation()
+        }
+
+        /// Replace the hosted layer, dropping any previous sublayers so we never
+        /// accumulate them across attach/show swaps.
+        private func swapHosted(_ newLayer: CALayer) {
+            layer?.sublayers?.forEach { $0.removeFromSuperlayer() }
+            // The legacy plain layer is only kept alive while it is the hosted
+            // one; clear the strong ref when swapping to the channel layer so it
+            // deallocates.
+            if newLayer !== legacyLayer { legacyLayer = nil }
+            layer?.addSublayer(newLayer)
+            hostedLayer = newLayer
+            newLayer.contentsScale = window?.backingScaleFactor ?? 2.0
+            needsLayout = true
+        }
+
+        /// Apply the rotation hint to the hosted layer.  Option B vertical
+        /// stream: the iPhone sends LANDSCAPE pixels + a clockwise rotation hint.
+        /// NEGATED angle — a hosting (non-flipped, y-up) layer rotates CCW for a
+        /// positive angle, so negate to get the clockwise rotation the phone's
+        /// upright preview expects.
+        private func applyRotation() {
+            guard let hostedLayer else { return }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            hostedLayer.transform = (rotation == 0)
                 ? CATransform3DIdentity
                 : CATransform3DMakeRotation(-CGFloat(rotation) * .pi / 180, 0, 0, 1)
             CATransaction.commit()
@@ -206,19 +185,19 @@ struct PreviewView: NSViewRepresentable {
             super.layout()
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            contentLayer.frame = bounds
+            hostedLayer?.frame = bounds
             CATransaction.commit()
         }
 
-        // A hosting layer's contentsScale is NOT auto-synced by AppKit, so a
-        // pane can render half-res on a 2× display.  Read the backing scale on
-        // main (NSWindow is main-only) and push it to the layer.
+        // A hosted layer's contentsScale is NOT auto-synced by AppKit, so a pane
+        // can render half-res on a 2× display.  Read the backing scale on main
+        // (NSWindow is main-only) and push it to the hosted layer.
         override func viewDidChangeBackingProperties() {
             super.viewDidChangeBackingProperties()
             let scale = window?.backingScaleFactor ?? 2.0
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            contentLayer.contentsScale = scale
+            hostedLayer?.contentsScale = scale
             CATransaction.commit()
         }
     }

@@ -15,10 +15,48 @@ import CoreVideo
 
 /// The kind of downstream transport an output publishes to.  Raw values are
 /// stable identifiers (persistable, shown in the UI as a badge).
-enum OutputKind: String {
+///
+/// Only `.ndi` is functional today; `.srt`, `.rtsp` and `.vcam` exist so the
+/// "Publish to" rail can show the operator the FULL protocol surface as visually
+/// complete (but non-functional / "Soon") placeholders — the real transports
+/// land in later phases.  `CaseIterable` so the "Add output" menu can list every
+/// kind without a hand-maintained array that could drift from this enum.
+enum OutputKind: String, CaseIterable, Identifiable {
     case ndi
     case srt
     case rtsp
+    case vcam   // macOS Virtual Camera (sink-as-webcam)
+
+    var id: String { rawValue }
+
+    /// Operator-facing protocol name for badges, cards and the add menu.  The
+    /// rawValue is a lowercase wire/identifier token; this is the human label.
+    var displayName: String {
+        switch self {
+        case .ndi:  return "NDI"
+        case .srt:  return "SRT"
+        case .rtsp: return "RTSP"
+        case .vcam: return "Virtual Camera"
+        }
+    }
+
+    /// SF Symbol for the kind badge / add menu.  All chosen names exist on
+    /// macOS 13 (no SF5 / macOS-14-only glyphs, no gen-numbered variants) so they
+    /// render on the deployment target — a blank badge would look broken.
+    var symbolName: String {
+        switch self {
+        case .ndi:  return "antenna.radiowaves.left.and.right"
+        case .srt:  return "dot.radiowaves.right"
+        case .rtsp: return "network"
+        case .vcam: return "video"
+        }
+    }
+
+    /// Whether this transport is actually implemented.  Drives the "Soon" pill /
+    /// disabled controls on placeholder cards and the add menu — the single
+    /// source of truth so the card and the menu can never disagree about which
+    /// kinds are real.
+    var isImplemented: Bool { self == .ndi }
 }
 
 /// One downstream re-publishing sink.  Reference type (`AnyObject`) because an

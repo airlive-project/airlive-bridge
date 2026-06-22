@@ -14,6 +14,8 @@
 
 import Foundation
 import CoreVideo
+import AVFoundation
+import AppKit
 
 /// One camera channel in the Bridge.  `ObservableObject` (not `@Observable`) so
 /// it works on macOS 13 — the deployment target — where the `@Observable`
@@ -36,29 +38,35 @@ final class BridgeChannel: ObservableObject, Identifiable {
     /// published flag, NOT a per-frame buffer.  It is set (to the first decoded
     /// buffer) exactly once when video starts, and cleared (nil) on disconnect /
     /// format change; it does NOT change per frame.  The actual per-frame pixels
-    /// flow through `onFrame` (a direct CALayer pipe), never through this
-    /// `@Published` — routing video frames through `@Published` only repaints on
-    /// SwiftUI's diff cycle and froze the preview on one frame.  Views read
-    /// `latestFrame == nil` only to decide whether to show the "no signal"
-    /// overlay; they must NOT use it as the live frame source (use
-    /// `PreviewView(channel:)`).
-    @Published var latestFrame: CVImageBuffer?
+    /// are enqueued into `displayLayer` (a Metal-backed
+    /// `AVSampleBufferDisplayLayer`), never through this `@Published` — routing
+    /// video frames through `@Published` only repaints on SwiftUI's diff cycle
+    /// and froze the preview on one frame.  Views read `latestFrame == nil` only
+    /// to decide whether to show the "no signal" overlay; they must NOT use it as
+    /// the live frame source (use `PreviewView(channel:)`).
+    ///
+    /// Typed `CVPixelBuffer` (not the `CVImageBuffer` super-type it aliases) so
+    /// the seam matches the receiver, which only ever hands over decoded
+    /// `CVPixelBuffer`s — no ambiguity for a future caller reaching for a
+    /// pixel-buffer-only API.
+    @Published var latestFrame: CVPixelBuffer?
 
-    /// DIRECT per-frame sink — the thermal-/repaint-safe video pipe.  The
-    /// `PreviewView` registers a closure here on appear and clears it on
-    /// disappear; the receiver calls it (on the main queue, when
-    /// `previewEnabled`) for EVERY decoded frame, pushing the buffer straight
-    /// into a hosted `CALayer` and bypassing SwiftUI state entirely.  This is
-    /// deliberately NOT `@Published`: per-frame data routed through `@Published`
-    /// only repaints on SwiftUI's diff cycle, so the preview froze on one frame.
-    /// Plain stored property → mutating it never triggers a view update, and
-    /// invoking it pushes pixels with zero SwiftUI involvement.
-    var onFrame: ((CVImageBuffer) -> Void)?
+    /// Canonical live-preview surface for this channel — a Metal-backed
+    /// `AVSampleBufferDisplayLayer` the receiver enqueues each decoded frame
+    /// into (wrapped in a `CMSampleBuffer` with timing) and `PreviewView` simply
+    /// HOSTS.  Owned HERE, not in the view, so it survives SwiftUI re-creating
+    /// `PreviewView` (the layer outlives the view tree, the way Studio owns its
+    /// display layer on the receiver) — that removes the "view rebuilds → frame
+    /// pipe goes nil" fragility a per-view closure pipe had.  It is deliberately
+    /// NOT `@Published`: enqueuing frames into it never touches SwiftUI state, so
+    /// the preview repaints at the capture rate with zero per-frame diff cost.
+    /// `AVSampleBufferDisplayLayer` is available since macOS 10.8.
+    let displayLayer: AVSampleBufferDisplayLayer
 
-    /// Companion to `onFrame`: clear the preview layer to black ("no signal").
-    /// Called by the receiver on disconnect / format change so a stale last
-    /// frame doesn't linger under the overlay.  Also NOT `@Published` — it's a
-    /// direct CALayer pipe, same as `onFrame`.
+    /// Clear the live-preview surface to black ("no signal").  Called by the
+    /// receiver on disconnect / format change so a stale last frame doesn't
+    /// linger under the overlay.  NOT `@Published` — it flushes the owned
+    /// `displayLayer` directly.
     var onClear: (() -> Void)?
 
     /// The camera's last-reported state (ISO, lens, fps, …).  Drives the remote
@@ -91,7 +99,18 @@ final class BridgeChannel: ObservableObject, Identifiable {
     init(id: UUID = UUID(), name: String, delay: LatencyPreset = .normal) {
         self.id = id
         self.name = name
+        self.displayLayer = AVSampleBufferDisplayLayer()
+        // Letterbox / downscale on the GPU for free — a 4K buffer in a small
+        // pane costs nothing extra; black backing so an empty layer reads as
+        // "no signal" rather than transparent.
+        self.displayLayer.videoGravity = .resizeAspect
+        self.displayLayer.backgroundColor = NSColor.black.cgColor
+        // Default-clear flushes the owned layer to black.  `flushAndRemoveImage`
+        // drops the queued sample and blanks the layer in one call.
         self.delay = delay
+        self.onClear = { [weak self] in
+            self?.displayLayer.flushAndRemoveImage()
+        }
     }
 
     // MARK: - Lifecycle
@@ -114,14 +133,29 @@ final class BridgeChannel: ObservableObject, Identifiable {
 
     /// Take the channel offline: stop outputs and the receiver, and clear the
     /// transient connection state so the UI reflects "not connected".
+    ///
+    /// The `@Published` writes and the `onClear` layer flush must run on the
+    /// main thread (SwiftUI state + CALayer).  The sole current caller
+    /// (`BridgeModel.removeChannel`) is already on main, but a future off-main
+    /// caller must not tear SwiftUI state from a background thread — so the
+    /// UI-side cleanup is hopped to main explicitly while the receiver/output
+    /// teardown (thread-safe) runs inline.
     func stop() {
         for output in outputs where output.isLive {
             output.stop()
         }
         receiver?.stop()
-        isConnected = false
-        latestFrame = nil
-        onClear?()
+        let clearUI = { [weak self] in
+            guard let self else { return }
+            self.isConnected = false
+            self.latestFrame = nil
+            self.onClear?()
+        }
+        if Thread.isMainThread {
+            clearUI()
+        } else {
+            DispatchQueue.main.async(execute: clearUI)
+        }
     }
 
     // MARK: - Remote control

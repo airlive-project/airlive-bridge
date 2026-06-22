@@ -10,12 +10,15 @@
 //   • Bytes → PacketParser → VTDecompressionSession → CVPixelBuffer, with the
 //     jitter / playout-delay buffer (lower-envelope minimum-delay skew tracking)
 //     ported verbatim so frames present on a stable, operator-chosen delay.
-//   • Per presented frame: push the buffer down the channel's DIRECT preview
-//     pipe (`channel.onFrame`, when `previewEnabled`) AND forward it to every
+//   • Per presented frame: enqueue the decoded buffer (wrapped in a
+//     `CMSampleBuffer`) into the channel's `AVSampleBufferDisplayLayer`
+//     (`channel.displayLayer`, when `previewEnabled`) AND forward it to every
 //     `VideoOutput`.  Per-frame pixels NEVER go through a `@Published` property
 //     (that froze the preview on one frame and risked publish-during-update
 //     warnings); only the low-frequency `latestFrame` gate / `isConnected` /
-//     `remote` are published, on the main queue.
+//     `remote` are published, on the main queue.  We enqueue for IMMEDIATE
+//     display (the jitter ring below already gated playout latency), so the
+//     display layer just paints what we hand it when we hand it over.
 //   • Control channel (`.control` packets) is full-duplex on the SAME socket:
 //     inbound `state` snapshots update `channel.remote`; outbound `set...` /
 //     tally `setCue` commands are framed and written back.
@@ -32,6 +35,7 @@
 
 import Foundation
 import Network
+import AVFoundation
 import VideoToolbox
 import CoreMedia
 import CoreVideo
@@ -39,10 +43,10 @@ import QuartzCore
 
 /// One channel's network receiver — listener, Bonjour advertisement, H.264
 /// decoder, jitter buffer, and control duplex.  Owned by its `BridgeChannel`;
-/// pushes decoded frames down the channel's direct preview pipe
-/// (`onFrame`/`onClear`), publishes only the low-frequency state / connection
-/// status onto the channel's `@Published` properties on the main queue, and
-/// fans every decoded frame out to the channel's `VideoOutput`s.
+/// enqueues decoded frames into the channel's `AVSampleBufferDisplayLayer`
+/// (clearing it via `onClear` on disconnect), publishes only the low-frequency
+/// state / connection status onto the channel's `@Published` properties on the
+/// main queue, and fans every decoded frame out to the channel's `VideoOutput`s.
 final class BridgeChannelReceiver: ChannelReceiver {
 
     // ── Identity ──────────────────────────────────────────────────────────
@@ -155,6 +159,11 @@ final class BridgeChannelReceiver: ChannelReceiver {
     }
 
     func stop() {
+        // Called from the main thread (`BridgeModel.removeChannel`).  Asserting
+        // it makes the `queue.sync` below safe to reason about: main blocks on
+        // `queue`, so NOTHING running on `queue` may ever block back on main, or
+        // it deadlocks.
+        dispatchPrecondition(condition: .onQueue(.main))
         identity.unregisterReadvertiser(channelID)
         // SYNCHRONOUS teardown — `BridgeModel.removeChannel` calls this and then
         // drops the last strong reference, so the receiver can deallocate the
@@ -163,6 +172,13 @@ final class BridgeChannelReceiver: ChannelReceiver {
         // block on `queue`) → data race + a possible straggler decode callback on
         // freed memory.  `queue.sync` guarantees the decode session is drained,
         // invalidated, and niled on `queue` BEFORE we return and the object dies.
+        //
+        // DEADLOCK INVARIANT — do NOT break: this `queue.sync` blocks main while
+        // `teardownDecodeSession()` calls `VTDecompressionSessionWaitForAsynchronousFrames`,
+        // which blocks until in-flight decode callbacks return.  Those callbacks
+        // (`ingestDecoded` → `promoteDue` → `present`) only ever `DispatchQueue.main.async`
+        // (enqueue-without-blocking) — they MUST NOT be changed to synchronously
+        // dispatch back to `queue` or `.main.sync`, or this teardown deadlocks.
         queue.sync {
             self.listener?.cancel()
             self.listener = nil
@@ -488,6 +504,11 @@ final class BridgeChannelReceiver: ChannelReceiver {
 
     private func decodeFrame(payload: Data, packetTimestamp: Int64) {
         guard let fmt = formatDescription else { return }
+        // A valid H.264 access unit is never empty, but a truncated/corrupt
+        // packet can pass the parser's length guard with length 0 and then crash
+        // on `baseAddress!` below (`Data.withUnsafeBytes` yields a nil base for
+        // an empty buffer).  Drop the empty access unit instead.
+        guard !payload.isEmpty else { return }
 
         // packetTimestamp = microseconds on the iPhone's clock.  Translate to a
         // Mac-clock playout deadline (anchor + ΔPTS + bufferSeconds), stamp it
@@ -540,10 +561,17 @@ final class BridgeChannelReceiver: ChannelReceiver {
             blockBufferOut: &blockBuffer
         ) == noErr, let blockBuffer else { return }
 
-        _ = payload.withUnsafeBytes {
-            CMBlockBufferReplaceDataBytes(with: $0.baseAddress!, blockBuffer: blockBuffer,
-                                          offsetIntoDestination: 0, dataLength: payload.count)
+        // `baseAddress` is guaranteed non-nil here (the `payload.isEmpty` guard
+        // at the top of this method already dropped the only case that yields a
+        // nil base), but bind it safely rather than force-unwrap so a future
+        // edit can't reintroduce the empty-payload crash.
+        let copied: Bool = payload.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return false }
+            return CMBlockBufferReplaceDataBytes(with: base, blockBuffer: blockBuffer,
+                                                 offsetIntoDestination: 0,
+                                                 dataLength: payload.count) == noErr
         }
+        guard copied else { return }
 
         var timing = CMSampleTimingInfo(
             duration:              CMTime(value: 1, timescale: 60),
@@ -652,14 +680,22 @@ final class BridgeChannelReceiver: ChannelReceiver {
 
         let delay = playout - CACurrentMediaTime()
         if delay <= 0.001 {
+            // Lowest (0 ms) path: promote INLINE on the VT decode-callback
+            // thread (no timer hop).  `promoteDue` therefore runs on TWO
+            // threads — this VT thread (inline) and `queue` (the asyncAfter
+            // timer).  Both touch `frameRing` only under `pixelBufferLock`, and
+            // `present` hops to main for everything else, so this is race-free.
+            // ⚠️ Any new `queue`-confined state read inside `promoteDue` MUST be
+            // guarded the same way — it can be entered straight off the VT
+            // thread here without a `queue` hop.
             promoteDue()
         } else {
             queue.asyncAfter(deadline: .now() + delay) { [weak self] in self?.promoteDue() }
         }
     }
 
-    /// Promote the freshest now-due frame: push it down the channel's direct
-    /// preview pipe (when `previewEnabled`) and forward it to every output.
+    /// Promote the freshest now-due frame: enqueue it into the channel's display
+    /// layer (when `previewEnabled`) and forward it to every output.
     private func promoteDue() {
         let now = CACurrentMediaTime()
         var promoted: CVPixelBuffer?
@@ -675,44 +711,83 @@ final class BridgeChannelReceiver: ChannelReceiver {
     }
 
     /// Single presentation point: forward to ALL outputs (always — a hidden
-    /// preview must still publish downstream), and push the frame into the
-    /// preview's DIRECT pipe (`channel.onFrame`) when the operator is watching
-    /// this channel (`previewEnabled`).
+    /// preview must still publish downstream), and enqueue the frame into the
+    /// channel's `AVSampleBufferDisplayLayer` when the operator is watching this
+    /// channel (`previewEnabled`).
     ///
-    /// The per-frame pixels go through `onFrame` — a plain closure straight to a
-    /// hosted CALayer — NOT through any `@Published` property, so the preview
-    /// repaints smoothly at the capture frame rate and a `@Published` write
-    /// never lands during a SwiftUI view update.  The only published flip here
-    /// is the LOW-FREQUENCY `latestFrame` gate (first frame in), guarded so it
-    /// fires once, not per frame.
+    /// The per-frame pixels go into the display layer (a Metal-backed video
+    /// surface) — NOT through any `@Published` property, so the preview repaints
+    /// smoothly at the capture frame rate and a `@Published` write never lands
+    /// during a SwiftUI view update.  The only published flip here is the
+    /// LOW-FREQUENCY `latestFrame` gate (first frame in), guarded so it fires
+    /// once, not per frame.
     private func present(_ buffer: CVPixelBuffer) {
         // monotonic host time in ns for output pacing/stamping.
         let timeNs = UInt64(CACurrentMediaTime() * 1_000_000_000.0)
 
-        // Output fan-out + preview push run on the main queue: `onFrame` drives
-        // an AppKit CALayer (best touched on main; the hosted layer makes it
-        // safe but we keep it main for simplicity), and `BridgeChannel.outputs`
-        // is `@Published` (UI-bound, main-isolated) so reading it off-main is
-        // UB.  The buffer is IOSurface-backed, so handing it across threads is a
+        // Output fan-out + preview enqueue run on the main queue: the display
+        // layer is best touched on main, and `BridgeChannel.outputs` is
+        // `@Published` (UI-bound, main-isolated) so reading it off-main is UB.
+        // The buffer is IOSurface-backed, so handing it across threads is a
         // retained-CF pass, not a copy.
         DispatchQueue.main.async { [weak self] in
             guard let self, let channel = self.channel else { return }
             if !self.didLogFirstFrame {
                 self.didLogFirstFrame = true
-                print("[BridgeReceiver \(self.src)] ✅ first frame presented (previewEnabled=\(channel.previewEnabled), onFrame set=\(channel.onFrame != nil))")
+                print("[BridgeReceiver \(self.src)] ✅ first frame presented (previewEnabled=\(channel.previewEnabled))")
             }
             for output in channel.outputs where output.isLive {
                 output.send(buffer, timeNs: timeNs)
             }
             guard channel.previewEnabled else { return }
-            // Per-frame: direct pipe, zero SwiftUI state.
-            channel.onFrame?(buffer)
+            // Per-frame: enqueue into the channel-owned display layer, zero
+            // SwiftUI state.
+            self.enqueue(buffer, into: channel.displayLayer)
             // Once-per-session: flip the published "no signal" gate on the
             // first frame only (guarded — never a per-frame published write).
-            // We store the FIRST buffer so a legacy `PreviewView(frame:)` caller
-            // still shows something; the live path uses `onFrame`.
             if channel.latestFrame == nil { channel.latestFrame = buffer }
         }
+    }
+
+    /// Wrap a decoded `CVPixelBuffer` in a `CMSampleBuffer` and enqueue it into
+    /// `layer` for IMMEDIATE display.  The jitter ring already gated playout
+    /// latency (this frame is "due"), so we tag the sample
+    /// `DisplayImmediately` and let the layer paint it now rather than schedule
+    /// it against a control timebase.  Called on the main queue from `present`.
+    ///
+    /// A format description is derived from the buffer itself each call (cheap —
+    /// it's metadata, not pixels), so a mid-stream resolution change just works
+    /// without us tracking the decode format here.  If the layer has entered a
+    /// `.failed` state (e.g. a prior decode-side error), flush to recover before
+    /// enqueuing.
+    private func enqueue(_ pb: CVPixelBuffer, into layer: AVSampleBufferDisplayLayer) {
+        var fmt: CMVideoFormatDescription?
+        guard CMVideoFormatDescriptionCreateForImageBuffer(
+            allocator: kCFAllocatorDefault, imageBuffer: pb,
+            formatDescriptionOut: &fmt) == noErr, let fmt else { return }
+
+        var timing = CMSampleTimingInfo(
+            duration: .invalid,
+            presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
+            decodeTimeStamp: .invalid
+        )
+        var sample: CMSampleBuffer?
+        guard CMSampleBufferCreateReadyWithImageBuffer(
+            allocator: kCFAllocatorDefault, imageBuffer: pb,
+            formatDescription: fmt, sampleTiming: &timing,
+            sampleBufferOut: &sample) == noErr, let sample else { return }
+
+        // Tag for immediate display — the ring controls latency, not the layer.
+        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true),
+           CFArrayGetCount(attachments) > 0 {
+            let dict = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
+            CFDictionarySetValue(dict,
+                                 Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
+                                 Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
+        }
+
+        if layer.status == .failed { layer.flush() }
+        layer.enqueue(sample)
     }
 
     // MARK: - Publish to the owning channel (main queue)
