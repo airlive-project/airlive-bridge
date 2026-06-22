@@ -40,16 +40,35 @@ struct OutputsRail: View {
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
             if let channel = model.selectedChannel {
-                Button {
-                    channel.addOutput(NDIOutput(label: defaultNDIName(for: channel)))
+                // "+" opens a menu of output TYPES — NDI adds a real output;
+                // SRT / RTSP / Virtual Camera show as "soon" (disabled) so the
+                // roadmap is visible and the button isn't hardcoded to NDI.
+                Menu {
+                    ForEach(OutputKind.allCases) { kind in
+                        Button {
+                            if kind.isImplemented {
+                                channel.addOutput(NDIOutput(label: defaultNDIName(for: channel)))
+                            }
+                        } label: {
+                            Label(kind.isImplemented ? kind.displayName : "\(kind.displayName) — soon",
+                                  systemImage: kind.symbolName)
+                        }
+                        .disabled(!kind.isImplemented)
+                    }
                 } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 11, weight: .bold))
                         .foregroundColor(Theme.textPrimary)
                         .frame(width: 22, height: 22)
+                        .background(
+                            RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+                                .fill(Theme.bgSelected.opacity(0.6))
+                        )
                 }
-                .bridgeButton(corner: Radius.control)
-                .help("Add an NDI output")
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Add an output")
             }
             Spacer()
             if let channel = model.selectedChannel, !channel.outputs.isEmpty {

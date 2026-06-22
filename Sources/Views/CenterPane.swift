@@ -65,7 +65,12 @@ private struct ChannelDetail: View {
                 tallyRow
                 delayRow
                 SecurityCard(channel: channel)
+                // Camera control commands the iPhone — pointless (and a source of
+                // stale-state bugs) with no camera attached.  Dim + disable it
+                // until connected; it lights up the moment the phone joins.
                 CameraControlPanel(channel: channel)
+                    .disabled(!channel.isConnected)
+                    .opacity(channel.isConnected ? 1.0 : 0.4)
             }
             // Tight top padding; generous-but-compact around the rest.  The
             // ScrollView lets the stack grow past the window without overflow.
@@ -76,6 +81,13 @@ private struct ChannelDetail: View {
     }
 
     // MARK: Preview
+
+    /// The camera reports a clockwise rotation hint (Option B vertical stream);
+    /// 90/270 means the operator is shooting portrait, so the preview goes 9:16.
+    private var isPortrait: Bool {
+        let r = channel.remote?.outputRotation ?? 0
+        return r == 90 || r == 270
+    }
 
     private var previewSection: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
@@ -117,7 +129,10 @@ private struct ChannelDetail: View {
             }
             tallyBadge
         }
-        .aspectRatio(16.0 / 9.0, contentMode: .fit)
+        // Adapt to the camera's orientation: a vertical (Option B) stream reports
+        // a 90/270 rotation, so the pane itself becomes 9:16 and the portrait
+        // frame fills it instead of letterboxing inside a wide 16:9 box.
+        .aspectRatio(isPortrait ? 9.0 / 16.0 : 16.0 / 9.0, contentMode: .fit)
         .frame(maxWidth: .infinity)
         .background(Color.black)
         .clipShape(RoundedRectangle(cornerRadius: Radius.panel, style: .continuous))
@@ -271,50 +286,40 @@ private struct SecurityCard: View {
         Card {
             VStack(alignment: .leading, spacing: Spacing.sm) {
                 header
-                PillToggle(title: channel.requireAuth ? "Password required" : "Require password",
-                           isOn: $channel.requireAuth)
                 if channel.requireAuth {
-                    statusLine
                     passwordRow
-                    hint
+                    statusRow
                 }
             }
         }
     }
 
+    // "SECURITY" + state pill + a plain on/off SWITCH on the right (not a big
+    // blue slab that reads like a button) — the standard settings-row idiom.
     private var header: some View {
-        HStack {
+        HStack(spacing: Spacing.sm) {
             SectionLabel(text: "Security")
             Spacer()
-            StatusPill(text: locked ? "LOCKED" : "OPEN", on: locked, accent: Theme.accentBlue)
+            if channel.requireAuth {
+                StatusPill(text: locked ? "LOCKED" : "OPEN", on: locked, accent: Theme.accentBlue)
+            }
+            Toggle("", isOn: $channel.requireAuth)
+                .toggleStyle(.switch)
+                .tint(Theme.accentBlue)
+                .labelsHidden()
         }
     }
 
-    /// Reflects whether a password is actually set when the toggle is on — an
-    /// enabled-but-blank toggle leaves the channel OPEN, and we say so in yellow.
-    @ViewBuilder
-    private var statusLine: some View {
-        if channel.hasPassword {
-            Label("Password set — cameras must enter it to connect.", systemImage: "lock.fill")
-                .font(.system(size: 11))
-                .foregroundColor(Theme.textSecondary)
-        } else {
-            Label("No password yet — set one below or the channel stays open.",
-                  systemImage: "exclamationmark.triangle.fill")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(Theme.accentYellow)
-        }
-    }
-
+    // Password entry + a clearly-sized Set button (accent-filled once you type).
     private var passwordRow: some View {
         HStack(spacing: Spacing.sm) {
-            SecureField(channel.hasPassword ? "Change password" : "New password",
+            SecureField(channel.hasPassword ? "Change password" : "Set a password",
                         text: $draftPassword)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
                 .foregroundColor(Theme.textPrimary)
                 .padding(.horizontal, Spacing.sm)
-                .frame(height: 30)
+                .frame(height: 32)
                 .background(
                     RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
                         .fill(Theme.bgApp)
@@ -325,26 +330,37 @@ private struct SecurityCard: View {
                 )
                 .onSubmit { commitPassword() }
 
-            Button("Set") { commitPassword() }
-                .bridgeButton()
-                .frame(height: 30)
-                .disabled(draftPassword.isEmpty)
-                .opacity(draftPassword.isEmpty ? 0.5 : 1)
+            Button { commitPassword() } label: {
+                Text("Set")
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(width: 62, height: 32)
+            }
+            .bridgeButton(selected: !draftPassword.isEmpty)
+            .disabled(draftPassword.isEmpty)
+        }
+    }
 
-            if channel.hasPassword {
+    // One status line: confirms a stored password (with Remove) or warns it's
+    // still open.  Replaces the old long ASCII/OBS hint that didn't belong here.
+    @ViewBuilder
+    private var statusRow: some View {
+        if channel.hasPassword {
+            HStack(spacing: Spacing.sm) {
+                Label("Password set", systemImage: "lock.fill")
+                    .font(.system(size: 11))
+                    .foregroundColor(Theme.textSecondary)
+                Spacer()
                 Button("Remove") { channel.setPassword(""); draftPassword = "" }
                     .buttonStyle(.plain)
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(Theme.accentRed)
             }
+        } else {
+            Label("No password yet — the channel stays open until you set one.",
+                  systemImage: "exclamationmark.triangle.fill")
+                .font(.system(size: 11))
+                .foregroundColor(Theme.accentYellow)
         }
-    }
-
-    private var hint: some View {
-        Text("ASCII passwords only (the OBS plugin runs on Windows/Linux). Changing the password disconnects the connected camera — it must re-enter it.")
-            .font(.system(size: 10))
-            .foregroundColor(Theme.textFaint)
-            .fixedSize(horizontal: false, vertical: true)
     }
 
     private func commitPassword() {
