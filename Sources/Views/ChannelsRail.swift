@@ -178,7 +178,7 @@ private struct ChannelRow: View {
                     .onExitCommand { cancelRename() }       // Esc cancels
                     // Commit on focus loss too — clicking another row, the list,
                     // or anywhere else ends the edit and saves, not only Enter.
-                    .onChange(of: nameFocused) { _, focused in
+                    .onChange(of: nameFocused) { focused in
                         if !focused && editing { commitRename() }
                     }
             } else {

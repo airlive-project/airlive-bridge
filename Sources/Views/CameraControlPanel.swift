@@ -61,7 +61,7 @@ struct CameraControlPanel: View {
         .onAppear { seed(from: channel.remote) }
         // Re-seed when a NEW snapshot lands so labels + slider rest positions
         // track the camera's auto-readback / our own confirmed commands.
-        .onChange(of: channel.remote) { _, newValue in
+        .onChange(of: channel.remote) { newValue in
             seed(from: newValue)
         }
     }
