@@ -1,0 +1,34 @@
+name: AirliveBridge
+options:
+  bundleIdPrefix: studio.airlive.bridge
+  deploymentTarget:
+    macOS: "13.0"
+  createIntermediateGroups: true
+
+targets:
+  AirliveBridge:
+    type: application
+    platform: macOS
+    sources:
+      - Sources
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: Airlive Bridge
+        LSMinimumSystemVersion: "13.0"
+        # Receiving the camera stream needs Bonjour + local-network access.
+        NSLocalNetworkUsageDescription: "Airlive Bridge discovers and receives Airlive Camera streams on your local network."
+        NSBonjourServices:
+          - _airlive._tcp
+    settings:
+      base:
+        PRODUCT_NAME: Airlive Bridge
+        MARKETING_VERSION: "0.1.0"
+        SWIFT_VERSION: "5.9"
+
+# Dependencies added per phase, not up front:
+#   - HaishinKit (RTMP/SRT output) — phase 3
+#   - NDI SDK (xcframework / system lib) — phase 2
+#   - RTSP muxer — phase 3
+# The wire format (AirlivePacket/PacketParser/ControlMessage/StateSnapshot) is a
+# standalone COPY under Sources/Wire (never references the airlive repo directly).
