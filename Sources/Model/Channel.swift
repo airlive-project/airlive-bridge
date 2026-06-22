@@ -90,22 +90,9 @@ final class BridgeChannel: ObservableObject, Identifiable {
     /// Downstream re-publishing sinks (NDI / SRT / RTSP).
     @Published var outputs: [VideoOutput] = []
 
-    /// Receiver-password auth toggle (STREAM-AUTH-SPEC).  OFF by default — the
-    /// stream stays open exactly as today until the operator opts in.  Auth only
-    /// actually engages when this is on AND a password is set (`hasPassword`); an
-    /// enabled-but-blank toggle is treated as off so a connection is never gated
-    /// behind an empty secret.  Pushed to the receiver live on change.
-    @Published var requireAuth: Bool = false {
-        didSet {
-            guard requireAuth != oldValue else { return }
-            updateAuthConfig(disconnectNow: false)
-        }
-    }
-
-    /// True when a password is stored for this channel (in the Keychain).  Drives
-    /// the UI's "password set" state without ever reading the secret back into a
-    /// published property.
-    var hasPassword: Bool { BridgeKeychain.password(for: id) != nil }
+    // Receiver-password auth is GLOBAL (one password for the whole Bridge) and
+    // lives on `BridgeModel`; the model pushes it to this channel's receiver via
+    // `receiver.updateAuth(...)` on start and on change.  Nothing per-channel here.
 
     /// The owned receiver — TCP listener + Bonjour + decoder.  Forward-declared
     /// (`ChannelReceiver` is created in the receiver phase) and optional so this
@@ -143,9 +130,8 @@ final class BridgeChannel: ObservableObject, Identifiable {
             receiver = BridgeChannelReceiver(channel: self)
         }
         receiver?.start()
-        // Push the persisted auth config to the fresh receiver before any iPhone
-        // can connect, so the very first connection is already gated correctly.
-        updateAuthConfig(disconnectNow: false)
+        // The global auth config is pushed to this receiver by `BridgeModel`
+        // (right after start, and whenever it changes) — see BridgeModel.applyAuth.
         for output in outputs where !output.isLive {
             output.start()
         }
@@ -199,26 +185,6 @@ final class BridgeChannel: ObservableObject, Identifiable {
     func removeOutput(_ output: VideoOutput) {
         output.stop()
         outputs.removeAll { $0.id == output.id }
-    }
-
-    // MARK: - Receiver-password auth
-
-    /// Set (or clear) this channel's auth password.  Stored in the Keychain, then
-    /// pushed to the receiver.  A password change is a REVOCATION — `disconnectNow`
-    /// defaults true so a currently-connected camera is dropped and must re-auth
-    /// with the new secret.  An empty string clears the password (and, with the
-    /// `hasPassword` guard, effectively disables auth).
-    func setPassword(_ password: String, disconnectNow: Bool = true) {
-        BridgeKeychain.setPassword(password, for: id)
-        updateAuthConfig(disconnectNow: disconnectNow)
-        objectWillChange.send()   // `hasPassword` is derived, not @Published
-    }
-
-    /// Push the current auth config (toggle + Keychain password) to the receiver.
-    /// Auth engages only when enabled AND a password exists.
-    private func updateAuthConfig(disconnectNow: Bool) {
-        let password = BridgeKeychain.password(for: id) ?? ""
-        receiver?.updateAuth(require: requireAuth, password: password, disconnectNow: disconnectNow)
     }
 
     // MARK: - Rename

@@ -64,7 +64,6 @@ private struct ChannelDetail: View {
                 previewSection
                 tallyRow
                 delayRow
-                SecurityCard(channel: channel)
                 // Camera control commands the iPhone — pointless (and a source of
                 // stale-state bugs) with no camera attached.  Dim + disable it
                 // until connected; it lights up the moment the phone joins.
@@ -267,106 +266,5 @@ private struct ChannelDetail: View {
     }
 }
 
-// MARK: - Security card (receiver-password auth)
-
-/// Per-channel receiver-password auth (STREAM-AUTH-SPEC).  OFF by default — the
-/// stream stays open until the operator turns it on AND sets a password.  This is
-/// ACCESS control (keep a same-LAN prankster off the slot), not encryption: the
-/// password is verified by an HMAC challenge the camera answers; it never crosses
-/// the wire.  Changing the password is a revocation — it disconnects the connected
-/// camera so it must re-enter the new one.
-private struct SecurityCard: View {
-    @ObservedObject var channel: BridgeChannel
-    @State private var draftPassword = ""
-
-    /// Auth actually engages only when enabled AND a password is stored.
-    private var locked: Bool { channel.requireAuth && channel.hasPassword }
-
-    var body: some View {
-        Card {
-            VStack(alignment: .leading, spacing: Spacing.sm) {
-                header
-                if channel.requireAuth {
-                    passwordRow
-                    statusRow
-                }
-            }
-        }
-    }
-
-    // "SECURITY" + state pill + a plain on/off SWITCH on the right (not a big
-    // blue slab that reads like a button) — the standard settings-row idiom.
-    private var header: some View {
-        HStack(spacing: Spacing.sm) {
-            SectionLabel(text: "Security")
-            Spacer()
-            if channel.requireAuth {
-                StatusPill(text: locked ? "LOCKED" : "OPEN", on: locked, accent: Theme.accentBlue)
-            }
-            Toggle("", isOn: $channel.requireAuth)
-                .toggleStyle(.switch)
-                .tint(Theme.accentBlue)
-                .labelsHidden()
-        }
-    }
-
-    // Password entry + a clearly-sized Set button (accent-filled once you type).
-    private var passwordRow: some View {
-        HStack(spacing: Spacing.sm) {
-            SecureField(channel.hasPassword ? "Change password" : "Set a password",
-                        text: $draftPassword)
-                .textFieldStyle(.plain)
-                .font(.system(size: 13))
-                .foregroundColor(Theme.textPrimary)
-                .padding(.horizontal, Spacing.sm)
-                .frame(height: 32)
-                .background(
-                    RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
-                        .fill(Theme.bgApp)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
-                        .stroke(Theme.stroke, lineWidth: 1)
-                )
-                .onSubmit { commitPassword() }
-
-            Button { commitPassword() } label: {
-                Text("Set")
-                    .font(.system(size: 13, weight: .semibold))
-                    .frame(width: 62, height: 32)
-            }
-            .bridgeButton(selected: !draftPassword.isEmpty)
-            .disabled(draftPassword.isEmpty)
-        }
-    }
-
-    // One status line: confirms a stored password (with Remove) or warns it's
-    // still open.  Replaces the old long ASCII/OBS hint that didn't belong here.
-    @ViewBuilder
-    private var statusRow: some View {
-        if channel.hasPassword {
-            HStack(spacing: Spacing.sm) {
-                Label("Password set", systemImage: "lock.fill")
-                    .font(.system(size: 11))
-                    .foregroundColor(Theme.textSecondary)
-                Spacer()
-                Button("Remove") { channel.setPassword(""); draftPassword = "" }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(Theme.accentRed)
-            }
-        } else {
-            Label("No password yet — the channel stays open until you set one.",
-                  systemImage: "exclamationmark.triangle.fill")
-                .font(.system(size: 11))
-                .foregroundColor(Theme.accentYellow)
-        }
-    }
-
-    private func commitPassword() {
-        let pw = draftPassword.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !pw.isEmpty else { return }
-        channel.setPassword(pw)        // stored in Keychain + revokes the live camera
-        draftPassword = ""
-    }
-}
+// (Security moved to a single GLOBAL control in the Channels rail footer —
+// see SecurityFooter in ChannelsRail.swift. One password gates every channel.)

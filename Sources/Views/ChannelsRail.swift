@@ -16,6 +16,8 @@ struct ChannelsRail: View {
         VStack(spacing: 0) {
             header
             list
+                .frame(maxHeight: .infinity)
+            SecurityFooter(model: model)   // ONE global password for the Bridge
         }
         .frame(width: 240)
         .background(Theme.bgRail)
@@ -44,12 +46,11 @@ struct ChannelsRail: View {
     }
 
     /// Small inline `+` next to the title — the Studio add-source affordance.
-    /// `addChannel` builds the model object; `start()` brings the receiver slot
-    /// + Bonjour advert online so the iPhone can connect immediately (DESIGN.md).
+    /// `addChannel` builds the model object, brings the receiver slot + Bonjour
+    /// advert online, and applies the global auth so the iPhone can connect.
     private var addButton: some View {
         Button {
-            let channel = model.addChannel()
-            channel.start()
+            model.addChannel()
         } label: {
             Image(systemName: "plus")
                 .font(.system(size: 11, weight: .bold))
@@ -281,5 +282,124 @@ private struct ChannelRow: View {
 
     private func cancelRename() {
         editing = false
+    }
+}
+
+// MARK: - Security footer (ONE global password for the whole Bridge)
+
+/// A compact security control pinned to the bottom of the Channels rail.  One
+/// password gates EVERY channel (STREAM-AUTH-SPEC — receiver-side policy).  A
+/// plain switch turns it on; the password itself is entered in a small popover
+/// so the narrow rail stays uncluttered.  OFF by default; ACCESS control, not
+/// encryption — the password is verified by an HMAC challenge, never sent.
+private struct SecurityFooter: View {
+    @ObservedObject var model: BridgeModel
+    @State private var showSheet = false
+    @State private var draft = ""
+
+    private var locked: Bool { model.requireAuth && model.hasPassword }
+
+    var body: some View {
+        VStack(spacing: Spacing.sm) {
+            row
+            if model.requireAuth {
+                setButton
+            }
+        }
+        .padding(Spacing.md)
+        .background(Theme.bgPanel)
+        .overlay(Rectangle().frame(height: 1).foregroundColor(Theme.stroke), alignment: .top)
+    }
+
+    private var row: some View {
+        HStack(spacing: Spacing.sm) {
+            Image(systemName: locked ? "lock.fill" : "lock.open")
+                .font(.system(size: 12))
+                .foregroundColor(locked ? Theme.accentBlue : Theme.textFaint)
+                .frame(width: 16)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Security")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(Theme.textSecondary)
+                Text(statusText)
+                    .font(.system(size: 9))
+                    .foregroundColor(statusColor)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Toggle("", isOn: $model.requireAuth)
+                .toggleStyle(.switch)
+                .tint(Theme.accentBlue)
+                .labelsHidden()
+                .scaleEffect(0.85)
+        }
+    }
+
+    private var setButton: some View {
+        Button { draft = ""; showSheet = true } label: {
+            Text(model.hasPassword ? "Change password…" : "Set password…")
+                .font(.system(size: 11, weight: .medium))
+                .frame(maxWidth: .infinity)
+                .frame(height: 26)
+        }
+        // Nudge the operator (accent fill) while auth is on but no password set.
+        .bridgeButton(selected: model.requireAuth && !model.hasPassword)
+        .popover(isPresented: $showSheet, arrowEdge: .trailing) { popover }
+    }
+
+    private var statusText: String {
+        if !model.requireAuth { return "Open — any device on the LAN" }
+        return model.hasPassword ? "Required on all channels" : "No password — still open"
+    }
+
+    private var statusColor: Color {
+        if !model.requireAuth { return Theme.textFaint }
+        return model.hasPassword ? Theme.textFaint : Theme.accentYellow
+    }
+
+    private var popover: some View {
+        VStack(alignment: .leading, spacing: Spacing.sm) {
+            Text("Bridge password")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(Theme.textPrimary)
+            Text("One password for every channel. Cameras must enter it to connect.")
+                .font(.system(size: 10))
+                .foregroundColor(Theme.textFaint)
+                .fixedSize(horizontal: false, vertical: true)
+            SecureField("Password", text: $draft)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+                .foregroundColor(Theme.textPrimary)
+                .padding(.horizontal, Spacing.sm)
+                .frame(height: 30)
+                .background(RoundedRectangle(cornerRadius: Radius.button, style: .continuous).fill(Theme.bgApp))
+                .overlay(RoundedRectangle(cornerRadius: Radius.button, style: .continuous).stroke(Theme.stroke, lineWidth: 1))
+                .onSubmit { commit() }
+            HStack {
+                if model.hasPassword {
+                    Button("Remove") { model.setPassword(""); showSheet = false }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(Theme.accentRed)
+                }
+                Spacer()
+                Button { commit() } label: {
+                    Text("Save").font(.system(size: 12, weight: .semibold)).frame(width: 64, height: 30)
+                }
+                .bridgeButton(selected: !draft.isEmpty)
+                .disabled(draft.isEmpty)
+            }
+        }
+        .padding(Spacing.md)
+        .frame(width: 260)
+        .background(Theme.bgPanel)
+    }
+
+    private func commit() {
+        let pw = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !pw.isEmpty else { return }
+        model.setPassword(pw)
+        draft = ""
+        showSheet = false
     }
 }

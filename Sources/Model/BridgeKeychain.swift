@@ -1,9 +1,9 @@
-// BridgeKeychain.swift — tiny Keychain wrapper for per-channel auth passwords.
+// BridgeKeychain.swift — tiny Keychain wrapper for the Bridge auth password.
 //
 // The receiver-auth password is a secret: it must live in the OS secret store,
 // never in UserDefaults or a plist (swift/security.md, STREAM-AUTH-SPEC §4).
-// One generic-password item per channel, keyed by the channel's UUID, so a
-// password survives a rename and is scoped to exactly one source.
+// One generic-password item per `account` string — the Bridge uses a single
+// "global" account (one password for every channel).
 
 import Foundation
 import Security
@@ -12,11 +12,10 @@ enum BridgeKeychain {
     /// Service tag groups all of the Bridge's auth items under one umbrella.
     private static let service = "studio.airlive.bridge.auth"
 
-    /// Store (or replace) the password for a channel.  An empty string DELETES
+    /// Store (or replace) the password for `account`.  An empty string DELETES
     /// the item — "no password" is the absence of a secret, not a stored blank.
-    static func setPassword(_ password: String, for channelID: UUID) {
-        let account = channelID.uuidString
-        deletePassword(for: channelID)
+    static func setPassword(_ password: String, account: String) {
+        deletePassword(account: account)
         guard !password.isEmpty, let data = password.data(using: .utf8) else { return }
         let item: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -29,12 +28,12 @@ enum BridgeKeychain {
         SecItemAdd(item as CFDictionary, nil)
     }
 
-    /// Read the stored password for a channel, or nil if none is set.
-    static func password(for channelID: UUID) -> String? {
+    /// Read the stored password for `account`, or nil if none is set.
+    static func password(account: String) -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: channelID.uuidString,
+            kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
@@ -45,11 +44,11 @@ enum BridgeKeychain {
         return str
     }
 
-    static func deletePassword(for channelID: UUID) {
+    static func deletePassword(account: String) {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: channelID.uuidString,
+            kSecAttrAccount as String: account,
         ]
         SecItemDelete(query as CFDictionary)
     }
