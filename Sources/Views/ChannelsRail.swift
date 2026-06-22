@@ -130,11 +130,6 @@ private struct ChannelRow: View {
 
     var body: some View {
         HStack(spacing: Spacing.sm) {
-            // Selection bar — accent-blue, only on the selected row.
-            RoundedRectangle(cornerRadius: 2)
-                .fill(selected ? Theme.accentBlue : Color.clear)
-                .frame(width: 3)
-
             VStack(alignment: .leading, spacing: Spacing.xs) {
                 nameLine
                 specLine
@@ -144,7 +139,7 @@ private struct ChannelRow: View {
             tallyHint
         }
         .padding(.vertical, Spacing.sm)
-        .padding(.trailing, Spacing.sm)
+        .padding(.horizontal, Spacing.md)
         .background(
             RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
                 .fill(rowFill)
