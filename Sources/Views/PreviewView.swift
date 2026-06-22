@@ -180,14 +180,13 @@ struct PreviewView: NSViewRepresentable {
         func update(frame: CVImageBuffer?, rotation: Int) {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            // CALayer.contents does NOT reliably display a CVPixelBuffer directly.
-            // VideoToolbox frames are IOSurface-backed, and an IOSurface IS a valid
-            // contents type → zero-copy. Fall back to a CGImage if not backed.
+            // Render via a COPIED CGImage each frame. Setting contents straight to
+            // a CVPixelBuffer doesn't reliably display, and pointing at the buffer's
+            // IOSurface risks VideoToolbox recycling it after our async hop (→ black/
+            // garbage). createCGImage copies the pixels, so the layer owns them.
             if let pb = frame {
-                if let surf = CVPixelBufferGetIOSurface(pb)?.takeUnretainedValue() {
-                    contentLayer.contents = surf
-                } else if let cg = ciContext.createCGImage(CIImage(cvPixelBuffer: pb),
-                                                           from: CIImage(cvPixelBuffer: pb).extent) {
+                let ci = CIImage(cvPixelBuffer: pb)
+                if let cg = ciContext.createCGImage(ci, from: ci.extent) {
                     contentLayer.contents = cg
                 }
             } else {

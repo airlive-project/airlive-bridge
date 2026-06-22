@@ -138,6 +138,7 @@ private struct ChannelRow: View {
             VStack(alignment: .leading, spacing: Spacing.xs) {
                 nameLine
                 specLine
+                transferLine
             }
             Spacer(minLength: 0)
             tallyHint
@@ -215,6 +216,23 @@ private struct ChannelRow: View {
         let res = remote.resolution
         let fps = remote.fps
         return "\(res) · \(fps)fps · \(remote.colorSpace)"
+    }
+
+    /// Transfer status — WHERE this channel's video is going (the live outputs),
+    /// not its camera settings. Green when publishing, dim when idle.
+    private var transferLine: some View {
+        let live = channel.outputs.filter { $0.isLive }
+        let publishing = !live.isEmpty
+        return HStack(spacing: Spacing.xs) {
+            Image(systemName: publishing ? "dot.radiowaves.right" : "wifi.slash")
+                .font(.system(size: 9))
+            Text(publishing
+                 ? "→ " + live.map { $0.kind.rawValue.uppercased() }.joined(separator: " · ")
+                 : "Not publishing")
+                .font(.system(size: 10, weight: .medium))
+                .lineLimit(1)
+        }
+        .foregroundColor(publishing ? Color(hex: 0x37CF83) : Theme.textFaint)
     }
 
     /// A tiny coloured square hinting the channel's tally state, derived from

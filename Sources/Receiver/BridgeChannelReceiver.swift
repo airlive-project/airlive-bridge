@@ -114,6 +114,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
     private var decompressionSession: VTDecompressionSession?
     private var decompressionFormat: CMVideoFormatDescription?
     private var lastDecodeErrorLog: TimeInterval = 0
+    private var didLogFirstFrame = false // one-shot preview diagnostic
 
     // MARK: - Init / deinit
 
@@ -696,6 +697,10 @@ final class BridgeChannelReceiver: ChannelReceiver {
         // retained-CF pass, not a copy.
         DispatchQueue.main.async { [weak self] in
             guard let self, let channel = self.channel else { return }
+            if !self.didLogFirstFrame {
+                self.didLogFirstFrame = true
+                print("[BridgeReceiver \(self.src)] ✅ first frame presented (previewEnabled=\(channel.previewEnabled), onFrame set=\(channel.onFrame != nil))")
+            }
             for output in channel.outputs where output.isLive {
                 output.send(buffer, timeNs: timeNs)
             }

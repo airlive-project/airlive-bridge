@@ -224,15 +224,15 @@ private struct ChannelDetail: View {
     private var delayRow: some View {
         Card {
             VStack(alignment: .leading, spacing: Spacing.sm) {
-                SectionLabel(text: "Output delay")
+                SectionLabel(text: "Output delay (ms)")
                 SegmentedBar(
                     selection: Binding(
                         get: { channel.delay },
                         set: { channel.delay = $0 }
                     ),
                     options: LatencyPreset.allCases,
-                    // Short labels so four segments share the row without
-                    // overflow — the full "Normal (+120 ms)" rides in the help.
+                    // The +ms value is the point of this control — show it next to
+                    // the name on each segment (the unit rides in the section label).
                     label: { delayShortLabel($0) }
                 )
             }
@@ -243,10 +243,10 @@ private struct ChannelDetail: View {
     /// long; equal segments need a tight string).
     private func delayShortLabel(_ preset: LatencyPreset) -> String {
         switch preset {
-        case .lowest: return "Lowest"
-        case .normal: return "Normal"
-        case .smooth: return "Smooth"
-        case .safe:   return "Safe"
+        case .lowest: return "Lowest +0"
+        case .normal: return "Normal +120"
+        case .smooth: return "Smooth +200"
+        case .safe:   return "Safe +400"
         }
     }
 }

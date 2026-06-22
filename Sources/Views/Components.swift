@@ -119,6 +119,9 @@ struct PillToggle: View {
     let title: String
     @Binding var isOn: Bool
     var accent: Color = Theme.accentBlue
+    /// Text colour when on — pass a dark colour for light accents (yellow!),
+    /// where white text would be the worst contrast. Defaults to white (blue/red).
+    var onText: Color = .white
     /// Called with the new value after the toggle flips — the moment to send a
     /// control command (commit, not per-keystroke).
     var onChange: (Bool) -> Void = { _ in }
@@ -132,7 +135,7 @@ struct PillToggle: View {
         } label: {
             Text(title)
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(isOn ? .white : Theme.textSecondary)
+                .foregroundColor(isOn ? onText : Theme.textSecondary)
                 .frame(maxWidth: .infinity)
                 .frame(height: ControlMetrics.pillHeight)
                 .background(

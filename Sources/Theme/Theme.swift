@@ -61,8 +61,9 @@ enum Theme {
     /// `#D14545` — live / program / record.  Broadcast red, matched to
     /// Studio's Program tally so a CAM shows the same red on both screens.
     static let accentRed    = Color(hex: 0xD14545)
-    /// `#E2B33C` — staged / preview / caution.  Warm broadcast amber.
-    static let accentYellow = Color(hex: 0xE2B33C)
+    /// `#FFD60A` — staged / preview / caution.  Vivid yellow matching the camera
+    /// app's `.yellow` accent (the previous amber read too dim).
+    static let accentYellow = Color(hex: 0xFFD60A)
 }
 
 // MARK: - Spacing & radius constants

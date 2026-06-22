@@ -122,21 +122,13 @@ struct CameraControlPanel: View {
                 HStack {
                     SectionLabel(text: "Exposure")
                     Spacer()
-                    PillToggle(title: exposureAuto ? "Auto" : "Manual",
+                    PillToggle(title: "Auto",
                                isOn: $exposureAuto,
-                               accent: Theme.accentBlue) { on in
+                               accent: Theme.accentYellow,
+                               onText: Theme.bgApp) { on in
                         channel.send(.setExposureAuto(on))
                     }
-                    .frame(width: 96)
-                }
-
-                // ISO compensation rides above the manual sliders — it only
-                // biases the camera's auto-exposure, so it lives with exposure
-                // but stays usable whether AE is on or off.
-                PillToggle(title: "ISO compensation",
-                           isOn: $isoCompensation,
-                           accent: Theme.accentYellow) { on in
-                    channel.send(.setIsoCompensation(on))
+                    .frame(width: 88)
                 }
 
                 SliderRow(label: "ISO",
@@ -155,8 +147,36 @@ struct CameraControlPanel: View {
                           enabled: !exposureAuto) { v in
                     channel.send(.setShutter(Float(v)))
                 }
+
+                // ISO compensation sits UNDER the parameters as a compact check
+                // — it biases auto-exposure, so it stays usable in either mode.
+                checkbox("ISO compensation", isOn: $isoCompensation) { on in
+                    channel.send(.setIsoCompensation(on))
+                }
             }
         }
+    }
+
+    /// Compact left-aligned checkbox (yellow tick when on) for boolean options
+    /// that don't warrant a full-width pill.
+    private func checkbox(_ title: String, isOn: Binding<Bool>,
+                          onChange: @escaping (Bool) -> Void) -> some View {
+        Button {
+            isOn.wrappedValue.toggle()
+            onChange(isOn.wrappedValue)
+        } label: {
+            HStack(spacing: Spacing.sm) {
+                Image(systemName: isOn.wrappedValue ? "checkmark.square.fill" : "square")
+                    .font(.system(size: 14))
+                    .foregroundColor(isOn.wrappedValue ? Theme.accentYellow : Theme.textFaint)
+                Text(title)
+                    .font(.system(size: 12))
+                    .foregroundColor(Theme.textSecondary)
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: White balance (AWB-gated kelvin / tint)
@@ -167,12 +187,13 @@ struct CameraControlPanel: View {
                 HStack {
                     SectionLabel(text: "White balance")
                     Spacer()
-                    PillToggle(title: whiteBalanceAuto ? "Auto" : "Manual",
+                    PillToggle(title: "Auto",
                                isOn: $whiteBalanceAuto,
-                               accent: Theme.accentBlue) { on in
+                               accent: Theme.accentYellow,
+                               onText: Theme.bgApp) { on in
                         channel.send(.setWhiteBalanceAuto(on))
                     }
-                    .frame(width: 96)
+                    .frame(width: 88)
                 }
                 SliderRow(label: "Temperature",
                           valueText: "\(Int(wbKelvin))K",
@@ -207,12 +228,13 @@ struct CameraControlPanel: View {
                 HStack {
                     SectionLabel(text: "Focus")
                     Spacer()
-                    PillToggle(title: focusAuto ? "Auto" : "Manual",
+                    PillToggle(title: "Auto",
                                isOn: $focusAuto,
-                               accent: Theme.accentBlue) { on in
+                               accent: Theme.accentYellow,
+                               onText: Theme.bgApp) { on in
                         channel.send(.setFocusAuto(on))
                     }
-                    .frame(width: 96)
+                    .frame(width: 88)
                 }
                 SliderRow(label: "Focus",
                           valueText: focusLabel,

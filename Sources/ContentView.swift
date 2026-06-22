@@ -17,14 +17,11 @@ struct ContentView: View {
 
     var body: some View {
         HStack(spacing: 0) {
+            // No explicit dividers between zones — the rails' darker `bgRail`
+            // already separates them, and standalone Dividers were crossing the
+            // preview's rounded corners (the "overlapping lines" artifact).
             ChannelsRail(model: model)
-
-            Divider().background(Theme.strokeDivider)
-
             CenterPane(model: model)
-
-            Divider().background(Theme.strokeDivider)
-
             OutputsRail(model: model)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
