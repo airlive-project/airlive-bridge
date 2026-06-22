@@ -42,6 +42,17 @@ public struct AirlivePacket {
         /// Same TCP socket as `.sample` frames — full-duplex on Apple's
         /// `NWConnection`.
         case control           = 2
+        // ── Receiver-password auth (challenge-response, HMAC) ──────────────
+        // Additive: `protocolVersion` is NOT bumped, so a receiver with auth
+        // OFF never sends `authChallenge` and an old↔new pair behaves exactly
+        // as before.  Replicated from AirliveCore/Packet.swift (FROZEN) +
+        // docs/STREAM-AUTH-SPEC.md.  Wire payloads:
+        //   authChallenge (receiver→camera): 32 raw bytes, single-use nonce.
+        //   authResponse  (camera→receiver): 32 raw bytes, the HMAC tag.
+        //   authResult    (receiver→camera): JSON-encoded `AuthResult`.
+        case authChallenge     = 3
+        case authResponse      = 4
+        case authResult        = 5
     }
 
     public let type: PacketType

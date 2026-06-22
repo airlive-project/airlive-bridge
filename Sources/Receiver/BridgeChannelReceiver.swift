@@ -120,6 +120,36 @@ final class BridgeChannelReceiver: ChannelReceiver {
     private var lastDecodeErrorLog: TimeInterval = 0
     private var didLogFirstFrame = false // one-shot preview diagnostic
 
+    // ── Receiver-password auth (challenge-response) ───────────────────────
+    // Queue-confined (every field below is read/written only on `queue`).  See
+    // docs/STREAM-AUTH-SPEC.md.  Config is snapshotted here via `updateAuth(…)`
+    // so the verify path never touches the channel's main-isolated @Published
+    // state.  `effectiveAuthRequired` gates a connection ONLY when enabled AND a
+    // password is set — an enabled-but-blank toggle never locks anyone out.
+    private var requireAuth = false
+    private var authPassword = ""
+    /// True once a connection is cleared to stream — set ONLY inside the
+    /// successful-verify branch (or immediately when auth is off).  The "challenge
+    /// sent, not yet verified" boolean of the spec is `challengeNonce != nil`.
+    private var authorized = false
+    /// The single outstanding challenge nonce; non-nil ⇒ awaiting `authResponse`.
+    /// Consumed (niled) on verify so a nonce is strictly single-use.
+    private var challengeNonce: Data?
+    /// `formatDescription` payload buffered while PENDING-AUTH (samples are
+    /// dropped); applied once the connection authorizes.
+    private var pendingFormatPayload: Data?
+    private var authStallWork: DispatchWorkItem?
+    /// Per-source failed-attempt counter + ban deadline (anti-bruteforce).  Keyed
+    /// by remote host.  Receiver-side only, per-connect — zero per-frame cost.
+    private var authBans: [String: (failures: Int, banUntil: TimeInterval)] = [:]
+
+    private let authStallTimeout: TimeInterval = 15   // STREAM-AUTH-SPEC §4 (pinned)
+    private let authMaxFailures = 5
+    private let authBanBase: TimeInterval = 30
+    private let authBanMax: TimeInterval = 600
+
+    private var effectiveAuthRequired: Bool { requireAuth && !authPassword.isEmpty }
+
     // MARK: - Init / deinit
 
     init(channel: BridgeChannel, identity: BridgeIdentity = .shared) {
@@ -241,6 +271,21 @@ final class BridgeChannelReceiver: ChannelReceiver {
         }
     }
 
+    /// Apply the receiver-password auth config live.  Snapshots the toggle +
+    /// password onto `queue` (the verify path is queue-confined, so it never reads
+    /// the channel's main-isolated state).  `disconnectNow` drops a currently-
+    /// connected camera so a password change forces an immediate re-auth
+    /// (revocation) — the camera then reconnects manually and re-authenticates.
+    func updateAuth(require: Bool, password: String, disconnectNow: Bool) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.requireAuth = require
+            self.authPassword = password
+            guard disconnectNow, let conn = self.connection else { return }
+            self.gracefulDrop(conn, reason: "auth config changed (revocation)")
+        }
+    }
+
     // MARK: - Listen (ephemeral port + Bonjour)
 
     private func startListening() {
@@ -325,6 +370,13 @@ final class BridgeChannelReceiver: ChannelReceiver {
             conn.cancel()
             return
         }
+        // Anti-bruteforce: a source that just burned through its auth attempts is
+        // refused outright (no challenge, no slot) until its ban expires.
+        if isBanned(conn) {
+            print("[BridgeReceiver \(src)] 🚫 refused banned source \(sourceKey(for: conn))")
+            conn.cancel()
+            return
+        }
         // Dual-stack happy-eyeballs: one iPhone NWConnection opens a socket per
         // resolved address (IPv6 + IPv4); the FIRST to reach `.ready` becomes THE
         // connection, the rest are cancelled.  Don't guess which the iPhone keeps.
@@ -351,14 +403,22 @@ final class BridgeChannelReceiver: ChannelReceiver {
         }
         connection = conn
         anchorSet = false                         // fresh stream → re-anchor PTS
+        resetAuthState()                          // clean slate for this connection
         for other in pendingConnections where other !== conn {
             other.stateUpdateHandler = nil
             other.cancel()
         }
         pendingConnections.removeAll()
-        updateOccupancyAdvertisement(occupied: true)
-        publishConnected(true)
         receive(from: conn)
+        // Auth ON → challenge first; the slot is NOT marked busy and the channel
+        // is NOT surfaced as connected until the camera authorizes (STREAM-AUTH
+        // §4: don't reserve the slot for an unauthenticated peer).  Auth OFF →
+        // authorize immediately, i.e. exactly today's behavior.
+        if effectiveAuthRequired {
+            beginAuth(conn)
+        } else {
+            markAuthorized(conn)
+        }
     }
 
     /// A candidate (or the committed connection) hit a terminal state.  On `queue`.
@@ -375,6 +435,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
         guard connection === conn else { return }
         print("[BridgeReceiver \(src)] 🔌 disconnect (\(reason)) — clearing frame, busy=0")
         connection = nil
+        resetAuthState()                          // drop any pending challenge/buffer
         updateOccupancyAdvertisement(occupied: false)
         teardownDecodeSession()
         pixelBufferLock.lock()
@@ -389,8 +450,8 @@ final class BridgeChannelReceiver: ChannelReceiver {
     private func receive(from conn: NWConnection) {
         conn.receive(minimumIncompleteLength: 1, maximumLength: 131_072) { [weak self, weak conn] data, _, isDone, error in
             guard let self else { return }
-            if let data {
-                for packet in self.parser.append(data) { self.handle(packet) }
+            if let data, let conn {
+                for packet in self.parser.append(data) { self.handle(packet, from: conn) }
             }
             if !isDone && error == nil {
                 if let conn { self.receive(from: conn) }
@@ -408,15 +469,189 @@ final class BridgeChannelReceiver: ChannelReceiver {
 
     // MARK: - Packet handling
 
-    private func handle(_ packet: AirlivePacket) {
+    private func handle(_ packet: AirlivePacket, from conn: NWConnection) {
+        // Ignore straggler bytes that aren't from the committed connection.
+        guard conn === connection else { return }
+
         switch packet.type {
+        // Auth packets are receiver→camera (3, 5) — never legitimately INBOUND.
+        // A peer sending one (e.g. a hostile camera forging authResult{ok:true}
+        // to skip the challenge) is a protocol violation → drop. (STREAM-AUTH §3
+        // direction invariant: authorize ONLY on our own verify of a type-4.)
+        case .authChallenge, .authResult:
+            protocolViolation(conn, "inbound \(packet.type)")
+
+        case .authResponse:
+            handleAuthResponse(packet.payload, from: conn)
+
         case .formatDescription:
-            buildFormatDescription(from: packet.payload)
+            if authorized {
+                buildFormatDescription(from: packet.payload)
+            } else if effectiveAuthRequired {
+                pendingFormatPayload = packet.payload   // buffer latest; apply on authorize
+            }
+
         case .sample:
-            decodeFrame(payload: packet.payload, packetTimestamp: packet.timestampMicros)
+            if authorized {
+                decodeFrame(payload: packet.payload, packetTimestamp: packet.timestampMicros)
+            }
+            // PENDING-AUTH: samples are dropped until authorized.
+
         case .control:
-            handleControl(payload: packet.payload)
+            if authorized {
+                handleControl(payload: packet.payload)
+            }
+            // PENDING-AUTH: control is dropped too (process ONLY authResponse).
         }
+    }
+
+    // MARK: - Receiver-password auth handshake
+
+    /// Send the one challenge for this connection and arm the stall timer.  The
+    /// nonce is single-use; `challengeNonce != nil` is the "awaiting response"
+    /// state.  Called once per connection (STREAM-AUTH §3 invariant: exactly one
+    /// challenge).
+    private func beginAuth(_ conn: NWConnection) {
+        let nonce = AirliveAuth.makeNonce()
+        challengeNonce = nonce
+        sendRaw(.authChallenge, payload: nonce, on: conn)
+        armAuthStallTimer(conn)
+        print("[BridgeReceiver \(src)] 🔒 auth challenge sent — awaiting response")
+    }
+
+    /// Verify a camera's `authResponse`.  Authorizes ONLY on a successful
+    /// constant-time verify of THIS connection's outstanding nonce.
+    private func handleAuthResponse(_ payload: Data, from conn: NWConnection) {
+        guard !authorized else { protocolViolation(conn, "authResponse after authorized"); return }
+        guard effectiveAuthRequired, let nonce = challengeNonce else {
+            protocolViolation(conn, "unexpected authResponse"); return
+        }
+        // Length-check BEFORE verify (hardening rule): a non-32-byte tag is a
+        // failure outright; never let a wrong length reach a compare.
+        guard payload.count == AirliveAuth.tagLength else {
+            registerAuthFailure(for: conn)
+            failAuth(conn, reason: .authFailed)
+            return
+        }
+        if AirliveAuth.verify(tag: payload, password: authPassword, nonce: nonce) {
+            challengeNonce = nil                  // consume — strictly single-use
+            clearAuthFailures(for: conn)
+            sendAuthResult(.success, on: conn)
+            markAuthorized(conn)
+            print("[BridgeReceiver \(src)] 🔓 authorized")
+        } else {
+            registerAuthFailure(for: conn)
+            failAuth(conn, reason: .authFailed)
+            print("[BridgeReceiver \(src)] ⛔ auth failed (wrong password)")
+        }
+    }
+
+    /// Clear a connection to stream: flip `authorized`, mark the slot busy, surface
+    /// it as connected, and apply any format buffered during PENDING-AUTH.  The
+    /// ONLY place `authorized` is set true.
+    private func markAuthorized(_ conn: NWConnection) {
+        authorized = true
+        challengeNonce = nil
+        cancelAuthStallTimer()
+        updateOccupancyAdvertisement(occupied: true)
+        publishConnected(true)
+        if let fmt = pendingFormatPayload {
+            pendingFormatPayload = nil
+            buildFormatDescription(from: fmt)
+        }
+    }
+
+    /// Reject this connection: send the failure result, then close gracefully so
+    /// the result actually flushes before the FIN.
+    private func failAuth(_ conn: NWConnection, reason: AuthReason) {
+        sendAuthResult(.failure(reason), on: conn)
+        gracefulDrop(conn, reason: "auth \(reason.rawValue)")
+    }
+
+    /// A peer broke the protocol — close gracefully.  (We don't reward a forged
+    /// packet with a slot; the connection is torn down.)
+    private func protocolViolation(_ conn: NWConnection, _ what: String) {
+        print("[BridgeReceiver \(src)] ⚠️ protocol violation: \(what) — dropping")
+        gracefulDrop(conn, reason: "protocol violation")
+    }
+
+    /// Clean up channel state for `conn` and close it with a graceful FIN (so any
+    /// queued `authResult` flushes first — `cancel()` waits for pending sends).
+    private func gracefulDrop(_ conn: NWConnection, reason: String) {
+        if connection === conn {
+            handleDisconnect(conn, reason: reason)   // clears state, busy=0
+        } else {
+            pendingConnections.removeAll { $0 === conn }
+        }
+        conn.stateUpdateHandler = nil               // we've already cleaned up
+        conn.cancel()
+    }
+
+    private func resetAuthState() {
+        authorized = false
+        challengeNonce = nil
+        pendingFormatPayload = nil
+        cancelAuthStallTimer()
+    }
+
+    // MARK: Auth — stall timer
+
+    /// FIN a connection that never sends a valid response in `authStallTimeout`.
+    private func armAuthStallTimer(_ conn: NWConnection) {
+        cancelAuthStallTimer()
+        let work = DispatchWorkItem { [weak self, weak conn] in
+            guard let self, let conn, conn === self.connection, !self.authorized else { return }
+            print("[BridgeReceiver \(self.src)] ⏱️ auth stall — no valid response in \(Int(self.authStallTimeout))s")
+            self.failAuth(conn, reason: .authRequired)
+        }
+        authStallWork = work
+        queue.asyncAfter(deadline: .now() + authStallTimeout, execute: work)
+    }
+
+    private func cancelAuthStallTimer() {
+        authStallWork?.cancel()
+        authStallWork = nil
+    }
+
+    // MARK: Auth — anti-bruteforce (per source)
+
+    private func sourceKey(for conn: NWConnection) -> String {
+        if case let .hostPort(host, _) = conn.endpoint { return "\(host)" }
+        return "\(conn.endpoint)"
+    }
+
+    private func isBanned(_ conn: NWConnection) -> Bool {
+        guard let entry = authBans[sourceKey(for: conn)] else { return false }
+        return entry.banUntil > CACurrentMediaTime()
+    }
+
+    private func registerAuthFailure(for conn: NWConnection) {
+        let key = sourceKey(for: conn)
+        var entry = authBans[key] ?? (failures: 0, banUntil: 0)
+        entry.failures += 1
+        if entry.failures >= authMaxFailures {
+            // Exponential backoff past the threshold: base × 2^over, capped.
+            let over = Double(entry.failures - authMaxFailures)
+            let ban = Swift.min(authBanMax, authBanBase * pow(2.0, over))
+            entry.banUntil = CACurrentMediaTime() + ban
+            print("[BridgeReceiver \(src)] 🚫 \(key) banned \(Int(ban))s after \(entry.failures) failed attempts")
+        }
+        authBans[key] = entry
+    }
+
+    private func clearAuthFailures(for conn: NWConnection) {
+        authBans[sourceKey(for: conn)] = nil
+    }
+
+    // MARK: Auth — wire send helpers
+
+    private func sendRaw(_ type: AirlivePacket.PacketType, payload: Data, on conn: NWConnection) {
+        conn.send(content: AirlivePacket(type: type, payload: payload).encode(),
+                  completion: .idempotent)
+    }
+
+    private func sendAuthResult(_ result: AuthResult, on conn: NWConnection) {
+        sendRaw(.authResult, payload: result.encoded(), on: conn)
     }
 
     private func handleControl(payload: Data) {

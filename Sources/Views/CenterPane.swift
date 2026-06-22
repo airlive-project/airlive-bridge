@@ -64,6 +64,7 @@ private struct ChannelDetail: View {
                 previewSection
                 tallyRow
                 delayRow
+                SecurityCard(channel: channel)
                 CameraControlPanel(channel: channel)
             }
             // Tight top padding; generous-but-compact around the rest.  The
@@ -248,5 +249,108 @@ private struct ChannelDetail: View {
         case .smooth: return "Smooth +200"
         case .safe:   return "Safe +400"
         }
+    }
+}
+
+// MARK: - Security card (receiver-password auth)
+
+/// Per-channel receiver-password auth (STREAM-AUTH-SPEC).  OFF by default — the
+/// stream stays open until the operator turns it on AND sets a password.  This is
+/// ACCESS control (keep a same-LAN prankster off the slot), not encryption: the
+/// password is verified by an HMAC challenge the camera answers; it never crosses
+/// the wire.  Changing the password is a revocation — it disconnects the connected
+/// camera so it must re-enter the new one.
+private struct SecurityCard: View {
+    @ObservedObject var channel: BridgeChannel
+    @State private var draftPassword = ""
+
+    /// Auth actually engages only when enabled AND a password is stored.
+    private var locked: Bool { channel.requireAuth && channel.hasPassword }
+
+    var body: some View {
+        Card {
+            VStack(alignment: .leading, spacing: Spacing.sm) {
+                header
+                PillToggle(title: channel.requireAuth ? "Password required" : "Require password",
+                           isOn: $channel.requireAuth)
+                if channel.requireAuth {
+                    statusLine
+                    passwordRow
+                    hint
+                }
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack {
+            SectionLabel(text: "Security")
+            Spacer()
+            StatusPill(text: locked ? "LOCKED" : "OPEN", on: locked, accent: Theme.accentBlue)
+        }
+    }
+
+    /// Reflects whether a password is actually set when the toggle is on — an
+    /// enabled-but-blank toggle leaves the channel OPEN, and we say so in yellow.
+    @ViewBuilder
+    private var statusLine: some View {
+        if channel.hasPassword {
+            Label("Password set — cameras must enter it to connect.", systemImage: "lock.fill")
+                .font(.system(size: 11))
+                .foregroundColor(Theme.textSecondary)
+        } else {
+            Label("No password yet — set one below or the channel stays open.",
+                  systemImage: "exclamationmark.triangle.fill")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(Theme.accentYellow)
+        }
+    }
+
+    private var passwordRow: some View {
+        HStack(spacing: Spacing.sm) {
+            SecureField(channel.hasPassword ? "Change password" : "New password",
+                        text: $draftPassword)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+                .foregroundColor(Theme.textPrimary)
+                .padding(.horizontal, Spacing.sm)
+                .frame(height: 30)
+                .background(
+                    RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+                        .fill(Theme.bgApp)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+                        .stroke(Theme.stroke, lineWidth: 1)
+                )
+                .onSubmit { commitPassword() }
+
+            Button("Set") { commitPassword() }
+                .bridgeButton()
+                .frame(height: 30)
+                .disabled(draftPassword.isEmpty)
+                .opacity(draftPassword.isEmpty ? 0.5 : 1)
+
+            if channel.hasPassword {
+                Button("Remove") { channel.setPassword(""); draftPassword = "" }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(Theme.accentRed)
+            }
+        }
+    }
+
+    private var hint: some View {
+        Text("ASCII passwords only (the OBS plugin runs on Windows/Linux). Changing the password disconnects the connected camera — it must re-enter it.")
+            .font(.system(size: 10))
+            .foregroundColor(Theme.textFaint)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func commitPassword() {
+        let pw = draftPassword.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !pw.isEmpty else { return }
+        channel.setPassword(pw)        // stored in Keychain + revokes the live camera
+        draftPassword = ""
     }
 }

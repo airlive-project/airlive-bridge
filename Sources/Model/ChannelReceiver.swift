@@ -39,4 +39,10 @@ protocol ChannelReceiver: AnyObject {
     /// foundation seam so `BridgeChannel` can forward `delay` changes without a
     /// concrete-type dependency.
     func updateDelay(_ preset: LatencyPreset)
+
+    /// Apply the receiver-password auth config live (STREAM-AUTH-SPEC §4).
+    /// `require && !password.isEmpty` turns the challenge-response on for the
+    /// NEXT connection; `disconnectNow` additionally drops a currently-connected
+    /// camera so a password change forces an immediate re-auth (revocation).
+    func updateAuth(require: Bool, password: String, disconnectNow: Bool)
 }
