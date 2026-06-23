@@ -46,6 +46,19 @@ final class BridgeModel: ObservableObject {
     /// Cut: the staged Preview camera goes live to Program.
     func take() { if let p = previewID { programID = p } }
 
+    // MARK: - Shortcut actions
+
+    /// Space: cut Preview → Program (Multiview only; nothing to cut in Solo).
+    func cutAction() { if mode == .multiview { take() } }
+
+    /// Digit N (0-based): put camera N on PROGRAM — a hot-cut in Multiview, a
+    /// selection in Solo.  Out-of-range is a no-op.
+    func programSelect(_ index: Int) {
+        guard index >= 0, index < channels.count else { return }
+        let id = channels[index].id
+        if mode == .multiview { programID = id } else { select(id) }
+    }
+
     // MARK: - Program bus (the single output path)
     //
     // PROGRAM is what's published downstream: the program output(s) (NDI/SRT/RTSP)

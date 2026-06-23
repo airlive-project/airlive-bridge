@@ -12,12 +12,20 @@ import SwiftUI
 
 @main
 struct AirliveBridgeApp: App {
-    @StateObject private var model = BridgeModel()
+    @StateObject private var model: BridgeModel
+    @StateObject private var shortcuts: ShortcutCenter
+
+    init() {
+        let m = BridgeModel()
+        _model = StateObject(wrappedValue: m)
+        _shortcuts = StateObject(wrappedValue: ShortcutCenter(model: m))
+    }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(model)
+                .environmentObject(shortcuts)
                 // Min size keeps the three zones (Channels 240 + center + Outputs
                 // 280, plus dividers) from overlapping; the center still has room
                 // for the 16:9 preview + control panel at the floor.  Ideal size

@@ -54,7 +54,9 @@ struct MultiviewGrid: View {
                 .frame(height: 38)
         }
         .bridgeButton()
-        .keyboardShortcut(.space, modifiers: [])
+        // Space is handled centrally by ShortcutCenter (so it also works in the
+        // background when "global" is on) — no per-button shortcut to avoid a
+        // double cut.
         .disabled(model.previewChannel() == nil)
         .opacity(model.previewChannel() == nil ? 0.5 : 1)
     }

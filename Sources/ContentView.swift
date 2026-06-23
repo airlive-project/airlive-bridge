@@ -14,6 +14,8 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var model: BridgeModel
+    @EnvironmentObject var shortcuts: ShortcutCenter
+    @State private var showShortcuts = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -39,6 +41,15 @@ struct ContentView: View {
                              options: AppMode.allCases,
                              label: { $0.label })
                     .frame(width: 320)
+            }
+            ToolbarItem(placement: .automatic) {
+                Button { showShortcuts.toggle() } label: {
+                    Image(systemName: "keyboard")
+                }
+                .help("Shortcuts")
+                .popover(isPresented: $showShortcuts, arrowEdge: .bottom) {
+                    ShortcutSettings(shortcuts: shortcuts)
+                }
             }
         }
         .toolbarBackground(Theme.bgApp, for: .windowToolbar)
