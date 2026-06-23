@@ -93,9 +93,8 @@ final class BridgeModel: ObservableObject {
         // connection comes up, ask the on-air camera for one (off the relay's queue
         // → hop to main where the program state lives).
         if let relay = output as? AirliveRelayOutput {
-            relay.onReady = { [weak self] in
-                DispatchQueue.main.async { self?.requestKeyframeForProgram() }
-            }
+            // onReady fires on main once OBS is actually connected.
+            relay.onReady = { [weak self] in self?.requestKeyframeForProgram() }
         }
         programOutputs.append(output)
         output.start()
@@ -125,11 +124,14 @@ final class BridgeModel: ObservableObject {
     }
 
     /// After a program (re)route, ask the on-air camera for a fresh keyframe — but
-    /// ONLY when a passthrough relay (OBS) is consuming it.  Gated so the phone never
-    /// emits an extra I-frame for nothing (NDI re-encodes from decoded frames and
-    /// resyncs cleanly without one).  No-op if no camera is connected (`send`).
+    /// ONLY when an OBS relay is ACTUALLY connected and receiving (not merely toggled
+    /// on / still browsing).  Gated tightly so the phone never emits an extra I-frame
+    /// for nothing: NDI doesn't need it (re-encodes from decoded frames), and an
+    /// "on but not connected" relay has nobody to receive it.  No-op if no camera is
+    /// connected (`send`).
     private func requestKeyframeForProgram() {
-        guard programOutputs.contains(where: { $0.isLive && $0.kind == .obs }) else { return }
+        let obsReceiving = programOutputs.contains { ($0 as? AirliveRelayOutput)?.isConnected == true }
+        guard obsReceiving else { return }
         channels.first { $0.id == effectiveProgramID }?.send(.forceKeyframe())
     }
 

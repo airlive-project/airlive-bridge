@@ -32,6 +32,11 @@ final class AirliveRelayOutput: VideoOutput {
     /// for the next natural keyframe).
     var onReady: (() -> Void)?
 
+    /// True ONLY while actually connected to OBS (not merely "on" / browsing).
+    /// Written on main (from the connection state) so the model can read it on main
+    /// to gate the force-keyframe — no keyframe is requested when nobody's receiving.
+    private(set) var isConnected: Bool = false
+
     private let queue = DispatchQueue(label: "studio.airlive.bridge.relay", qos: .userInitiated)
     private var browser: NWBrowser?
     private var connection: NWConnection?
@@ -51,6 +56,7 @@ final class AirliveRelayOutput: VideoOutput {
     func stop() {
         guard isLive else { return }
         isLive = false
+        isConnected = false   // main thread (called from removeProgramOutput)
         queue.async { [weak self] in
             guard let self else { return }
             self.browser?.cancel(); self.browser = nil
@@ -108,9 +114,12 @@ final class AirliveRelayOutput: VideoOutput {
                 self.ready = true
                 print("[Relay \(self.label)] ✅ connected to OBS")
                 if let fmt = self.lastFormat { self.write(type: .formatDescription, payload: fmt, timestampMicros: 0) }
-                self.onReady?()   // ask the model to request a keyframe → fast OBS sync
+                // Publish "connected" on main BEFORE asking for the keyframe, so the
+                // model's gate (reads isConnected on main) sees true.
+                DispatchQueue.main.async { self.isConnected = true; self.onReady?() }
             case .failed, .cancelled:
                 self.ready = false
+                DispatchQueue.main.async { self.isConnected = false }
                 if self.connection === conn { self.connection = nil }   // browser will reconnect
             default:
                 break
