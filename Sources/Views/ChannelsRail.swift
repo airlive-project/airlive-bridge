@@ -72,26 +72,30 @@ struct ChannelsRail: View {
         if model.channels.isEmpty {
             emptyState
         } else {
-            ScrollView {
-                LazyVStack(spacing: Spacing.sm) {
-                    ForEach(model.channels) { channel in
-                        ChannelRow(
-                            channel: channel,
-                            selected: channel.id == model.selectedID,
-                            isProgram: channel.id == model.effectiveProgramID,
-                            programPublishing: model.programOutputs.contains { $0.isLive },
-                            onSelect: { model.select(channel.id) },
-                            onRemove: {
-                                TallyStore.shared.clear(channel.id)
-                                model.removeChannel(channel.id)
-                            }
-                        )
-                    }
+            // A List (not a LazyVStack) so rows DRAG-REORDER via `.onMove` — the
+            // multiview order follows the list.  Styled plain + clear rows so it
+            // keeps the custom rail look.
+            List {
+                ForEach(model.channels) { channel in
+                    ChannelRow(
+                        channel: channel,
+                        selected: channel.id == model.selectedID,
+                        isProgram: channel.id == model.effectiveProgramID,
+                        programPublishing: model.programOutputs.contains { $0.isLive },
+                        onSelect: { model.select(channel.id) },
+                        onRemove: {
+                            TallyStore.shared.clear(channel.id)
+                            model.removeChannel(channel.id)
+                        }
+                    )
+                    .listRowInsets(EdgeInsets(top: 3, leading: Spacing.md, bottom: 3, trailing: Spacing.md))
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
                 }
-                .padding(.horizontal, Spacing.md)
-                .padding(.top, Spacing.xs)
-                .padding(.bottom, Spacing.md)
+                .onMove { from, to in model.moveChannel(from: from, to: to) }
             }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
         }
     }
 

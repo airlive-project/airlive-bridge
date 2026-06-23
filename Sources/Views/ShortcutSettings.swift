@@ -56,6 +56,7 @@ struct ShortcutSettings: View {
         VStack(alignment: .leading, spacing: Spacing.xs) {
             legendRow(shortcuts.global ? "⌃⌥Space" : "Space", "Cut Preview → Program")
             legendRow(shortcuts.global ? "⌃⌥1–9" : "1–9", "Camera → Program")
+            legendRow(shortcuts.global ? "⌃⌥⇧1–6" : "⇧1–6", "Lens (focused camera)")
         }
         .opacity(shortcuts.enabled ? 1 : 0.45)
     }

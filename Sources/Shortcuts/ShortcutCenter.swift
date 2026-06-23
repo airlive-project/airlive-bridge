@@ -76,28 +76,37 @@ final class ShortcutCenter: ObservableObject {
 
     // MARK: - Event handling
 
-    /// In-app: plain key, no modifiers, not while typing in a field.
+    /// In-app: plain key → program/cut; ⇧+digit → lens.  Ignored while typing.
     private func handleLocal(_ event: NSEvent) {
         guard enabled, !isTyping() else { return }
         let mods = event.modifierFlags.intersection([.command, .shift, .control, .option])
-        guard mods.isEmpty else { return }
-        fire(CGKeyCode(event.keyCode))
+        if mods.isEmpty {
+            fire(CGKeyCode(event.keyCode))
+        } else if mods == [.shift] {
+            fireLens(CGKeyCode(event.keyCode))
+        }
     }
 
-    /// Global: requires the ⌃⌥ chord (plain keys would fire on normal typing).
+    /// Global: requires the ⌃⌥ chord (plain keys would fire on normal typing);
+    /// add ⇧ for lens.
     private func handleGlobal(_ keycode: CGKeyCode, _ flags: CGEventFlags) {
         guard enabled, global else { return }
         guard flags.contains(.maskControl) && flags.contains(.maskAlternate) else { return }
-        fire(keycode)
+        if flags.contains(.maskShift) { fireLens(keycode) } else { fire(keycode) }
     }
 
-    /// The one binding table — both engines route here.
+    /// Program / cut bindings — both engines route here.
     private func fire(_ keycode: CGKeyCode) {
         switch keycode {
         case 49: model.cutAction()                                   // Space → Cut / take
         default:
             if let n = Self.digit(for: keycode) { model.programSelect(n - 1) }   // 1–9 → camera N
         }
+    }
+
+    /// Lens bindings — ⇧+digit N → the focused camera's Nth lens.
+    private func fireLens(_ keycode: CGKeyCode) {
+        if let n = Self.digit(for: keycode) { model.lensSelect(n - 1) }
     }
 
     /// macOS keycodes for the top-row digits 1...9.

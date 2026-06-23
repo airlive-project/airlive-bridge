@@ -59,6 +59,17 @@ final class BridgeModel: ObservableObject {
         if mode == .multiview { programID = id } else { select(id) }
     }
 
+    /// ⇧+digit N (0-based): set the FOCUSED camera's lens to its Nth available
+    /// lens — the staged (Preview) camera in Multiview, the selected camera in
+    /// Solo.  No-op if there's no camera or N is out of range.
+    func lensSelect(_ index: Int) {
+        let target = mode == .multiview ? previewChannel() : selectedChannel
+        guard let channel = target,
+              let lenses = channel.remote?.availableLenses,
+              index >= 0, index < lenses.count else { return }
+        channel.send(.setLens(lenses[index]))
+    }
+
     // MARK: - Program bus (the single output path)
     //
     // PROGRAM is what's published downstream: the program output(s) (NDI/SRT/RTSP)
@@ -176,6 +187,13 @@ final class BridgeModel: ObservableObject {
     func select(_ id: UUID) {
         guard channels.contains(where: { $0.id == id }) else { return }
         selectedID = id
+    }
+
+    /// Reorder channels (drag in the Channels rail).  The multiview reads
+    /// `channels` order, so the grid follows automatically; program/preview are
+    /// tracked by id, so they stay valid.
+    func moveChannel(from source: IndexSet, to destination: Int) {
+        channels.move(fromOffsets: source, toOffset: destination)
     }
 
     // MARK: - Channel management
