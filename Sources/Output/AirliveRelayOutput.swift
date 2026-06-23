@@ -27,6 +27,11 @@ final class AirliveRelayOutput: VideoOutput {
     /// TCP connection is established asynchronously in the background.
     private(set) var isLive: Bool = false
 
+    /// Called when the OBS connection becomes ready — the model uses it to ask the
+    /// on-air camera for a keyframe so OBS starts decoding fast (instead of waiting
+    /// for the next natural keyframe).
+    var onReady: (() -> Void)?
+
     private let queue = DispatchQueue(label: "studio.airlive.bridge.relay", qos: .userInitiated)
     private var browser: NWBrowser?
     private var connection: NWConnection?
@@ -103,6 +108,7 @@ final class AirliveRelayOutput: VideoOutput {
                 self.ready = true
                 print("[Relay \(self.label)] ✅ connected to OBS")
                 if let fmt = self.lastFormat { self.write(type: .formatDescription, payload: fmt, timestampMicros: 0) }
+                self.onReady?()   // ask the model to request a keyframe → fast OBS sync
             case .failed, .cancelled:
                 self.ready = false
                 if self.connection === conn { self.connection = nil }   // browser will reconnect

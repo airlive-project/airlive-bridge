@@ -281,6 +281,14 @@ public struct ControlMessage: Codable {
     public static func setCue(_ v: String) -> ControlMessage {
         ControlMessage(type: "setCue", stringValue: v)
     }
+    /// Ask the camera to emit an IDR (keyframe) NOW, so a passthrough relay (OBS)
+    /// can resync immediately after a CUT instead of waiting for the next natural
+    /// keyframe.  FORWARD-SAFE: a camera that doesn't recognise the type ignores it
+    /// (the relay then resyncs on the next natural keyframe — no regression), so the
+    /// Bridge can ship this before the camera handler exists.
+    public static func forceKeyframe() -> ControlMessage {
+        ControlMessage(type: "forceKeyframe")
+    }
 
     // MARK: Encode / decode helpers — wrap JSON in an AirlivePacket payload
 
