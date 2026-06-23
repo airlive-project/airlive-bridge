@@ -22,19 +22,40 @@ struct CenterPane: View {
     @ObservedObject var model: BridgeModel
 
     var body: some View {
-        Group {
-            if let channel = model.selectedChannel {
-                ChannelDetail(channel: channel)
-                    // Re-create the detail subtree per channel so its local
-                    // @State (preview pane sizing, slider drafts) resets cleanly
-                    // when the selection changes.
-                    .id(channel.id)
-            } else {
-                emptyState
-            }
+        VStack(spacing: 0) {
+            modeBar
+            content
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.bgApp)
+    }
+
+    /// Solo ⇄ Multiview switch at the top of the center zone.
+    private var modeBar: some View {
+        HStack {
+            SegmentedBar(selection: $model.mode,
+                         options: AppMode.allCases,
+                         label: { $0.label })
+                .frame(maxWidth: 260)
+            Spacer()
+        }
+        .padding(.horizontal, Spacing.lg)
+        .padding(.top, Spacing.md)
+        .padding(.bottom, Spacing.xs)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if model.mode == .multiview {
+            MultiviewGrid(model: model)
+        } else if let channel = model.selectedChannel {
+            ChannelDetail(channel: channel)
+                // Re-create the detail subtree per channel so its local @State
+                // (preview pane sizing, slider drafts) resets cleanly on change.
+                .id(channel.id)
+        } else {
+            emptyState
+        }
     }
 
     private var emptyState: some View {

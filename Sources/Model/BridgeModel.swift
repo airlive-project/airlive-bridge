@@ -7,6 +7,16 @@
 
 import Foundation
 
+/// What the Bridge is monitoring / sending: one camera at a time (Solo) or the
+/// composited grid of all cameras (Multiview).  The two are MUTUALLY EXCLUSIVE
+/// for output — we never publish solo feeds AND the multiview program at once
+/// (Phase 2 wires the senders to this).
+enum AppMode: String, CaseIterable, Identifiable {
+    case solo, multiview
+    var id: String { rawValue }
+    var label: String { self == .solo ? "Solo" : "Multiview" }
+}
+
 /// Application-level state for Airlive Bridge.  `ObservableObject` for macOS 13
 /// compatibility (see `BridgeChannel`).
 final class BridgeModel: ObservableObject {
@@ -17,6 +27,25 @@ final class BridgeModel: ObservableObject {
     /// Currently-selected channel's id (drives the center zone), or nil when
     /// none is selected.
     @Published var selectedID: UUID?
+
+    /// Solo (one camera) vs Multiview (the grid).  Drives the center monitor now;
+    /// Phase 2 ties the output routing to it (mutually exclusive senders).
+    @Published var mode: AppMode = .solo
+
+    // MARK: - Multiview grid (adaptive 4 / 8 / 12 / 16)
+
+    /// Cells in the multiview grid: the smallest of 4/8/12/16 that fits the
+    /// channel count (capped at 16), so the grid grows in real steps instead of
+    /// Studio's fixed 8.
+    func multiviewCapacity() -> Int {
+        let n = channels.count
+        for cap in [4, 8, 12, 16] where n <= cap { return cap }
+        return 16
+    }
+
+    /// Columns for the current capacity: a 2×2 quad for 4, otherwise 4-wide
+    /// (4×2 / 4×3 / 4×4) — the standard multiview convention.
+    func multiviewColumns() -> Int { multiviewCapacity() == 4 ? 2 : 4 }
 
     // MARK: - Security (ONE global password for the whole Bridge)
     //
