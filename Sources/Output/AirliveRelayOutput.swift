@@ -80,9 +80,10 @@ final class AirliveRelayOutput: VideoOutput {
         let browser = NWBrowser(for: .bonjour(type: "_airlive._tcp", domain: nil), using: params)
         browser.browseResultsChangedHandler = { [weak self] results, _ in
             guard let self, self.connection == nil else { return }
-            // Connect to the first OBS receiver (TXT role == "obs").
+            // Connect to the first "OBS Airlive Bridge" source (TXT role
+            // "obs-bridge") — NOT the direct iPhone source ("obs").
             for result in results {
-                if case let .bonjour(txt) = result.metadata, txt["role"] == "obs" {
+                if case let .bonjour(txt) = result.metadata, txt["role"] == "obs-bridge" {
                     self.connect(to: result.endpoint)
                     break
                 }
