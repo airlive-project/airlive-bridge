@@ -71,24 +71,13 @@ final class BridgeModel: ObservableObject {
     /// Keychain account for the single global Bridge password.
     private static let authAccount = "global"
 
-    /// Require a password on every channel.  Pushed to all receivers on change.
-    @Published var requireAuth: Bool {
-        didSet {
-            guard requireAuth != oldValue else { return }
-            pushAuthToAll(disconnectNow: false)
-        }
-    }
-
-    /// True when a global password is stored (drives the UI without reading the
-    /// secret into a published property).
+    /// True when a global password is stored.  Setting a password IS enabling
+    /// auth (it gates every channel); clearing it leaves the Bridge open — there
+    /// is no separate toggle.  Derived (not @Published); `setPassword` fires
+    /// `objectWillChange` so the UI re-reads it.
     var hasPassword: Bool { BridgeKeychain.password(account: Self.authAccount) != nil }
 
-    init() {
-        // Persist auth across launches via the Keychain's presence: if a password
-        // was set last time, come up locked.  (didSet is not triggered by the
-        // initializer, and there are no channels yet, so nothing to push.)
-        requireAuth = BridgeKeychain.password(account: Self.authAccount) != nil
-    }
+    init() {}
 
     /// Set (or clear) the global password.  Stored in the Keychain, then pushed
     /// to every channel.  A password change is a REVOCATION (`disconnectNow`) so
@@ -99,11 +88,12 @@ final class BridgeModel: ObservableObject {
         pushAuthToAll(disconnectNow: true)
     }
 
-    /// Push the current global auth config to every channel's receiver.
+    /// Push the current global auth config to every channel's receiver.  Auth is
+    /// required exactly when a password exists.
     func pushAuthToAll(disconnectNow: Bool) {
         let password = BridgeKeychain.password(account: Self.authAccount) ?? ""
         for channel in channels {
-            channel.receiver?.updateAuth(require: requireAuth, password: password,
+            channel.receiver?.updateAuth(require: !password.isEmpty, password: password,
                                          disconnectNow: disconnectNow)
         }
     }
@@ -112,7 +102,7 @@ final class BridgeModel: ObservableObject {
     /// receiver comes online, so its very first connection is gated correctly).
     private func applyAuth(to channel: BridgeChannel) {
         let password = BridgeKeychain.password(account: Self.authAccount) ?? ""
-        channel.receiver?.updateAuth(require: requireAuth, password: password,
+        channel.receiver?.updateAuth(require: !password.isEmpty, password: password,
                                      disconnectNow: false)
     }
 

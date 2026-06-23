@@ -267,93 +267,56 @@ private struct ChannelRow: View {
     }
 }
 
-// MARK: - Security footer (ONE global password for the whole Bridge)
+// MARK: - Security footer (ONE button — set / change the Bridge password)
 
-/// A compact security control pinned to the bottom of the Channels rail.  One
-/// password gates EVERY channel (STREAM-AUTH-SPEC — receiver-side policy).  A
-/// plain switch turns it on; the password itself is entered in a small popover
-/// so the narrow rail stays uncluttered.  OFF by default; ACCESS control, not
-/// encryption — the password is verified by an HMAC challenge, never sent.
+/// A single button pinned to the bottom of the Channels rail.  Setting a password
+/// IS turning auth on (it gates every channel); no password = open.  No toggle,
+/// no explanatory blurb — just the button, which opens a small popover to enter /
+/// remove the password.  ACCESS control, not encryption (HMAC challenge; the
+/// password is never sent).
 private struct SecurityFooter: View {
     @ObservedObject var model: BridgeModel
     @State private var showSheet = false
     @State private var draft = ""
 
-    private var locked: Bool { model.requireAuth && model.hasPassword }
-
     var body: some View {
-        VStack(spacing: Spacing.sm) {
-            row
-            if model.requireAuth {
-                setButton
+        Button { draft = ""; showSheet = true } label: {
+            HStack(spacing: Spacing.sm) {
+                Image(systemName: model.hasPassword ? "lock.fill" : "lock")
+                    .font(.system(size: 12))
+                    .foregroundColor(model.hasPassword ? Theme.accentBlue : Theme.textFaint)
+                    .frame(width: 16)
+                Text(model.hasPassword ? "Password set" : "Set password")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(Theme.textSecondary)
+                Spacer()
+                if model.hasPassword {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(Theme.accentBlue)
+                }
             }
+            .padding(.horizontal, Spacing.md)
+            .frame(height: 44)
+            .contentShape(Rectangle())
         }
-        .padding(Spacing.md)
+        .buttonStyle(.plain)
         .background(Theme.bgPanel)
         .overlay(Rectangle().frame(height: 1).foregroundColor(Theme.stroke), alignment: .top)
-    }
-
-    private var row: some View {
-        HStack(spacing: Spacing.sm) {
-            Image(systemName: locked ? "lock.fill" : "lock.open")
-                .font(.system(size: 12))
-                .foregroundColor(locked ? Theme.accentBlue : Theme.textFaint)
-                .frame(width: 16)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Security")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(Theme.textSecondary)
-                Text(statusText)
-                    .font(.system(size: 9))
-                    .foregroundColor(statusColor)
-                    .lineLimit(1)
-            }
-            Spacer()
-            Toggle("", isOn: $model.requireAuth)
-                .toggleStyle(.switch)
-                .tint(Theme.accentBlue)
-                .labelsHidden()
-                .scaleEffect(0.85)
-        }
-    }
-
-    private var setButton: some View {
-        Button { draft = ""; showSheet = true } label: {
-            Text(model.hasPassword ? "Change password…" : "Set password…")
-                .font(.system(size: 11, weight: .medium))
-                .frame(maxWidth: .infinity)
-                .frame(height: 26)
-        }
-        // Nudge the operator (accent fill) while auth is on but no password set.
-        .bridgeButton(selected: model.requireAuth && !model.hasPassword)
         .popover(isPresented: $showSheet, arrowEdge: .trailing) { popover }
-    }
-
-    private var statusText: String {
-        if !model.requireAuth { return "Open — any device on the LAN" }
-        return model.hasPassword ? "Required on all channels" : "No password — still open"
-    }
-
-    private var statusColor: Color {
-        if !model.requireAuth { return Theme.textFaint }
-        return model.hasPassword ? Theme.textFaint : Theme.accentYellow
     }
 
     private var popover: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
-            Text("Bridge password")
+            Text(model.hasPassword ? "Change password" : "Set password")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
-            Text("One password for every channel. Cameras must enter it to connect.")
-                .font(.system(size: 10))
-                .foregroundColor(Theme.textFaint)
-                .fixedSize(horizontal: false, vertical: true)
             SecureField("Password", text: $draft)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
                 .foregroundColor(Theme.textPrimary)
                 .padding(.horizontal, Spacing.sm)
-                .frame(height: 30)
+                .frame(width: 220, height: 30)
                 .background(RoundedRectangle(cornerRadius: Radius.button, style: .continuous).fill(Theme.bgApp))
                 .overlay(RoundedRectangle(cornerRadius: Radius.button, style: .continuous).stroke(Theme.stroke, lineWidth: 1))
                 .onSubmit { commit() }
@@ -373,7 +336,7 @@ private struct SecurityFooter: View {
             }
         }
         .padding(Spacing.md)
-        .frame(width: 260)
+        .frame(width: 252)
         .background(Theme.bgPanel)
     }
 

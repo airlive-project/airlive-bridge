@@ -27,7 +27,10 @@ struct AirliveBridgeApp: App {
                        minHeight: 680, idealHeight: 760)
                 .preferredColorScheme(.dark)
         }
-        .windowStyle(.hiddenTitleBar)
+        // A compact unified title bar so the Solo ⇄ Multiview switch can live in
+        // it (ContentView's `.toolbar`, principal placement) — no wasted strip
+        // below the traffic lights.  The principal item replaces the window title.
+        .windowToolbarStyle(.unifiedCompact)
         // First-launch window size — matches the ideal content frame so the
         // operator never has to resize to see all three zones.
         .defaultSize(width: 1200, height: 760)
