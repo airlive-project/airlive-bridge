@@ -26,34 +26,45 @@ struct MultiviewGrid: View {
                 bigRow
                 cutBar
                 thumbnails
+                cameraControl
             }
             .padding(Spacing.lg)
         }
     }
 
     // MARK: Preview + Program (the two big windows)
+    // Studio colours: PREVIEW = broadcast green, PROGRAM = broadcast red.
 
     private var bigRow: some View {
         HStack(spacing: Spacing.md) {
-            BigPane(title: "PREVIEW", accent: Theme.accentBlue, channel: model.previewChannel())
+            BigPane(title: "PREVIEW", accent: Theme.previewGreen, channel: model.previewChannel())
             BigPane(title: "PROGRAM", accent: Theme.accentRed, channel: model.programChannel())
         }
     }
 
+    // Full-width CUT (cut Preview → Program).  Space triggers it; the shortcut is
+    // shown in the label and will be reassignable later.
     private var cutBar: some View {
-        HStack {
-            Spacer()
-            Button { model.take() } label: {
-                HStack(spacing: Spacing.sm) {
-                    Image(systemName: "arrow.right.circle.fill")
-                    Text("CUT  →  PROGRAM").font(.system(size: 13, weight: .bold))
-                }
-                .frame(width: 240, height: 40)
-            }
-            .bridgeButton(selected: model.previewChannel() != nil, accent: Theme.accentRed)
-            .disabled(model.previewChannel() == nil)
-            .opacity(model.previewChannel() == nil ? 0.5 : 1)
-            Spacer()
+        Button { model.take() } label: {
+            Text("CUT  (Space)")
+                .font(.system(size: 13, weight: .bold))
+                .frame(maxWidth: .infinity)
+                .frame(height: 40)
+        }
+        .bridgeButton(selected: model.previewChannel() != nil, accent: Theme.accentRed)
+        .keyboardShortcut(.space, modifiers: [])
+        .disabled(model.previewChannel() == nil)
+        .opacity(model.previewChannel() == nil ? 0.5 : 1)
+    }
+
+    // Camera control for the STAGED (Preview) camera, kept under the multiview —
+    // lens-first (the panel leads with the lens picker), no tally here.
+    @ViewBuilder
+    private var cameraControl: some View {
+        if let preview = model.previewChannel() {
+            CameraControlPanel(channel: preview)
+                .disabled(!preview.isConnected)
+                .opacity(preview.isConnected ? 1.0 : 0.4)
         }
     }
 
@@ -80,13 +91,10 @@ struct MultiviewGrid: View {
     }
 
     private var emptyThumb: some View {
-        RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+        Rectangle()
             .fill(Color.black)
             .aspectRatio(16.0 / 9.0, contentMode: .fit)
-            .overlay(
-                RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
-                    .stroke(Theme.stroke, lineWidth: 1)
-            )
+            .overlay(Rectangle().stroke(Theme.stroke, lineWidth: 1))
             .overlay(
                 Image(systemName: "plus").font(.system(size: 13))
                     .foregroundColor(Theme.textFaint.opacity(0.3))
@@ -115,11 +123,9 @@ private struct BigPane: View {
         .aspectRatio(16.0 / 9.0, contentMode: .fit)
         .frame(maxWidth: .infinity)
         .background(Color.black)
-        .clipShape(RoundedRectangle(cornerRadius: Radius.panel, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: Radius.panel, style: .continuous)
-                .stroke(accent, lineWidth: 2.5)
-        )
+        .clipped()
+        // Square — multiview windows have NO rounding (Studio).
+        .overlay(Rectangle().stroke(accent, lineWidth: 3))
     }
 
     private var label: some View {
@@ -129,8 +135,7 @@ private struct BigPane: View {
             .foregroundColor(.white)
             .padding(.horizontal, Spacing.sm)
             .padding(.vertical, 3)
-            .background(Capsule(style: .continuous).fill(accent))
-            .padding(Spacing.sm)
+            .background(Rectangle().fill(accent))   // square badge, no rounding
     }
 
     private var placeholder: some View {
@@ -195,11 +200,9 @@ private struct ThumbCell: View {
         LivePane(channel: channel)
             .aspectRatio(16.0 / 9.0, contentMode: .fit)
             .background(Color.black)
-            .clipShape(RoundedRectangle(cornerRadius: Radius.button, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
-                    .stroke(borderColor, lineWidth: borderWidth)
-            )
+            .clipped()
+            // Square — no rounding (Studio); green = staged, red = on air.
+            .overlay(Rectangle().stroke(borderColor, lineWidth: borderWidth))
             .contentShape(Rectangle())
             .onTapGesture(count: 2) { onTake() }
             .onTapGesture { onStage() }
@@ -208,10 +211,10 @@ private struct ThumbCell: View {
 
     private var borderColor: Color {
         if isProgram { return Theme.accentRed }
-        if isPreview { return Theme.accentBlue }
+        if isPreview { return Theme.previewGreen }
         return Theme.stroke
     }
-    private var borderWidth: CGFloat { (isProgram || isPreview) ? 2.5 : 1 }
+    private var borderWidth: CGFloat { (isProgram || isPreview) ? 3 : 1 }
 }
 
 /// Tiny dummy ObservableObject so `BigPane` can hold an `@ObservedObject` even in

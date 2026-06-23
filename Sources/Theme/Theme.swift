@@ -64,6 +64,9 @@ enum Theme {
     /// `#FFD60A` — staged / preview / caution.  Vivid yellow matching the camera
     /// app's `.yellow` accent (the previous amber read too dim).
     static let accentYellow = Color(hex: 0xFFD60A)
+    /// `#3EB85C` — multiview PREVIEW (staged) border.  Broadcast green, matched
+    /// to Studio's Preview tally so the switcher reads the same on both apps.
+    static let previewGreen = Color(hex: 0x3EB85C)
 }
 
 // MARK: - Spacing & radius constants
