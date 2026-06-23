@@ -20,7 +20,10 @@ then Windows.
 
 ## v1 close criteria (decided 2026-06-23)
 
-**v1 outputs:** NDI ✅ + OBS passthrough relay ✅ + **SRT + RTSP** (to build).
+**v1 outputs:** NDI ✅ + OBS passthrough relay ✅ + **RTSP** ✅ + **SRT** ✅ — all
+four built (RTSP/SRT remux the program's H.264, no transcode). RTSP/SRT still need
+real-client validation (VLC/ffmpeg for RTSP; libsrt + an SRT receiver for SRT) — the
+protocol wire can't be exercised from a build; folded into the soak/E2E pass.
 **Distribution:** signed + **notarized** installer on the site (like OBS) — NOT the
 Mac App Store (sandbox almost certainly rejects NDI/raw-socket/Bonjour; revisit only
 if it turns out to pass). Same model as Studio (sold via airlive.studio).
