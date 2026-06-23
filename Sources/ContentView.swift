@@ -48,7 +48,7 @@ struct ContentView: View {
                 }
                 .help("Shortcuts")
                 .popover(isPresented: $showShortcuts, arrowEdge: .bottom) {
-                    ShortcutSettings(shortcuts: shortcuts)
+                    ShortcutSettings(shortcuts: shortcuts, bindings: shortcuts.bindings)
                 }
             }
         }

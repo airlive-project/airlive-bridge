@@ -10,8 +10,9 @@
 //     when another app (e.g. OBS) is frontmost.  Plain keys are unusable globally
 //     (they're normal typing), so global uses a CHORD: ⌃⌥ + the same key.
 //
-// Bindings are fixed for now (reassignable later); the action mapping is the one
-// source of truth both engines call.
+// Bindings are reassignable (see ShortcutBindings): each action has a rebindable
+// BASE chord; the global engine adds ⌃⌥ on top of it.  Both engines resolve the
+// incoming key through the same `bindings` table — one source of truth.
 
 import Foundation
 import AppKit
@@ -27,6 +28,12 @@ final class ShortcutCenter: ObservableObject {
     private let monitor = ShortcutMonitor()
     private var localMonitor: Any?
     private var watchdog: Timer?
+
+    /// The reassignable binding table (exposed for the Settings UI).
+    let bindings = ShortcutBindings()
+    /// While the Settings recorder is capturing a key, suppress firing so the
+    /// captured press doesn't also trigger an action.
+    var isRecording = false
 
     /// Master enable.
     @Published var enabled: Bool { didSet { persist(); apply() } }
@@ -76,46 +83,37 @@ final class ShortcutCenter: ObservableObject {
 
     // MARK: - Event handling
 
-    /// In-app: plain key → program/cut; ⇧+digit → lens.  Ignored while typing.
+    /// In-app: match the BASE chord (key + optional ⇧/⌘).  A ⌃ or ⌥ press is the
+    /// global activator — leave it to the global engine.  Ignored while typing or
+    /// while the recorder is capturing.
     private func handleLocal(_ event: NSEvent) {
-        guard enabled, !isTyping() else { return }
-        let mods = event.modifierFlags.intersection([.command, .shift, .control, .option])
-        if mods.isEmpty {
-            fire(CGKeyCode(event.keyCode))
-        } else if mods == [.shift] {
-            fireLens(CGKeyCode(event.keyCode))
+        guard enabled, !isRecording, !isTyping() else { return }
+        let mods = event.modifierFlags
+        if mods.contains(.control) || mods.contains(.option) { return }   // global chord
+        if let action = bindings.action(forKeyCode: event.keyCode,
+                                        shift: mods.contains(.shift),
+                                        command: mods.contains(.command)) {
+            fire(action)
         }
     }
 
-    /// Global: requires the ⌃⌥ chord (plain keys would fire on normal typing);
-    /// add ⇧ for lens.
+    /// Global: require the ⌃⌥ activator, then match the base chord's ⇧/⌘ on top.
     private func handleGlobal(_ keycode: CGKeyCode, _ flags: CGEventFlags) {
-        guard enabled, global else { return }
+        guard enabled, global, !isRecording else { return }
         guard flags.contains(.maskControl) && flags.contains(.maskAlternate) else { return }
-        if flags.contains(.maskShift) { fireLens(keycode) } else { fire(keycode) }
-    }
-
-    /// Program / cut bindings — both engines route here.
-    private func fire(_ keycode: CGKeyCode) {
-        switch keycode {
-        case 49: model.cutAction()                                   // Space → Cut / take
-        default:
-            if let n = Self.digit(for: keycode) { model.programSelect(n - 1) }   // 1–9 → camera N
+        if let action = bindings.action(forKeyCode: UInt16(keycode),
+                                        shift: flags.contains(.maskShift),
+                                        command: flags.contains(.maskCommand)) {
+            fire(action)
         }
     }
 
-    /// Lens bindings — ⇧+digit N → the focused camera's Nth lens.
-    private func fireLens(_ keycode: CGKeyCode) {
-        if let n = Self.digit(for: keycode) { model.lensSelect(n - 1) }
-    }
-
-    /// macOS keycodes for the top-row digits 1...9.
-    private static func digit(for keycode: CGKeyCode) -> Int? {
-        switch keycode {
-        case 18: return 1; case 19: return 2; case 20: return 3
-        case 21: return 4; case 23: return 5; case 22: return 6
-        case 26: return 7; case 28: return 8; case 25: return 9
-        default: return nil
+    /// Run an action — both engines route here.
+    private func fire(_ action: ShortcutAction) {
+        switch action.kind {
+        case .cut:    model.cutAction()
+        case .camera: model.programSelect(action.index)
+        case .lens:   model.lensSelect(action.index)
         }
     }
 
