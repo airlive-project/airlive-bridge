@@ -43,6 +43,10 @@ struct MirrorVideoView: NSViewRepresentable {
         private weak var channel: BridgeChannel?
         private var observer: NSObjectProtocol?
         private let contentLayer = CALayer()
+        /// View size cached on main (in `layout()`) so the off-main paint can size
+        /// the layer without touching main-only NSView API.
+        private var viewSize: CGSize = .zero
+        private var currentRotation: Int = 0
 
         override init(frame frameRect: NSRect) {
             super.init(frame: frameRect)
@@ -79,28 +83,55 @@ struct MirrorVideoView: NSViewRepresentable {
             channel = nil
         }
 
-        /// Point our owned layer's contents at the buffer.  Safe from any thread
-        /// (we own `contentLayer`; no NSView API touched).
+        /// Point our owned layer's contents at the buffer + (re)apply geometry.
+        /// Safe from any thread (we own `contentLayer`; no NSView API touched —
+        /// `applyGeometry` uses the cached `viewSize`).
         private func setContents(_ buffer: CVPixelBuffer?, rotation: Int) {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             contentLayer.contents = buffer   // nil → black (no signal)
-            // Option B vertical stream: the iPhone sends LANDSCAPE pixels + a
-            // clockwise rotation hint.  A hosting (y-up) layer rotates CCW for a
-            // positive angle, so negate to get the clockwise rotation the phone's
-            // upright preview expects.
-            contentLayer.transform = (rotation == 0)
-                ? CATransform3DIdentity
-                : CATransform3DMakeRotation(-CGFloat(rotation) * .pi / 180, 0, 0, 1)
+            currentRotation = rotation
+            applyGeometry()
             CATransaction.commit()
         }
 
         override func layout() {
             super.layout()
+            viewSize = bounds.size           // main-only NSView read, cached here
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            contentLayer.frame = bounds
+            applyGeometry()
             CATransaction.commit()
+        }
+
+        /// Size, center and rotate our layer for the current rotation.
+        ///
+        /// CRITICAL: never set `contentLayer.frame` while a rotation transform is
+        /// applied — `.frame` is undefined under a non-identity transform and was
+        /// the bug that sent rotated streams (90 / 180 / 270) to a black/garbled
+        /// tile.  We set `bounds` + `position` + `transform` instead.
+        ///
+        /// Option B vertical stream: the iPhone sends LANDSCAPE (16:9) pixels + a
+        /// clockwise rotation hint.  For a portrait hint (90 / 270) we make the
+        /// pre-rotation layer a 16:9 rect whose long edge maps to the tile HEIGHT,
+        /// so after rotation it presents as **9:16, fit by height, centred**
+        /// (letterboxed left/right) — never stretched.  A hosting (y-up) layer
+        /// rotates CCW for a positive angle, so we negate to get the clockwise
+        /// rotation the phone's upright preview expects.
+        private func applyGeometry() {
+            let size = viewSize
+            guard size.width > 0, size.height > 0 else { return }
+            let rot = ((currentRotation % 360) + 360) % 360
+            let isPortrait = (rot == 90 || rot == 270)
+
+            let layerSize: CGSize = isPortrait
+                ? CGSize(width: size.height, height: size.height * 9.0 / 16.0)  // → 9:16 by height
+                : size                                                          // landscape fills tile
+            contentLayer.bounds = CGRect(origin: .zero, size: layerSize)
+            contentLayer.position = CGPoint(x: size.width / 2, y: size.height / 2)
+            contentLayer.transform = (rot == 0)
+                ? CATransform3DIdentity
+                : CATransform3DMakeRotation(-CGFloat(rot) * .pi / 180, 0, 0, 1)
         }
 
         // A hosting layer's contentsScale is NOT auto-synced by AppKit, so a tile
