@@ -86,17 +86,33 @@ final class BridgeModel: ObservableObject {
     /// selected camera in Solo.
     var effectiveProgramID: UUID? { mode == .solo ? selectedID : programID }
 
-    /// Add / remove a program output.  Added outputs start immediately (program
-    /// publishes continuously) and the program tap is (re)wired.
-    func addProgramOutput(_ output: VideoOutput) {
-        // A passthrough relay needs a keyframe to start decoding; when its OBS
-        // connection comes up, ask the on-air camera for one (off the relay's queue
-        // → hop to main where the program state lives).
+    /// Seed ONE output of every implemented kind, all OFF — so the operator sees the
+    /// full protocol surface as cards and just toggles the ones they want on (no
+    /// hunting in a menu).  The "+" then adds EXTRA instances (a 2nd NDI, another SRT
+    /// adapter…).  Not started here; `feedProgram*` only sends to live outputs.
+    private func seedDefaultOutputs() {
+        let defaults: [VideoOutput] = [
+            NDIOutput(label: OutputKind.ndi.displayName),
+            AirliveRelayOutput(label: OutputKind.obs.displayName),
+            RTSPOutput(label: OutputKind.rtsp.displayName, port: 8554),
+            SRTOutput(label: OutputKind.srt.displayName),
+        ]
+        defaults.forEach { configureOutput($0) }
+        programOutputs = defaults
+    }
+
+    /// Wire output-kind-specific hooks (currently: the relay's keyframe request).
+    private func configureOutput(_ output: VideoOutput) {
         if let relay = output as? AirliveRelayOutput {
             // onReady fires on main once OBS is actually connected — force one IDR
             // even if the program source didn't change (the fresh relay needs it).
             relay.onReady = { [weak self] in self?.requestKeyframeForProgram(force: true) }
         }
+    }
+
+    /// Add an EXTRA program output (from "+").  Starts immediately; the tap is rewired.
+    func addProgramOutput(_ output: VideoOutput) {
+        configureOutput(output)
         programOutputs.append(output)
         output.start()
         routeProgram()
@@ -186,7 +202,7 @@ final class BridgeModel: ObservableObject {
     /// `objectWillChange` so the UI re-reads it.
     var hasPassword: Bool { BridgeKeychain.password(account: Self.authAccount) != nil }
 
-    init() {}
+    init() { seedDefaultOutputs() }
 
     /// Set (or clear) the global password.  Stored in the Keychain, then pushed
     /// to every channel.  A password change is a REVOCATION (`disconnectNow`) so

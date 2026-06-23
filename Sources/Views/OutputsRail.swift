@@ -164,16 +164,10 @@ private func nextRTSPPort(_ model: BridgeModel) -> UInt16 {
 /// Auto-numbered default name per kind, lowest free index, so LAN source names
 /// stay stable and readable.
 private func defaultName(_ kind: OutputKind, _ model: BridgeModel) -> String {
-    let base: String
-    switch kind {
-    case .ndi:  base = "Program NDI"
-    case .obs:  base = "OBS Airlive Bridge"
-    case .rtsp: base = "RTSP"
-    case .srt:  base = "SRT"
-    case .vcam: base = "Virtual Camera"
-    }
+    let base = kind.displayName                       // "NDI", "RTSP", "SRT", "OBS Airlive Bridge"
     let used = Set(model.programOutputs.map(\.label))
-    var n = 1
+    if !used.contains(base) { return base }           // bare name (the default card)
+    var n = 2                                          // extras: "NDI 2", "NDI 3"…
     while used.contains("\(base) \(n)") { n += 1 }
     return "\(base) \(n)"
 }
