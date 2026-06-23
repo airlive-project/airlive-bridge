@@ -970,9 +970,9 @@ final class BridgeChannelReceiver: ChannelReceiver {
                 self.didLogFirstFrame = true
                 print("[BridgeReceiver \(self.src)] ✅ first frame presented")
             }
-            for output in channel.outputs where output.isLive {
-                output.send(buffer, timeNs: timeNs)
-            }
+            // Program tap: when this channel is the program source, the model's
+            // closure forwards the frame to the program output(s).  nil otherwise.
+            channel.onProgramFrame?(buffer, timeNs)
             // Once-per-session: flip the published "no signal" gate on the first
             // frame only (guarded — never a per-frame published write).
             if channel.latestFrame == nil { channel.latestFrame = buffer }

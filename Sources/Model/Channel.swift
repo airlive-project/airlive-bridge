@@ -91,8 +91,13 @@ final class BridgeChannel: ObservableObject, Identifiable {
         }
     }
 
-    /// Downstream re-publishing sinks (NDI / SRT / RTSP).
-    @Published var outputs: [VideoOutput] = []
+    /// Program tap: set by `BridgeModel` on the channel that is currently the
+    /// program source (PGM in Multiview, the selected camera in Solo) and nil on
+    /// every other channel.  The receiver calls it per presented frame so the
+    /// program output (NDI/SRT/RTSP) gets THIS camera's frames — switching the
+    /// source just moves the closure, the sender is never recreated.  Outputs are
+    /// owned by the model's program bus, not per channel.
+    var onProgramFrame: ((CVPixelBuffer, UInt64) -> Void)?
 
     // Receiver-password auth is GLOBAL (one password for the whole Bridge) and
     // lives on `BridgeModel`; the model pushes it to this channel's receiver via
@@ -112,8 +117,9 @@ final class BridgeChannel: ObservableObject, Identifiable {
 
     // MARK: - Lifecycle
 
-    /// Bring the channel online: start the receiver (listener + Bonjour) and all
-    /// configured outputs.  Idempotent — safe to call when already started.
+    /// Bring the channel online: start the receiver (listener + Bonjour).
+    /// Idempotent.  Outputs are NOT per-channel — they live on the model's program
+    /// bus, fed via `onProgramFrame` when this channel is the program source.
     ///
     /// The concrete `BridgeChannelReceiver` is created lazily here (not in
     /// `init`) so an unstarted channel holds no listener / Bonjour service, and
@@ -125,23 +131,18 @@ final class BridgeChannel: ObservableObject, Identifiable {
         receiver?.start()
         // The global auth config is pushed to this receiver by `BridgeModel`
         // (right after start, and whenever it changes) — see BridgeModel.applyAuth.
-        for output in outputs where !output.isLive {
-            output.start()
-        }
     }
 
-    /// Take the channel offline: stop outputs and the receiver, blank the mirrors,
-    /// and clear the transient connection state so the UI reflects "not connected".
+    /// Take the channel offline: stop the receiver, blank the mirrors, and clear
+    /// the transient connection state so the UI reflects "not connected".
     ///
     /// The `@Published` writes must run on the main thread (SwiftUI state).  The
     /// sole current caller (`BridgeModel.removeChannel`) is already on main, but a
     /// future off-main caller must not tear SwiftUI state from a background thread
-    /// — so the UI-side cleanup is hopped to main explicitly while the receiver /
-    /// output teardown (thread-safe) runs inline.
+    /// — so the UI-side cleanup is hopped to main explicitly while the receiver
+    /// teardown (thread-safe) runs inline.
     func stop() {
-        for output in outputs where output.isLive {
-            output.stop()
-        }
+        onProgramFrame = nil
         receiver?.stop()
         publishFrame(nil)   // blank every mirror tile to black ("no signal")
         let clearUI = { [weak self] in
@@ -162,21 +163,6 @@ final class BridgeChannel: ObservableObject, Identifiable {
     /// when no receiver / no connection is present.
     func send(_ msg: ControlMessage) {
         receiver?.send(msg)
-    }
-
-    // MARK: - Output management
-
-    /// Attach a downstream output.  Starts it immediately if the channel is
-    /// already live so the new sink begins publishing without a restart.
-    func addOutput(_ output: VideoOutput) {
-        outputs.append(output)
-        if isConnected { output.start() }
-    }
-
-    /// Detach and stop a downstream output by identity.
-    func removeOutput(_ output: VideoOutput) {
-        output.stop()
-        outputs.removeAll { $0.id == output.id }
     }
 
     // MARK: - Rename

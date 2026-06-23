@@ -27,7 +27,7 @@ struct OutputsRail: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            content(for: model.selectedChannel)
+            content
         }
         .frame(width: 280)
         .background(Theme.bgRail)
@@ -37,51 +37,50 @@ struct OutputsRail: View {
                  alignment: .leading)
     }
 
-    // "Outputs" + inline "+" (mirrors the Channels rail). No divider under it.
+    // "Outputs" + inline "+".  These are the PROGRAM's outputs — whatever is on
+    // program (the on-air camera) is what they publish; they aren't tied to one
+    // channel.
     private var header: some View {
         HStack(spacing: Spacing.sm) {
             Text("Outputs")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
-            if let channel = model.selectedChannel {
-                // "+" opens a menu of output TYPES — NDI adds a real output;
-                // SRT / RTSP / Virtual Camera show as "soon" (disabled) so the
-                // roadmap is visible and the button isn't hardcoded to NDI.
-                Menu {
-                    ForEach(OutputKind.allCases) { kind in
-                        Button {
-                            if kind.isImplemented {
-                                channel.addOutput(NDIOutput(label: defaultNDIName(for: channel)))
-                            }
-                        } label: {
-                            Label(kind.isImplemented ? kind.displayName : "\(kind.displayName) — soon",
-                                  systemImage: kind.symbolName)
+            // "+" opens a menu of output TYPES — NDI adds a real output;
+            // SRT / RTSP / Virtual Camera show as "soon" (disabled).
+            Menu {
+                ForEach(OutputKind.allCases) { kind in
+                    Button {
+                        if kind.isImplemented {
+                            model.addProgramOutput(NDIOutput(label: defaultProgramName(model)))
                         }
-                        .disabled(!kind.isImplemented)
+                    } label: {
+                        Label(kind.isImplemented ? kind.displayName : "\(kind.displayName) — soon",
+                              systemImage: kind.symbolName)
                     }
-                } label: {
-                    // Match the Channels "+" exactly (boxed: fill + 1pt stroke).
-                    Image(systemName: "plus")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundColor(Theme.textPrimary)
-                        .frame(width: 22, height: 22)
-                        .background(
-                            RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                                .fill(Theme.bgSelected.opacity(0.6))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                                .stroke(Theme.stroke, lineWidth: 1)
-                        )
+                    .disabled(!kind.isImplemented)
                 }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .help("Add an output")
+            } label: {
+                // Match the Channels "+" exactly (boxed: fill + 1pt stroke).
+                Image(systemName: "plus")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(Theme.textPrimary)
+                    .frame(width: 22, height: 22)
+                    .background(
+                        RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+                            .fill(Theme.bgSelected.opacity(0.6))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+                            .stroke(Theme.stroke, lineWidth: 1)
+                    )
             }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Add a program output")
             Spacer()
-            if let channel = model.selectedChannel, !channel.outputs.isEmpty {
-                Text("\(channel.outputs.count)")
+            if !model.programOutputs.isEmpty {
+                Text("\(model.programOutputs.count)")
                     .font(.system(size: 12, weight: .medium).monospacedDigit())
                     .foregroundColor(Theme.textFaint)
             }
@@ -92,46 +91,15 @@ struct OutputsRail: View {
     }
 
     @ViewBuilder
-    private func content(for channel: BridgeChannel?) -> some View {
-        if let channel {
-            ChannelOutputs(channel: channel)
-        } else {
-            VStack {
-                Spacer()
-                Text("Select a channel to manage\nits outputs.")
-                    .font(.system(size: 12))
-                    .multilineTextAlignment(.center)
-                    .foregroundColor(Theme.textFaint)
-                Spacer()
-            }
-            .frame(maxWidth: .infinity)
-            .padding(Spacing.lg)
-        }
-    }
-}
-
-/// "<Channel> NDI N" using the lowest free index so the LAN source names stay
-/// stable and readable. File-scope so both the header "+" and the chooser use it.
-private func defaultNDIName(for channel: BridgeChannel) -> String {
-    let used = Set(channel.outputs.map(\.label))
-    var n = 1
-    while used.contains("\(channel.name) NDI \(n)") { n += 1 }
-    return "\(channel.name) NDI \(n)"
-}
-
-// MARK: - Outputs for one channel (chooser when empty, cards when not)
-
-private struct ChannelOutputs: View {
-    @ObservedObject var channel: BridgeChannel
-
-    var body: some View {
-        if channel.outputs.isEmpty {
+    private var content: some View {
+        if model.programOutputs.isEmpty {
             chooser
         } else {
             ScrollView {
                 VStack(spacing: Spacing.md) {
-                    ForEach(channel.outputs, id: \.id) { output in
-                        OutputCard(channel: channel, output: output)
+                    programSourceLine
+                    ForEach(model.programOutputs, id: \.id) { output in
+                        OutputCard(model: model, output: output)
                     }
                 }
                 .padding(.horizontal, Spacing.lg)
@@ -141,19 +109,29 @@ private struct ChannelOutputs: View {
         }
     }
 
-    /// First-step quick-pick — pick a protocol to publish to. Cuts the wall of
-    /// empty cards: the operator has to create something anyway, so offer the
-    /// choices up front. The header "+" still works.
+    /// What's currently feeding the program (the on-air camera, or "—").
+    private var programSourceLine: some View {
+        let name = model.channels.first { $0.id == model.effectiveProgramID }?.name
+        return HStack(spacing: Spacing.xs) {
+            Image(systemName: "dot.radiowaves.left.and.right").font(.system(size: 10))
+            Text("Program: \(name ?? "—")").font(.system(size: 11, weight: .medium))
+            Spacer()
+        }
+        .foregroundColor(Theme.textFaint)
+        .padding(.horizontal, Spacing.xs)
+    }
+
+    /// First-step quick-pick — what protocol the PROGRAM publishes to.
     private var chooser: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Spacing.md) {
-                Text("Publish this channel to…")
+                Text("Publish the program to…")
                     .font(.system(size: 12))
                     .foregroundColor(Theme.textFaint)
                     .padding(.horizontal, Spacing.xs)
                 ForEach(OutputKind.allCases) { kind in
                     ChooserCard(kind: kind) {
-                        channel.addOutput(NDIOutput(label: defaultNDIName(for: channel)))
+                        model.addProgramOutput(NDIOutput(label: defaultProgramName(model)))
                     }
                 }
             }
@@ -162,6 +140,14 @@ private struct ChannelOutputs: View {
             .padding(.bottom, Spacing.lg)
         }
     }
+}
+
+/// "Program NDI N" using the lowest free index so the LAN source names stay stable.
+private func defaultProgramName(_ model: BridgeModel) -> String {
+    let used = Set(model.programOutputs.map(\.label))
+    var n = 1
+    while used.contains("Program NDI \(n)") { n += 1 }
+    return "Program NDI \(n)"
 }
 
 // MARK: - Chooser card (quick-pick a protocol to add)
@@ -231,7 +217,7 @@ private struct SoonPill: View {
 /// `refresh` token bumped on every mutation so the pill / field re-read the
 /// output's current `isLive` / `label` immediately after a toggle or rename.
 private struct OutputCard: View {
-    @ObservedObject var channel: BridgeChannel
+    @ObservedObject var model: BridgeModel
     let output: VideoOutput
 
     @State private var draftLabel: String = ""
@@ -285,10 +271,9 @@ private struct OutputCard: View {
             set: { newValue in
                 if newValue { output.start() } else { output.stop() }
                 refresh += 1
-                // `output.isLive` changed but the `outputs` array didn't, so the
-                // channel row's "→ NDI / Not publishing" line won't refresh on its
-                // own — nudge the channel so its observers re-read live outputs.
-                channel.objectWillChange.send()
+                // `output.isLive` changed but the array didn't — nudge the model
+                // so observers (the tag colour, channel rows) re-read.
+                model.objectWillChange.send()
             }
         ))
         .toggleStyle(.switch)
@@ -348,7 +333,7 @@ private struct OutputCard: View {
         HStack {
             Spacer()
             Button(role: .destructive) {
-                channel.removeOutput(output)
+                model.removeProgramOutput(output)
             } label: {
                 HStack(spacing: Spacing.xs) {
                     Image(systemName: "trash")

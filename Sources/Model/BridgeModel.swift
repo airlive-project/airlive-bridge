@@ -6,6 +6,7 @@
 // networking lives here (each channel owns its own receiver).
 
 import Foundation
+import CoreVideo
 
 /// What the Bridge is monitoring / sending: one camera at a time (Solo) or the
 /// composited grid of all cameras (Multiview).  The two are MUTUALLY EXCLUSIVE
@@ -25,26 +26,70 @@ final class BridgeModel: ObservableObject {
     @Published var channels: [BridgeChannel] = []
 
     /// Currently-selected channel's id (drives the center zone), or nil when
-    /// none is selected.
-    @Published var selectedID: UUID?
+    /// none is selected.  In Solo mode the selected camera IS the program source.
+    @Published var selectedID: UUID? { didSet { if mode == .solo { routeProgram() } } }
 
-    /// Solo (one camera) vs Multiview (the switcher).  Drives the center monitor
-    /// now; Phase 2 ties the output routing to it (mutually exclusive senders).
-    @Published var mode: AppMode = .solo
+    /// Solo (one camera) vs Multiview (the switcher).
+    @Published var mode: AppMode = .solo { didSet { routeProgram() } }
 
     /// Multiview switcher buses: the camera staged in PREVIEW and the camera live
-    /// on PROGRAM.  Phase 2 routes the Program camera's frames to the program
-    /// output (conflict-free: persistent sender, swap the source).
+    /// on PROGRAM.  `programID` set by CUT in Multiview; in Solo the program
+    /// source is the selected camera (see `effectiveProgramID`).
     @Published var previewID: UUID?
-    @Published var programID: UUID?
+    @Published var programID: UUID? { didSet { routeProgram() } }
 
     func previewChannel() -> BridgeChannel? { channels.first { $0.id == previewID } }
-    func programChannel() -> BridgeChannel? { channels.first { $0.id == programID } }
+    func programChannel() -> BridgeChannel? { channels.first { $0.id == effectiveProgramID } }
 
     /// Load a camera into Preview (stage it).
     func stage(_ id: UUID) { previewID = id }
     /// Cut: the staged Preview camera goes live to Program.
     func take() { if let p = previewID { programID = p } }
+
+    // MARK: - Program bus (the single output path)
+    //
+    // PROGRAM is what's published downstream: the program output(s) (NDI/SRT/RTSP)
+    // are created ONCE and send continuously; switching the program source (CUT in
+    // Multiview, or selecting a camera in Solo) only changes which channel's frames
+    // feed them — the sender is never recreated, so there's no flicker/re-discovery
+    // (the conflict-free switch).  Cameras stream in our own protocol; only the
+    // program is converted to NDI.
+
+    /// Downstream program outputs (NDI today; SRT/RTSP later).
+    @Published var programOutputs: [VideoOutput] = []
+
+    /// The channel currently feeding the program: the PGM camera in Multiview, the
+    /// selected camera in Solo.
+    var effectiveProgramID: UUID? { mode == .solo ? selectedID : programID }
+
+    /// Add / remove a program output.  Added outputs start immediately (program
+    /// publishes continuously) and the program tap is (re)wired.
+    func addProgramOutput(_ output: VideoOutput) {
+        programOutputs.append(output)
+        output.start()
+        routeProgram()
+    }
+    func removeProgramOutput(_ output: VideoOutput) {
+        output.stop()
+        programOutputs.removeAll { $0.id == output.id }
+    }
+
+    /// Wire the effective-program channel's frames to the program outputs; clear
+    /// the tap on every other channel so exactly one feeds the program.
+    func routeProgram() {
+        let pid = effectiveProgramID
+        for channel in channels {
+            channel.onProgramFrame = (channel.id == pid)
+                ? { [weak self] buffer, timeNs in self?.feedProgram(buffer, timeNs: timeNs) }
+                : nil
+        }
+    }
+
+    private func feedProgram(_ buffer: CVPixelBuffer, timeNs: UInt64) {
+        for output in programOutputs where output.isLive {
+            output.send(buffer, timeNs: timeNs)
+        }
+    }
 
     // MARK: - Multiview grid (adaptive 4 / 8 / 12 / 16)
 
@@ -132,6 +177,7 @@ final class BridgeModel: ObservableObject {
         if previewID == nil { previewID = channel.id }   // stage the first camera
         channel.start()             // bring the receiver + Bonjour online
         applyAuth(to: channel)      // gate it with the current global password
+        routeProgram()              // wire the program tap (covers the new channel)
         return channel
     }
 
@@ -146,6 +192,7 @@ final class BridgeModel: ObservableObject {
         // Keep the switcher buses valid: a removed camera can't be PVW/PGM.
         if previewID == id { previewID = channels.first?.id }
         if programID == id { programID = nil }
+        routeProgram()   // re-wire the program tap after the list changed
 
         guard selectedID == id else { return }
         if channels.isEmpty {

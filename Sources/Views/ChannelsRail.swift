@@ -78,6 +78,8 @@ struct ChannelsRail: View {
                         ChannelRow(
                             channel: channel,
                             selected: channel.id == model.selectedID,
+                            isProgram: channel.id == model.effectiveProgramID,
+                            programPublishing: model.programOutputs.contains { $0.isLive },
                             onSelect: { model.select(channel.id) },
                             onRemove: {
                                 TallyStore.shared.clear(channel.id)
@@ -125,6 +127,8 @@ private struct ChannelRow: View {
     @ObservedObject var channel: BridgeChannel
     @ObservedObject private var tally = TallyStore.shared
     let selected: Bool
+    let isProgram: Bool          // this camera is the program source (on air)
+    let programPublishing: Bool  // a program output is live
     let onSelect: () -> Void
     let onRemove: () -> Void
 
@@ -200,21 +204,20 @@ private struct ChannelRow: View {
         }
     }
 
-    /// Transfer status — WHERE this channel's video is going (the live outputs),
-    /// not its camera settings. Green when publishing, dim when idle.
+    /// On-air status: this camera is the PROGRAM source (red), and whether the
+    /// program is actually publishing downstream (green "→ NDI").  Outputs are on
+    /// the program bus now, not per channel.
     private var transferLine: some View {
-        let live = channel.outputs.filter { $0.isLive }
-        let publishing = !live.isEmpty
+        let onAir = isProgram && programPublishing
+        let color: Color = onAir ? Color(hex: 0x37CF83)
+                                  : (isProgram ? Theme.accentRed : Theme.textFaint)
+        let text = onAir ? "ON AIR → NDI" : (isProgram ? "ON AIR" : "Standby")
         return HStack(spacing: Spacing.xs) {
-            Image(systemName: publishing ? "dot.radiowaves.right" : "wifi.slash")
+            Image(systemName: isProgram ? "dot.radiowaves.right" : "pause.circle")
                 .font(.system(size: 9))
-            Text(publishing
-                 ? "→ " + live.map { $0.kind.rawValue.uppercased() }.joined(separator: " · ")
-                 : "Not publishing")
-                .font(.system(size: 10, weight: .medium))
-                .lineLimit(1)
+            Text(text).font(.system(size: 10, weight: .medium)).lineLimit(1)
         }
-        .foregroundColor(publishing ? Color(hex: 0x37CF83) : Theme.textFaint)
+        .foregroundColor(color)
     }
 
     /// A tiny coloured square hinting the channel's tally state, derived from
