@@ -21,6 +21,10 @@ struct ChannelsRail: View {
         }
         .frame(width: 240)
         .background(Theme.bgRail)
+        // Faint hairline separating this rail from the center zone (consistent
+        // with the OutputsRail edge + the mode-bar / footer dividers).
+        .overlay(Rectangle().frame(width: 1).foregroundColor(Theme.stroke),
+                 alignment: .trailing)
     }
 
     // MARK: - Header

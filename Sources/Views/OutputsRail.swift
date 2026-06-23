@@ -31,6 +31,10 @@ struct OutputsRail: View {
         }
         .frame(width: 280)
         .background(Theme.bgRail)
+        // Faint hairline separating this rail from the center zone (matches the
+        // ChannelsRail edge + the mode-bar / footer dividers).
+        .overlay(Rectangle().frame(width: 1).foregroundColor(Theme.stroke),
+                 alignment: .leading)
     }
 
     // "Outputs" + inline "+" (mirrors the Channels rail). No divider under it.
@@ -56,6 +60,7 @@ struct OutputsRail: View {
                         .disabled(!kind.isImplemented)
                     }
                 } label: {
+                    // Match the Channels "+" exactly (boxed: fill + 1pt stroke).
                     Image(systemName: "plus")
                         .font(.system(size: 11, weight: .bold))
                         .foregroundColor(Theme.textPrimary)
@@ -63,6 +68,10 @@ struct OutputsRail: View {
                         .background(
                             RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
                                 .fill(Theme.bgSelected.opacity(0.6))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+                                .stroke(Theme.stroke, lineWidth: 1)
                         )
                 }
                 .menuStyle(.borderlessButton)

@@ -103,6 +103,10 @@ struct MultiviewGrid: View {
 }
 
 // MARK: - Big Preview / Program window
+//
+// Square (no rounding), a SUBTLE 2pt accent border that just hints what's
+// selected, and the PREVIEW / PROGRAM label as a small semi-transparent chip at
+// the BOTTOM (Studio / vMix style), not a big coloured badge on top.
 
 private struct BigPane: View {
     let title: String
@@ -110,32 +114,19 @@ private struct BigPane: View {
     let channel: BridgeChannel?
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            Group {
-                if let channel {
-                    LivePane(channel: channel)
-                } else {
-                    placeholder
-                }
+        Group {
+            if let channel {
+                LivePane(channel: channel, showName: false)
+            } else {
+                placeholder
             }
-            label
         }
         .aspectRatio(16.0 / 9.0, contentMode: .fit)
         .frame(maxWidth: .infinity)
         .background(Color.black)
         .clipped()
-        // Square — multiview windows have NO rounding (Studio).
-        .overlay(Rectangle().stroke(accent, lineWidth: 3))
-    }
-
-    private var label: some View {
-        Text(title)
-            .font(.system(size: 11, weight: .bold))
-            .tracking(1)
-            .foregroundColor(.white)
-            .padding(.horizontal, Spacing.sm)
-            .padding(.vertical, 3)
-            .background(Rectangle().fill(accent))   // square badge, no rounding
+        .overlay(Rectangle().stroke(accent, lineWidth: 2))
+        .overlay(alignment: .bottom) { bottomChip(title, color: accent) }
     }
 
     private var placeholder: some View {
@@ -148,32 +139,45 @@ private struct BigPane: View {
     }
 }
 
-/// A live channel surface + name + offline overlay, shared by big panes and
-/// thumbnails.
+/// A small dark semi-transparent label chip pinned to the bottom of a tile.
+private func bottomChip(_ text: String, color: Color = .white) -> some View {
+    Text(text)
+        .font(.system(size: 10, weight: .bold))
+        .tracking(0.5)
+        .foregroundColor(color)
+        .padding(.horizontal, Spacing.sm)
+        .padding(.vertical, 2)
+        .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(Color.black.opacity(0.5)))
+        .padding(.bottom, Spacing.sm)
+}
+
+/// A live channel surface + (optional) name chip + offline overlay, shared by the
+/// big panes and the thumbnails.
 private struct LivePane: View {
     @ObservedObject var channel: BridgeChannel
+    var showName: Bool = true
 
     var body: some View {
-        ZStack(alignment: .bottomLeading) {
+        ZStack {
             if channel.previewEnabled {
                 MirrorVideoView(channel: channel)
                 if channel.latestFrame == nil { offline }
             } else {
                 offline
             }
-            nameBar
         }
-    }
-
-    private var nameBar: some View {
-        HStack(spacing: Spacing.xs) {
-            ConnectionDot(connected: channel.isConnected)
-            Text(channel.name).font(.system(size: 11, weight: .semibold)).foregroundColor(.white)
-            Spacer()
+        .overlay(alignment: .bottom) {
+            if showName {
+                HStack(spacing: Spacing.xs) {
+                    ConnectionDot(connected: channel.isConnected)
+                    Text(channel.name).font(.system(size: 10, weight: .semibold)).foregroundColor(.white)
+                }
+                .padding(.horizontal, Spacing.sm)
+                .padding(.vertical, 2)
+                .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(Color.black.opacity(0.5)))
+                .padding(.bottom, Spacing.sm)
+            }
         }
-        .padding(.horizontal, Spacing.sm).padding(.vertical, Spacing.xs)
-        .background(LinearGradient(colors: [.clear, .black.opacity(0.65)],
-                                   startPoint: .top, endPoint: .bottom))
     }
 
     private var offline: some View {
@@ -201,7 +205,8 @@ private struct ThumbCell: View {
             .aspectRatio(16.0 / 9.0, contentMode: .fit)
             .background(Color.black)
             .clipped()
-            // Square — no rounding (Studio); green = staged, red = on air.
+            // Square — no rounding (Studio); green = staged, red = on air; a thin
+            // 2pt accent border just hints the selection (1pt neutral otherwise).
             .overlay(Rectangle().stroke(borderColor, lineWidth: borderWidth))
             .contentShape(Rectangle())
             .onTapGesture(count: 2) { onTake() }
@@ -214,9 +219,5 @@ private struct ThumbCell: View {
         if isPreview { return Theme.previewGreen }
         return Theme.stroke
     }
-    private var borderWidth: CGFloat { (isProgram || isPreview) ? 3 : 1 }
+    private var borderWidth: CGFloat { (isProgram || isPreview) ? 2 : 1 }
 }
-
-/// Tiny dummy ObservableObject so `BigPane` can hold an `@ObservedObject` even in
-/// the nil-channel case without optional-observed gymnastics.
-private final class NoChannelSentinel: ObservableObject { static let shared = NoChannelSentinel() }

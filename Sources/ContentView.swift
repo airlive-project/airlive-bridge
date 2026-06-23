@@ -33,16 +33,17 @@ struct ContentView: View {
     }
 
     /// GLOBAL Solo ⇄ Multiview switch in the top strip — OUR background colour
-    /// (not native toolbar grey), stretched full width.  Leading inset clears the
-    /// window's traffic-light controls.
+    /// (not native toolbar grey), a compact centered control (full-width read too
+    /// heavy).  A hairline under it ties the strip to the rest of the chrome.
     private var modeBar: some View {
         SegmentedBar(selection: $model.mode,
                      options: AppMode.allCases,
                      label: { $0.label })
-            .padding(.leading, 78)   // clear the traffic lights
-            .padding(.trailing, Spacing.lg)
+            .frame(width: 320)
+            .frame(maxWidth: .infinity)   // center the compact control
             .padding(.vertical, Spacing.sm)
-            .frame(maxWidth: .infinity)
             .background(Theme.bgApp)
+            .overlay(Rectangle().frame(height: 1).foregroundColor(Theme.stroke),
+                     alignment: .bottom)
     }
 }
