@@ -91,13 +91,18 @@ final class BridgeChannel: ObservableObject, Identifiable {
         }
     }
 
-    /// Program tap: set by `BridgeModel` on the channel that is currently the
+    /// Program taps: set by `BridgeModel` on the channel that is currently the
     /// program source (PGM in Multiview, the selected camera in Solo) and nil on
-    /// every other channel.  The receiver calls it per presented frame so the
-    /// program output (NDI/SRT/RTSP) gets THIS camera's frames — switching the
-    /// source just moves the closure, the sender is never recreated.  Outputs are
-    /// owned by the model's program bus, not per channel.
+    /// every other channel.  Switching the source just moves the closures.
+    ///
+    /// `onProgramFrame` — the DECODED frame, for buffer outputs (NDI).
+    /// `onProgramSample` / `onProgramFormat` — the RAW H.264 ARLV payloads, for
+    /// the passthrough relay to OBS (forward the camera's existing encode, no
+    /// transcode).  `onProgramFormat` carries the length-prefixed SPS/PPS the
+    /// camera resends each keyframe.
     var onProgramFrame: ((CVPixelBuffer, UInt64) -> Void)?
+    var onProgramSample: ((Data, Int64) -> Void)?
+    var onProgramFormat: ((Data) -> Void)?
 
     // Receiver-password auth is GLOBAL (one password for the whole Bridge) and
     // lives on `BridgeModel`; the model pushes it to this channel's receiver via

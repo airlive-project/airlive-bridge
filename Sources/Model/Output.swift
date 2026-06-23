@@ -23,6 +23,7 @@ import CoreVideo
 /// kind without a hand-maintained array that could drift from this enum.
 enum OutputKind: String, CaseIterable, Identifiable {
     case ndi
+    case obs    // OBS via our ARLV protocol (passthrough relay of the program H.264)
     case srt
     case rtsp
     case vcam   // macOS Virtual Camera (sink-as-webcam)
@@ -34,6 +35,7 @@ enum OutputKind: String, CaseIterable, Identifiable {
     var displayName: String {
         switch self {
         case .ndi:  return "NDI"
+        case .obs:  return "OBS Airlive Bridge"
         case .srt:  return "SRT"
         case .rtsp: return "RTSP"
         case .vcam: return "Virtual Camera"
@@ -46,6 +48,7 @@ enum OutputKind: String, CaseIterable, Identifiable {
     var symbolName: String {
         switch self {
         case .ndi:  return "antenna.radiowaves.left.and.right"
+        case .obs:  return "tv"
         case .srt:  return "dot.radiowaves.right"
         case .rtsp: return "network"
         case .vcam: return "video"
@@ -56,7 +59,7 @@ enum OutputKind: String, CaseIterable, Identifiable {
     /// disabled controls on placeholder cards and the add menu — the single
     /// source of truth so the card and the menu can never disagree about which
     /// kinds are real.
-    var isImplemented: Bool { self == .ndi }
+    var isImplemented: Bool { self == .ndi || self == .obs }
 }
 
 /// One downstream re-publishing sink.  Reference type (`AnyObject`) because an
@@ -84,4 +87,16 @@ protocol VideoOutput: AnyObject {
     /// Publish one decoded frame.  `timeNs` is a monotonic host time in
     /// nanoseconds.  No-op when not live.
     func send(_ pixelBuffer: CVPixelBuffer, timeNs: UInt64)
+
+    /// Raw-H.264 passthrough hooks — used ONLY by the OBS relay (it forwards the
+    /// program camera's existing encode, no transcode).  Buffer outputs (NDI)
+    /// ignore them via the default no-op below.  `relayFormat` carries the
+    /// length-prefixed SPS/PPS the camera resends each keyframe.
+    func relayFormat(_ payload: Data)
+    func relaySample(_ payload: Data, timestampMicros: Int64)
+}
+
+extension VideoOutput {
+    func relayFormat(_ payload: Data) {}
+    func relaySample(_ payload: Data, timestampMicros: Int64) {}
 }

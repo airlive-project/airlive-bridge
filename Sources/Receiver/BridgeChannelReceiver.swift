@@ -487,6 +487,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
         case .formatDescription:
             if authorized {
                 buildFormatDescription(from: packet.payload)
+                channel?.onProgramFormat?(packet.payload)   // raw SPS/PPS → relay passthrough
             } else if effectiveAuthRequired {
                 pendingFormatPayload = packet.payload   // buffer latest; apply on authorize
             }
@@ -494,6 +495,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
         case .sample:
             if authorized {
                 decodeFrame(payload: packet.payload, packetTimestamp: packet.timestampMicros)
+                channel?.onProgramSample?(packet.payload, packet.timestampMicros)   // raw H.264 → relay passthrough
             }
             // PENDING-AUTH: samples are dropped until authorized.
 

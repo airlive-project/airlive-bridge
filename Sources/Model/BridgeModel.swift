@@ -103,16 +103,28 @@ final class BridgeModel: ObservableObject {
     func routeProgram() {
         let pid = effectiveProgramID
         for channel in channels {
-            channel.onProgramFrame = (channel.id == pid)
-                ? { [weak self] buffer, timeNs in self?.feedProgram(buffer, timeNs: timeNs) }
-                : nil
+            if channel.id == pid {
+                channel.onProgramFrame = { [weak self] buffer, timeNs in self?.feedProgram(buffer, timeNs: timeNs) }
+                channel.onProgramFormat = { [weak self] payload in self?.feedProgramFormat(payload) }
+                channel.onProgramSample = { [weak self] payload, ts in self?.feedProgramSample(payload, ts) }
+            } else {
+                channel.onProgramFrame = nil
+                channel.onProgramFormat = nil
+                channel.onProgramSample = nil
+            }
         }
     }
 
     private func feedProgram(_ buffer: CVPixelBuffer, timeNs: UInt64) {
         for output in programOutputs where output.isLive {
-            output.send(buffer, timeNs: timeNs)
+            output.send(buffer, timeNs: timeNs)   // buffer outputs (NDI)
         }
+    }
+    private func feedProgramFormat(_ payload: Data) {
+        for output in programOutputs where output.isLive { output.relayFormat(payload) }   // relay (OBS)
+    }
+    private func feedProgramSample(_ payload: Data, _ ts: Int64) {
+        for output in programOutputs where output.isLive { output.relaySample(payload, timestampMicros: ts) }
     }
 
     // MARK: - Multiview grid (adaptive 4 / 8 / 12 / 16)

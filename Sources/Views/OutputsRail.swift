@@ -50,9 +50,7 @@ struct OutputsRail: View {
             Menu {
                 ForEach(OutputKind.allCases) { kind in
                     Button {
-                        if kind.isImplemented {
-                            model.addProgramOutput(NDIOutput(label: defaultProgramName(model)))
-                        }
+                        if kind.isImplemented { addProgramOutput(kind, to: model) }
                     } label: {
                         Label(kind.isImplemented ? kind.displayName : "\(kind.displayName) — soon",
                               systemImage: kind.symbolName)
@@ -131,7 +129,7 @@ struct OutputsRail: View {
                     .padding(.horizontal, Spacing.xs)
                 ForEach(OutputKind.allCases) { kind in
                     ChooserCard(kind: kind) {
-                        model.addProgramOutput(NDIOutput(label: defaultProgramName(model)))
+                        addProgramOutput(kind, to: model)
                     }
                 }
             }
@@ -142,12 +140,25 @@ struct OutputsRail: View {
     }
 }
 
-/// "Program NDI N" using the lowest free index so the LAN source names stay stable.
-private func defaultProgramName(_ model: BridgeModel) -> String {
+/// Create the right output for `kind` (NDI sender or OBS passthrough relay) with
+/// an auto-numbered name, and add it to the program bus.
+private func addProgramOutput(_ kind: OutputKind, to model: BridgeModel) {
+    let name = defaultName(kind, model)
+    switch kind {
+    case .ndi: model.addProgramOutput(NDIOutput(label: name))
+    case .obs: model.addProgramOutput(AirliveRelayOutput(label: name))
+    default: break   // srt / rtsp / vcam are "soon"
+    }
+}
+
+/// Auto-numbered default name per kind, lowest free index, so LAN source names
+/// stay stable and readable.
+private func defaultName(_ kind: OutputKind, _ model: BridgeModel) -> String {
+    let base = kind == .obs ? "OBS Airlive Bridge" : "Program NDI"
     let used = Set(model.programOutputs.map(\.label))
     var n = 1
-    while used.contains("Program NDI \(n)") { n += 1 }
-    return "Program NDI \(n)"
+    while used.contains("\(base) \(n)") { n += 1 }
+    return "\(base) \(n)"
 }
 
 // MARK: - Chooser card (quick-pick a protocol to add)
@@ -356,6 +367,7 @@ private extension OutputKind {
     var configFieldLabel: String {
         switch self {
         case .ndi:  return "NDI group (optional)"
+        case .obs:  return "OBS source (auto-discovered)"
         case .srt:  return "SRT destination"
         case .rtsp: return "RTSP mount point"
         case .vcam: return "Virtual Camera name"
@@ -365,6 +377,7 @@ private extension OutputKind {
     var configFieldExample: String {
         switch self {
         case .ndi:  return "public"
+        case .obs:  return "Add the OBS Airlive Bridge source in OBS"
         case .srt:  return "srt://host:port"
         case .rtsp: return "rtsp://0.0.0.0:8554/live/cam"
         case .vcam: return "Airlive Camera"
