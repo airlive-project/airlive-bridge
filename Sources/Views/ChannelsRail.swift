@@ -19,7 +19,7 @@ struct ChannelsRail: View {
                 .frame(maxHeight: .infinity)
             SecurityFooter(model: model)   // ONE global password for the Bridge
         }
-        .frame(width: 240)
+        .frame(width: 280)   // match the Outputs rail so the center zone is window-centered
         .background(Theme.bgRail)
         // Faint hairline separating this rail from the center zone (consistent
         // with the OutputsRail edge + the mode-bar / footer dividers).
