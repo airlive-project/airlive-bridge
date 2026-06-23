@@ -25,6 +25,10 @@ struct ContentView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.bgApp)
+        // Hairline right under the title bar so it reads as separated from the
+        // columns (the mode-bar divider moved into the title bar with the switch).
+        .overlay(Rectangle().frame(height: 1).foregroundColor(Theme.stroke),
+                 alignment: .top)
         .preferredColorScheme(.dark)
         // GLOBAL Solo ⇄ Multiview switch lives IN the title bar — our themed
         // control, on our dark background, so the title bar is the working strip
