@@ -29,6 +29,13 @@ targets:
         PRODUCT_NAME: Airlive Bridge
         MARKETING_VERSION: "0.1.0"
         SWIFT_VERSION: "5.9"
+        # App icon (populate the .appiconset with scripts/make-icon.sh once the
+        # logo PNG exists; an empty set just builds without an icon meanwhile).
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Notarized-distribution requirements (used by scripts/package.sh; harmless
+        # for unsigned debug builds, which pass CODE_SIGNING_ALLOWED=NO):
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_ENTITLEMENTS: AirliveBridge.entitlements
 
 # Dependencies added per phase, not up front:
 #   - HaishinKit (RTMP/SRT output) — phase 3
