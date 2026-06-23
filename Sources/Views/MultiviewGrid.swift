@@ -19,10 +19,12 @@ import SwiftUI
 
 struct MultiviewGrid: View {
     @ObservedObject var model: BridgeModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         ScrollView {
             VStack(spacing: Spacing.md) {
+                header
                 bigRow
                 cutBar
                 thumbnails
@@ -32,11 +34,29 @@ struct MultiviewGrid: View {
         }
     }
 
+    /// Open a clean fullscreen multiview wall (just the cameras + PVW/PGM) in its
+    /// own window — for a second monitor.
+    private var header: some View {
+        HStack {
+            Spacer()
+            Button { openWindow(id: MultiviewWall.windowID) } label: {
+                HStack(spacing: Spacing.xs) {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    Text("Fullscreen Multicam").font(.system(size: 11, weight: .medium))
+                }
+                .frame(height: 26)
+                .padding(.horizontal, Spacing.sm)
+            }
+            .bridgeButton()
+            .help("Open the multiview on its own window (drag to a second screen, then full-screen it)")
+        }
+    }
+
     // MARK: Preview + Program (the two big windows)
     // Studio colours: PREVIEW = broadcast green, PROGRAM = broadcast red.
 
     private var bigRow: some View {
-        HStack(spacing: Spacing.md) {
+        HStack(spacing: 0) {
             BigPane(title: "PREVIEW", accent: Theme.previewGreen, channel: model.previewChannel())
             BigPane(title: "PROGRAM", accent: Theme.accentRed, channel: model.programChannel())
         }
@@ -77,8 +97,8 @@ struct MultiviewGrid: View {
     private var thumbnails: some View {
         let count = model.channels.count
         let capacity = max(1, (count + 3) / 4) * 4   // whole rows of 4
-        let columns = Array(repeating: GridItem(.flexible(), spacing: Spacing.sm), count: 4)
-        return LazyVGrid(columns: columns, spacing: Spacing.sm) {
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 0), count: 4)
+        return LazyVGrid(columns: columns, spacing: 0) {
             ForEach(0 ..< capacity, id: \.self) { index in
                 if index < count {
                     let channel = model.channels[index]
@@ -98,7 +118,7 @@ struct MultiviewGrid: View {
         Rectangle()
             .fill(Color.black)
             .aspectRatio(16.0 / 9.0, contentMode: .fit)
-            .overlay(Rectangle().stroke(Theme.stroke, lineWidth: 1))
+            .overlay(Rectangle().strokeBorder(Theme.stroke, lineWidth: 1))
             .overlay(
                 Image(systemName: "plus").font(.system(size: 13))
                     .foregroundColor(Theme.textFaint.opacity(0.3))
@@ -129,7 +149,8 @@ private struct BigPane: View {
         .frame(maxWidth: .infinity)
         .background(Color.black)
         .clipped()
-        .overlay(Rectangle().stroke(accent, lineWidth: 2))
+        // strokeBorder draws INSIDE the cell so touching tiles never double up.
+        .overlay(Rectangle().strokeBorder(accent, lineWidth: 2))
         // White label (the coloured border already signals preview/program).
         .overlay(alignment: .bottom) { bottomChip(title) }
     }
@@ -210,9 +231,9 @@ private struct ThumbCell: View {
             .aspectRatio(16.0 / 9.0, contentMode: .fit)
             .background(Color.black)
             .clipped()
-            // Square — no rounding (Studio); green = staged, red = on air; a thin
-            // 2pt accent border just hints the selection (1pt neutral otherwise).
-            .overlay(Rectangle().stroke(borderColor, lineWidth: borderWidth))
+            // Square, no rounding; green = staged, red = on air.  strokeBorder
+            // (inset) so touching tiles' borders never overlap into a thick line.
+            .overlay(Rectangle().strokeBorder(borderColor, lineWidth: borderWidth))
             .contentShape(Rectangle())
             .onTapGesture(count: 2) { onTake() }
             .onTapGesture { onStage() }
@@ -225,4 +246,50 @@ private struct ThumbCell: View {
         return Theme.stroke
     }
     private var borderWidth: CGFloat { (isProgram || isPreview) ? 2 : 1 }
+}
+
+// MARK: - Fullscreen multiview wall (its own window)
+
+/// A clean multiview for a second monitor: PREVIEW + PROGRAM on top, camera
+/// thumbnails (rows of 4) below — NO cut bar, NO camera control, NO rails.  Same
+/// live mirrors (zero extra decodes); clicking a tile still stages / cuts.
+struct MultiviewWall: View {
+    static let windowID = "multiview-wall"
+    @ObservedObject var model: BridgeModel
+
+    private var preview: BridgeChannel? { model.channels.first { $0.id == model.previewID } }
+    private var program: BridgeChannel? { model.channels.first { $0.id == model.programID } }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                BigPane(title: "PREVIEW", accent: Theme.previewGreen, channel: preview)
+                BigPane(title: "PROGRAM", accent: Theme.accentRed, channel: program)
+            }
+            thumbnails
+        }
+        .background(Color.black)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var thumbnails: some View {
+        let count = model.channels.count
+        let capacity = max(1, (count + 3) / 4) * 4
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 0), count: 4)
+        return LazyVGrid(columns: columns, spacing: 0) {
+            ForEach(0 ..< capacity, id: \.self) { index in
+                if index < count {
+                    let channel = model.channels[index]
+                    ThumbCell(channel: channel,
+                              isProgram: channel.id == model.programID,
+                              isPreview: channel.id == model.previewID,
+                              onStage: { model.stage(channel.id) },
+                              onTake: { model.stage(channel.id); model.take() })
+                } else {
+                    Rectangle().fill(Color.black).aspectRatio(16.0 / 9.0, contentMode: .fit)
+                        .overlay(Rectangle().strokeBorder(Theme.stroke, lineWidth: 1))
+                }
+            }
+        }
+    }
 }

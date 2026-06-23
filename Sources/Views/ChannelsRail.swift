@@ -314,20 +314,25 @@ private struct SecurityFooter: View {
         .buttonStyle(.plain)
         .background(Theme.bgPanel)
         .overlay(Rectangle().frame(height: 1).foregroundColor(Theme.stroke), alignment: .top)
-        .popover(isPresented: $showSheet, arrowEdge: .trailing) { popover }
+        // A centered modal SHEET (not a corner popover that fought the input-source
+        // picker and clipped against the window edge).
+        .sheet(isPresented: $showSheet) { sheet }
     }
 
-    private var popover: some View {
-        VStack(alignment: .leading, spacing: Spacing.sm) {
+    private var sheet: some View {
+        VStack(alignment: .leading, spacing: Spacing.md) {
             Text(model.hasPassword ? "Change password" : "Set password")
-                .font(.system(size: 12, weight: .semibold))
+                .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
+            Text("One password for every channel. Cameras must enter it to connect.")
+                .font(.system(size: 11)).foregroundColor(Theme.textFaint)
+                .fixedSize(horizontal: false, vertical: true)
             SecureField("Password", text: $draft)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
                 .foregroundColor(Theme.textPrimary)
                 .padding(.horizontal, Spacing.sm)
-                .frame(width: 220, height: 30)
+                .frame(height: 32)
                 .background(RoundedRectangle(cornerRadius: Radius.button, style: .continuous).fill(Theme.bgApp))
                 .overlay(RoundedRectangle(cornerRadius: Radius.button, style: .continuous).stroke(Theme.stroke, lineWidth: 1))
                 .onSubmit { commit() }
@@ -335,10 +340,14 @@ private struct SecurityFooter: View {
                 if model.hasPassword {
                     Button("Remove") { model.setPassword(""); showSheet = false }
                         .buttonStyle(.plain)
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(size: 12, weight: .medium))
                         .foregroundColor(Theme.accentRed)
                 }
                 Spacer()
+                Button("Cancel") { showSheet = false }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(Theme.textSecondary)
                 Button { commit() } label: {
                     Text("Save").font(.system(size: 12, weight: .semibold)).frame(width: 64, height: 30)
                 }
@@ -346,8 +355,8 @@ private struct SecurityFooter: View {
                 .disabled(draft.isEmpty)
             }
         }
-        .padding(Spacing.md)
-        .frame(width: 252)
+        .padding(Spacing.lg)
+        .frame(width: 340)
         .background(Theme.bgPanel)
     }
 

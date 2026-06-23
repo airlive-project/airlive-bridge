@@ -195,10 +195,13 @@ final class BridgeModel: ObservableObject {
         return channels.first { $0.id == selectedID }
     }
 
-    /// Select a channel by id (no-op if it isn't in the list).
+    /// Select a channel by id (no-op if it isn't in the list).  In Multiview the
+    /// selection also STAGES it into Preview, so picking a channel on the left
+    /// loads it to the Preview window (CUT then sends it to Program).
     func select(_ id: UUID) {
         guard channels.contains(where: { $0.id == id }) else { return }
         selectedID = id
+        if mode == .multiview { previewID = id }
     }
 
     /// Reorder channels (drag in the Channels rail).  The multiview reads

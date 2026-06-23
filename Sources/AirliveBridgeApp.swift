@@ -43,5 +43,14 @@ struct AirliveBridgeApp: App {
         // First-launch window size — matches the ideal content frame so the
         // operator never has to resize to see all three zones.
         .defaultSize(width: 1200, height: 760)
+
+        // Clean fullscreen multiview wall (second monitor) — opened from the
+        // multiview's "Fullscreen Multicam" button.  Shares the same model.
+        WindowGroup(id: MultiviewWall.windowID) {
+            MultiviewWall(model: model)
+                .frame(minWidth: 640, minHeight: 400)
+                .preferredColorScheme(.dark)
+        }
+        .defaultSize(width: 1280, height: 800)
     }
 }
