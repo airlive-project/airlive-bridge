@@ -368,9 +368,19 @@ final class BridgeChannelReceiver: ChannelReceiver {
                                                txtRecord: txtRecord(occupied: occupied))
     }
 
-    /// Re-publish with the current name + last busy state (rename / dev change).
-    /// On `queue`.
+    /// Re-publish with the current name + order + last busy state (rename / order /
+    /// dev change).  On `queue`.
+    ///
+    /// CRITICAL: never re-set `listener.service` while a connection is live.
+    /// Re-registering the Bonjour record under a connected (or mid-handshake) iPhone
+    /// churns its endpoint resolution → it drops the socket → FIN → reconnect loop
+    /// (the "one frame → reconnect" bug; Studio forbids this too — spec §7).  The
+    /// updated `src` / `order` are stored, so they flush on the next legitimate
+    /// re-advertise: the `busy=0` flip in `updateOccupancyAdvertisement` at
+    /// disconnect.  The busy-flip path (commit/disconnect) is the ONLY sanctioned
+    /// mid-lifecycle service mutation and stays out of this guard.
     private func readvertise() {
+        guard connection == nil else { return }
         listener?.service = NWListener.Service(name: instanceName,
                                                type: "_airlive._tcp",
                                                txtRecord: txtRecord(occupied: advertisedBusy))
