@@ -228,7 +228,7 @@ final class BridgeModel: ObservableObject {
         channels.append(channel)
         selectedID = channel.id
         if previewID == nil { previewID = channel.id }   // stage the first camera
-        channel.start()             // bring the receiver + Bonjour online
+        channel.start(order: channels.count - 1)   // first advert already carries the right ord
         applyAuth(to: channel)      // gate it with the current global password
         routeProgram()              // wire the program tap (covers the new channel)
         pushChannelOrder()          // advertise positions (this one + any shifted)

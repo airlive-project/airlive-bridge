@@ -156,12 +156,13 @@ final class BridgeChannelReceiver: ChannelReceiver {
 
     // MARK: - Init / deinit
 
-    init(channel: BridgeChannel, identity: BridgeIdentity = .shared) {
+    init(channel: BridgeChannel, order: Int = 0, identity: BridgeIdentity = .shared) {
         self.channel      = channel
         self.channelID    = channel.id
         self.identity     = identity
         self.sid          = channel.id.uuidString
         self.src          = channel.name
+        self.order        = order   // so the FIRST Bonjour advert already has the right ord
         self.instanceName = "Airlive \(channel.id.uuidString.prefix(8))"
         self.bufferSeconds = channel.delay.seconds
         self.queue        = DispatchQueue(label: "studio.airlive.bridge.channel.\(channel.id.uuidString)",
@@ -500,7 +501,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
         case .formatDescription:
             if authorized {
                 buildFormatDescription(from: packet.payload)
-                channel?.onProgramFormat?(packet.payload)   // raw SPS/PPS → relay passthrough
+                forwardProgramFormat(packet.payload)   // raw SPS/PPS → relay passthrough
             } else if effectiveAuthRequired {
                 pendingFormatPayload = packet.payload   // buffer latest; apply on authorize
             }
@@ -508,7 +509,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
         case .sample:
             if authorized {
                 decodeFrame(payload: packet.payload, packetTimestamp: packet.timestampMicros)
-                channel?.onProgramSample?(packet.payload, packet.timestampMicros)   // raw H.264 → relay passthrough
+                forwardProgramSample(packet.payload, packet.timestampMicros)   // raw H.264 → relay passthrough
             }
             // PENDING-AUTH: samples are dropped until authorized.
 
@@ -573,7 +574,22 @@ final class BridgeChannelReceiver: ChannelReceiver {
         if let fmt = pendingFormatPayload {
             pendingFormatPayload = nil
             buildFormatDescription(from: fmt)
+            forwardProgramFormat(fmt)   // relay needs the buffered SPS/PPS too,
+                                        // else OBS can't decode until the next IDR
         }
+    }
+
+    /// Forward a RAW program payload to the channel's relay taps ON MAIN.  The taps
+    /// (`onProgramFormat` / `onProgramSample`) are written by `BridgeModel` on the
+    /// main thread, so they must be read there — mirrors the `onProgramFrame` hop in
+    /// `present()`.  `handle()` runs on `queue` (background), so the direct call was
+    /// a data race.  The relay re-dispatches to its own queue immediately, so the
+    /// per-packet main hop is just a pointer handoff.
+    private func forwardProgramFormat(_ payload: Data) {
+        DispatchQueue.main.async { [weak self] in self?.channel?.onProgramFormat?(payload) }
+    }
+    private func forwardProgramSample(_ payload: Data, _ timestampMicros: Int64) {
+        DispatchQueue.main.async { [weak self] in self?.channel?.onProgramSample?(payload, timestampMicros) }
     }
 
     /// Reject this connection: send the failure result, then close gracefully so

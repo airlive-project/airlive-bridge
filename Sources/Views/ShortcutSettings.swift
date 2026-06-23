@@ -145,6 +145,9 @@ private struct BindingRow: View {
             .disabled(!bindings.isCustomized(action))
             .help("Reset to default")
         }
+        // If the popover is dismissed mid-recording, the NSEvent monitor and the
+        // isRecording mute would leak forever — release them when the row goes away.
+        .onDisappear { if recording { finish() } }
     }
 
     /// What the chip shows: the base chord, with the ⌃⌥ prefix in global mode.

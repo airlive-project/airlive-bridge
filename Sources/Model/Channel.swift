@@ -129,9 +129,9 @@ final class BridgeChannel: ObservableObject, Identifiable {
     /// The concrete `BridgeChannelReceiver` is created lazily here (not in
     /// `init`) so an unstarted channel holds no listener / Bonjour service, and
     /// so the model layer can construct channels cheaply in tests.
-    func start() {
+    func start(order: Int = 0) {
         if receiver == nil {
-            receiver = BridgeChannelReceiver(channel: self)
+            receiver = BridgeChannelReceiver(channel: self, order: order)
         }
         receiver?.start()
         // The global auth config is pushed to this receiver by `BridgeModel`
@@ -148,6 +148,8 @@ final class BridgeChannel: ObservableObject, Identifiable {
     /// teardown (thread-safe) runs inline.
     func stop() {
         onProgramFrame = nil
+        onProgramFormat = nil
+        onProgramSample = nil
         receiver?.stop()
         publishFrame(nil)   // blank every mirror tile to black ("no signal")
         let clearUI = { [weak self] in
