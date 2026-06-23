@@ -18,12 +18,50 @@ RTMP/SRT via HaishinKit — we port, not rewrite. NDI and RTSP are the new piece
 Fast-follow (post-MVP): Virtual Camera (macOS system extension, ~1–1.5 wk),
 then Windows.
 
-## Open decisions (resolve at kickoff)
+## v1 close criteria (decided 2026-06-23)
 
-1. **UI / tech stack** — SwiftUI + ported Studio Swift (fastest, Mac-only) vs
-   HTML-in-Tauri (reuses the mockup 1:1, cross-platform).
-2. **Output order** — proposed NDI → SRT/RTSP, since NDI alone unlocks
-   vMix / ProPresenter / Wirecast.
+**v1 outputs:** NDI ✅ + OBS passthrough relay ✅ + **SRT + RTSP** (to build).
+**Distribution:** signed + **notarized** installer on the site (like OBS) — NOT the
+Mac App Store (sandbox almost certainly rejects NDI/raw-socket/Bonjour; revisit only
+if it turns out to pass). Same model as Studio (sold via airlive.studio).
+**Reliability gate (THE close gate):** a soak test — **5 cameras streaming 3–4 h**
+with no lag/dropout from our side — must pass before v1 is "done".
+
+### Reliability hardening — 5-cam × 4-h (long-run audit 2026-06-23)
+
+Static audit verdict: the per-frame hot path is sound (decode session reused across
+keyframes, jitter ring bounded, **no per-frame @Published**, real per-channel
+isolation, no retain cycles, balanced observers). Fixes landed from the audit:
+- ✅ **C1 (crash):** drain async frames before invalidating the decode session on a
+  mid-stream format change (`WaitForAsynchronousFrames`) — UAF that's 5× likelier
+  with 5 cams.
+- ✅ **M3 (main stall):** NDI `clock_video:false` — stop the SDK sleeping-to-pace on
+  the main thread every frame (the jitter ring is the timing authority).
+- ✅ **M1 / L1:** prune expired `authBans` (+ clear on password change); clear the
+  tally entry on channel removal.
+- ✅ Earlier: Bonjour-no-readvertise-while-connected (reconnect loop), program-tap
+  data race, all-orientation preview render.
+
+Deferred hardening — do alongside the soak test (profiling-gated, low risk after the
+above keep main healthy):
+- **H1** — queue-confine the program sample/format taps so the relay path has zero
+  per-frame `DispatchQueue.main.async` hops (only matters if main ever stalls).
+- **H2** — coalesce `channel.remote` to ~1 Hz in the receiver (don't trust the
+  phone's throttle; protects main if a phone sends state faster).
+- **M2** — arm a "candidate never readied" timeout in `accept()` to drop stranded
+  dual-stack stragglers.
+- **M4** — honor `previewEnabled` in `present()` (skip `publishFrame` for hidden,
+  non-program channels) — delivers the documented thermal/no-op-post saving.
+
+**Soak protocol (run with testers, 5 phones):** 3–4 h continuous · Instruments
+Allocations + Leaks + Time Profiler (memory must stay FLAT, no per-reconnect VT
+session growth) · pull one camera's Wi-Fi mid-show → it must rejoin cleanly without
+touching the other 4 · add/reorder channels while others are live (must not drop
+them) · all 4 orientations · NDI + OBS simultaneously, with and without password.
+
+## Open decisions
+
+1. **UI / tech stack** — RESOLVED: SwiftUI + ported Studio Swift (shipped).
 
 ## Backlog (post-MVP)
 

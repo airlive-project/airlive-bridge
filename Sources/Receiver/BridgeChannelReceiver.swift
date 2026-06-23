@@ -294,6 +294,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
             guard let self else { return }
             self.requireAuth = require
             self.authPassword = password
+            self.authBans.removeAll()   // password change ⇒ clean slate (matches Studio)
             guard disconnectNow, let conn = self.connection else { return }
             self.gracefulDrop(conn, reason: "auth config changed (revocation)")
         }
@@ -667,6 +668,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
     }
 
     private func registerAuthFailure(for conn: NWConnection) {
+        pruneExpiredBans()   // bound the dict on a long / churny / hostile LAN
         let key = sourceKey(for: conn)
         var entry = authBans[key] ?? (failures: 0, banUntil: 0)
         entry.failures += 1
@@ -682,6 +684,14 @@ final class BridgeChannelReceiver: ChannelReceiver {
 
     private func clearAuthFailures(for conn: NWConnection) {
         authBans[sourceKey(for: conn)] = nil
+    }
+
+    /// Drop expired-ban entries so `authBans` can't grow without bound over a long
+    /// show with DHCP churn / a probing prankster.  Keeps active bans and
+    /// sub-threshold counters (banUntil == 0).
+    private func pruneExpiredBans() {
+        let now = CACurrentMediaTime()
+        authBans = authBans.filter { $0.value.banUntil == 0 || $0.value.banUntil > now }
     }
 
     // MARK: Auth — wire send helpers
@@ -873,7 +883,16 @@ final class BridgeChannelReceiver: ChannelReceiver {
     private func decompress(sampleBuffer: CMSampleBuffer, format: CMVideoFormatDescription) {
         if decompressionFormat == nil ||
            !CMFormatDescriptionEqual(decompressionFormat, otherFormatDescription: format) {
-            if let old = decompressionSession { VTDecompressionSessionInvalidate(old) }
+            // CRITICAL: drain in-flight async frames BEFORE invalidating, or a
+            // decode callback can fire into a half-torn-down session and touch
+            // freed state (EXC_BAD_ACCESS).  A real mid-stream format change
+            // (resolution/codec/orientation re-encode) is exactly when a frame is
+            // most likely still in the old session — 5× more likely with 5 cameras
+            // over a 4-hour show.  Matches teardownDecodeSession() / deinit.
+            if let old = decompressionSession {
+                VTDecompressionSessionWaitForAsynchronousFrames(old)
+                VTDecompressionSessionInvalidate(old)
+            }
             decompressionSession = nil
 
             let outputAttrs: [String: Any] = [

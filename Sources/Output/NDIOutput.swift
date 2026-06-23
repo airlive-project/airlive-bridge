@@ -317,7 +317,12 @@ final class NDIOutput: VideoOutput {
             var desc = NDIlib_send_create_t(
                 p_ndi_name: namePtr,
                 p_groups: nil,
-                clock_video: true,   // pace sends to the video frame rate
+                // clock_video:false — DON'T let the SDK sleep-to-pace inside
+                // send_video.  feedProgram calls send() on the MAIN thread, so
+                // SDK clocking would stall main up to a frame interval EVERY frame.
+                // Our frames are already paced by the jitter ring (the timing
+                // authority), so we send at the correct cadence without re-clocking.
+                clock_video: false,
                 clock_audio: false
             )
             return withUnsafePointer(to: &desc) { create(UnsafeRawPointer($0)) }

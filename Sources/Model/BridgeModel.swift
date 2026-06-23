@@ -270,6 +270,9 @@ final class BridgeModel: ObservableObject {
         guard let index = channels.firstIndex(where: { $0.id == id }) else { return }
         channels[index].stop()
         channels.remove(at: index)
+        TallyStore.shared.clear(id)   // don't leak the channel's tally entry
+
+
 
         // Keep the switcher buses valid: a removed camera can't be PVW/PGM.
         if previewID == id { previewID = channels.first?.id }
