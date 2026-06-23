@@ -93,8 +93,9 @@ final class BridgeModel: ObservableObject {
         // connection comes up, ask the on-air camera for one (off the relay's queue
         // → hop to main where the program state lives).
         if let relay = output as? AirliveRelayOutput {
-            // onReady fires on main once OBS is actually connected.
-            relay.onReady = { [weak self] in self?.requestKeyframeForProgram() }
+            // onReady fires on main once OBS is actually connected — force one IDR
+            // even if the program source didn't change (the fresh relay needs it).
+            relay.onReady = { [weak self] in self?.requestKeyframeForProgram(force: true) }
         }
         programOutputs.append(output)
         output.start()
@@ -123,16 +124,23 @@ final class BridgeModel: ObservableObject {
         requestKeyframeForProgram()   // instant relay resync on CUT / hot-cut / select
     }
 
-    /// After a program (re)route, ask the on-air camera for a fresh keyframe — but
-    /// ONLY when an OBS relay is ACTUALLY connected and receiving (not merely toggled
-    /// on / still browsing).  Gated tightly so the phone never emits an extra I-frame
-    /// for nothing: NDI doesn't need it (re-encodes from decoded frames), and an
-    /// "on but not connected" relay has nobody to receive it.  No-op if no camera is
-    /// connected (`send`).
-    private func requestKeyframeForProgram() {
+    /// Last program we asked an IDR for — so routine re-routes (mode toggle, channel
+    /// add/remove, re-selecting the SAME source, staging to Preview) never re-poke the
+    /// camera.  We force a keyframe only when the program SOURCE actually changes (a
+    /// real CUT) or when a relay first connects (`force`).
+    private var lastKeyframeProgramID: UUID?
+
+    /// Ask the on-air camera for a fresh keyframe — but ONLY when an OBS relay is
+    /// ACTUALLY connected and receiving, AND the program source genuinely changed (or
+    /// `force` for a fresh relay connect).  Gated tightly so the phone emits at most
+    /// one extra I-frame per real CUT and never for routine UI churn or for NDI.
+    private func requestKeyframeForProgram(force: Bool = false) {
         let obsReceiving = programOutputs.contains { ($0 as? AirliveRelayOutput)?.isConnected == true }
         guard obsReceiving else { return }
-        channels.first { $0.id == effectiveProgramID }?.send(.forceKeyframe())
+        let pid = effectiveProgramID
+        guard force || pid != lastKeyframeProgramID else { return }   // real source change only
+        lastKeyframeProgramID = pid
+        channels.first { $0.id == pid }?.send(.forceKeyframe())
     }
 
     private func feedProgram(_ buffer: CVPixelBuffer, timeNs: UInt64) {
