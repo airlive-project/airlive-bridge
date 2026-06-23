@@ -11,7 +11,7 @@ RTMP/SRT via HaishinKit — we port, not rewrite. NDI and RTSP are the new piece
 | 2 | **NDI** output (frame convert + tally feedback → setCue) | ~3 d |
 | 3 | **SRT + RTSP** outputs (remux H.264, no re-encode) | ~4 d |
 | 4 | In-app remote control (controls → type-2; live readback) | ~3 d |
-| 5 | Polish: settings persistence, reconnect, packaging / signing / notarize | ~4 d |
+| 5 | Polish: settings persistence, reconnect ✅, packaging / signing / notarize ✅ (pipeline: scripts/package.sh + entitlements + make-icon.sh + docs/PACKAGING.md — needs your Developer ID cert, notary profile, logo PNG) | ~4 d |
 
 **MVP total (no VCam): ~2–3 weeks.**
 
