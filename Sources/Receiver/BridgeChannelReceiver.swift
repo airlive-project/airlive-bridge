@@ -945,84 +945,38 @@ final class BridgeChannelReceiver: ChannelReceiver {
         present(promoted)
     }
 
-    /// Single presentation point: forward to ALL outputs (always — a hidden
-    /// preview must still publish downstream), and enqueue the frame into the
-    /// channel's `AVSampleBufferDisplayLayer` when the operator is watching this
-    /// channel (`previewEnabled`).
+    /// Single presentation point.  Two jobs:
     ///
-    /// The per-frame pixels go into the display layer (a Metal-backed video
-    /// surface) — NOT through any `@Published` property, so the preview repaints
-    /// smoothly at the capture frame rate and a `@Published` write never lands
-    /// during a SwiftUI view update.  The only published flip here is the
-    /// LOW-FREQUENCY `latestFrame` gate (first frame in), guarded so it fires
-    /// once, not per frame.
+    ///   1. MIRROR (per-frame pixels) — `channel.publishFrame(buffer)`, called
+    ///      right here on the present thread (OFF main): it stores the latest
+    ///      buffer and posts `newFrameNotification`, so every MirrorVideoView tile
+    ///      points its own `CALayer.contents` at the SAME IOSurface-backed buffer.
+    ///      One decode feeds any number of tiles (multiview + Program + Preview),
+    ///      and a busy main thread can never freeze the preview.
+    ///   2. OUTPUT fan-out + the published "no signal" gate — these touch
+    ///      `@Published` / main-isolated state, so they hop to main.  The buffer is
+    ///      IOSurface-backed, so handing it across threads is a retained-CF pass,
+    ///      not a copy.
     private func present(_ buffer: CVPixelBuffer) {
-        // monotonic host time in ns for output pacing/stamping.
         let timeNs = UInt64(CACurrentMediaTime() * 1_000_000_000.0)
 
-        // Output fan-out + preview enqueue run on the main queue: the display
-        // layer is best touched on main, and `BridgeChannel.outputs` is
-        // `@Published` (UI-bound, main-isolated) so reading it off-main is UB.
-        // The buffer is IOSurface-backed, so handing it across threads is a
-        // retained-CF pass, not a copy.
+        // 1. Mirror — off main.
+        channel?.publishFrame(buffer)
+
+        // 2. Outputs + gate — on main.
         DispatchQueue.main.async { [weak self] in
             guard let self, let channel = self.channel else { return }
             if !self.didLogFirstFrame {
                 self.didLogFirstFrame = true
-                print("[BridgeReceiver \(self.src)] ✅ first frame presented (previewEnabled=\(channel.previewEnabled))")
+                print("[BridgeReceiver \(self.src)] ✅ first frame presented")
             }
             for output in channel.outputs where output.isLive {
                 output.send(buffer, timeNs: timeNs)
             }
-            guard channel.previewEnabled else { return }
-            // Per-frame: enqueue into the channel-owned display layer, zero
-            // SwiftUI state.
-            self.enqueue(buffer, into: channel.displayLayer)
-            // Once-per-session: flip the published "no signal" gate on the
-            // first frame only (guarded — never a per-frame published write).
+            // Once-per-session: flip the published "no signal" gate on the first
+            // frame only (guarded — never a per-frame published write).
             if channel.latestFrame == nil { channel.latestFrame = buffer }
         }
-    }
-
-    /// Wrap a decoded `CVPixelBuffer` in a `CMSampleBuffer` and enqueue it into
-    /// `layer` for IMMEDIATE display.  The jitter ring already gated playout
-    /// latency (this frame is "due"), so we tag the sample
-    /// `DisplayImmediately` and let the layer paint it now rather than schedule
-    /// it against a control timebase.  Called on the main queue from `present`.
-    ///
-    /// A format description is derived from the buffer itself each call (cheap —
-    /// it's metadata, not pixels), so a mid-stream resolution change just works
-    /// without us tracking the decode format here.  If the layer has entered a
-    /// `.failed` state (e.g. a prior decode-side error), flush to recover before
-    /// enqueuing.
-    private func enqueue(_ pb: CVPixelBuffer, into layer: AVSampleBufferDisplayLayer) {
-        var fmt: CMVideoFormatDescription?
-        guard CMVideoFormatDescriptionCreateForImageBuffer(
-            allocator: kCFAllocatorDefault, imageBuffer: pb,
-            formatDescriptionOut: &fmt) == noErr, let fmt else { return }
-
-        var timing = CMSampleTimingInfo(
-            duration: .invalid,
-            presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
-            decodeTimeStamp: .invalid
-        )
-        var sample: CMSampleBuffer?
-        guard CMSampleBufferCreateReadyWithImageBuffer(
-            allocator: kCFAllocatorDefault, imageBuffer: pb,
-            formatDescription: fmt, sampleTiming: &timing,
-            sampleBufferOut: &sample) == noErr, let sample else { return }
-
-        // Tag for immediate display — the ring controls latency, not the layer.
-        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true),
-           CFArrayGetCount(attachments) > 0 {
-            let dict = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
-            CFDictionarySetValue(dict,
-                                 Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
-                                 Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
-        }
-
-        if layer.status == .failed { layer.flush() }
-        layer.enqueue(sample)
     }
 
     // MARK: - Publish to the owning channel (main queue)
@@ -1031,18 +985,21 @@ final class BridgeChannelReceiver: ChannelReceiver {
         DispatchQueue.main.async { [weak self] in self?.channel?.isConnected = connected }
     }
 
-    /// Disconnect / format-change cleanup on the main queue: clear the published
-    /// `latestFrame` gate (returns the UI to "no signal") and clear the preview
-    /// layer directly so no stale frame lingers under the overlay.
+    /// Disconnect / format-change cleanup: clear the published `latestFrame` gate
+    /// (returns the UI to "no signal") and blank every mirror tile to black.
     private func publishSignalCleared() {
         DispatchQueue.main.async { [weak self] in
             guard let self, let channel = self.channel else { return }
             channel.latestFrame = nil
-            channel.onClear?()
+            channel.publishFrame(nil)   // blank every mirror to black
         }
     }
 
     private func publishRemote(_ snapshot: StateSnapshot) {
-        DispatchQueue.main.async { [weak self] in self?.channel?.remote = snapshot }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let channel = self.channel else { return }
+            channel.remote = snapshot
+            channel.outputRotation = snapshot.outputRotation   // mirrors read this off-main
+        }
     }
 }

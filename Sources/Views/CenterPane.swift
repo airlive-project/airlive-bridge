@@ -22,26 +22,9 @@ struct CenterPane: View {
     @ObservedObject var model: BridgeModel
 
     var body: some View {
-        VStack(spacing: 0) {
-            modeBar
-            content
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.bgApp)
-    }
-
-    /// Solo ⇄ Multiview switch at the top of the center zone.
-    private var modeBar: some View {
-        HStack {
-            SegmentedBar(selection: $model.mode,
-                         options: AppMode.allCases,
-                         label: { $0.label })
-                .frame(maxWidth: 260)
-            Spacer()
-        }
-        .padding(.horizontal, Spacing.lg)
-        .padding(.top, Spacing.md)
-        .padding(.bottom, Spacing.xs)
+        content
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Theme.bgApp)
     }
 
     @ViewBuilder
@@ -140,7 +123,7 @@ private struct ChannelDetail: View {
     private var previewPane: some View {
         ZStack {
             if channel.previewEnabled {
-                PreviewView(channel: channel)
+                MirrorVideoView(channel: channel)
                 if channel.latestFrame == nil {
                     noSignalOverlay
                 }

@@ -28,9 +28,23 @@ final class BridgeModel: ObservableObject {
     /// none is selected.
     @Published var selectedID: UUID?
 
-    /// Solo (one camera) vs Multiview (the grid).  Drives the center monitor now;
-    /// Phase 2 ties the output routing to it (mutually exclusive senders).
+    /// Solo (one camera) vs Multiview (the switcher).  Drives the center monitor
+    /// now; Phase 2 ties the output routing to it (mutually exclusive senders).
     @Published var mode: AppMode = .solo
+
+    /// Multiview switcher buses: the camera staged in PREVIEW and the camera live
+    /// on PROGRAM.  Phase 2 routes the Program camera's frames to the program
+    /// output (conflict-free: persistent sender, swap the source).
+    @Published var previewID: UUID?
+    @Published var programID: UUID?
+
+    func previewChannel() -> BridgeChannel? { channels.first { $0.id == previewID } }
+    func programChannel() -> BridgeChannel? { channels.first { $0.id == programID } }
+
+    /// Load a camera into Preview (stage it).
+    func stage(_ id: UUID) { previewID = id }
+    /// Cut: the staged Preview camera goes live to Program.
+    func take() { if let p = previewID { programID = p } }
 
     // MARK: - Multiview grid (adaptive 4 / 8 / 12 / 16)
 
@@ -125,6 +139,7 @@ final class BridgeModel: ObservableObject {
         let channel = BridgeChannel(name: defaultChannelName())
         channels.append(channel)
         selectedID = channel.id
+        if previewID == nil { previewID = channel.id }   // stage the first camera
         channel.start()             // bring the receiver + Bonjour online
         applyAuth(to: channel)      // gate it with the current global password
         return channel
@@ -137,6 +152,10 @@ final class BridgeModel: ObservableObject {
         guard let index = channels.firstIndex(where: { $0.id == id }) else { return }
         channels[index].stop()
         channels.remove(at: index)
+
+        // Keep the switcher buses valid: a removed camera can't be PVW/PGM.
+        if previewID == id { previewID = channels.first?.id }
+        if programID == id { programID = nil }
 
         guard selectedID == id else { return }
         if channels.isEmpty {

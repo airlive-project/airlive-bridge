@@ -34,40 +34,44 @@ final class BridgeChannel: ObservableObject, Identifiable {
     /// True while an iPhone is connected to this channel's receiver.
     @Published var isConnected: Bool = false
 
-    /// "Has a live picture" gate for the preview overlay — a LOW-FREQUENCY
-    /// published flag, NOT a per-frame buffer.  It is set (to the first decoded
-    /// buffer) exactly once when video starts, and cleared (nil) on disconnect /
-    /// format change; it does NOT change per frame.  The actual per-frame pixels
-    /// are enqueued into `displayLayer` (a Metal-backed
-    /// `AVSampleBufferDisplayLayer`), never through this `@Published` — routing
-    /// video frames through `@Published` only repaints on SwiftUI's diff cycle
-    /// and froze the preview on one frame.  Views read `latestFrame == nil` only
-    /// to decide whether to show the "no signal" overlay; they must NOT use it as
-    /// the live frame source (use `PreviewView(channel:)`).
-    ///
-    /// Typed `CVPixelBuffer` (not the `CVImageBuffer` super-type it aliases) so
-    /// the seam matches the receiver, which only ever hands over decoded
-    /// `CVPixelBuffer`s — no ambiguity for a future caller reaching for a
-    /// pixel-buffer-only API.
+    /// "Has a live picture" gate for the no-signal overlay — a LOW-FREQUENCY
+    /// published flag, NOT the per-frame buffer.  Set once when video starts,
+    /// nil on disconnect/clear; views read `latestFrame == nil` only to decide
+    /// whether to show the "no signal" overlay (per-frame pixels go via the
+    /// mirror path below, never through `@Published`, which froze preview on one
+    /// frame and re-rendered the whole tree).
     @Published var latestFrame: CVPixelBuffer?
 
-    /// Canonical live-preview surface for this channel — a Metal-backed
-    /// `AVSampleBufferDisplayLayer` the receiver enqueues each decoded frame
-    /// into (wrapped in a `CMSampleBuffer` with timing) and `PreviewView` simply
-    /// HOSTS.  Owned HERE, not in the view, so it survives SwiftUI re-creating
-    /// `PreviewView` (the layer outlives the view tree, the way Studio owns its
-    /// display layer on the receiver) — that removes the "view rebuilds → frame
-    /// pipe goes nil" fragility a per-view closure pipe had.  It is deliberately
-    /// NOT `@Published`: enqueuing frames into it never touches SwiftUI state, so
-    /// the preview repaints at the capture rate with zero per-frame diff cost.
-    /// `AVSampleBufferDisplayLayer` is available since macOS 10.8.
-    let displayLayer: AVSampleBufferDisplayLayer
+    // MARK: - Live frame mirroring (Studio's "decode once → show in many")
+    //
+    // The receiver calls `publishFrame` with each decoded buffer; MirrorVideoView
+    // tiles observe `newFrameNotification` and point their OWN `CALayer.contents`
+    // at `latestPixelBuffer`.  The same IOSurface-backed buffer can feed any
+    // number of mirrors (multiview thumbnail + big Program + big Preview) with
+    // zero extra decodes and no single-parent layer problem.
 
-    /// Clear the live-preview surface to black ("no signal").  Called by the
-    /// receiver on disconnect / format change so a stale last frame doesn't
-    /// linger under the overlay.  NOT `@Published` — it flushes the owned
-    /// `displayLayer` directly.
-    var onClear: (() -> Void)?
+    static let newFrameNotification = Notification.Name("AirliveBridgeChannelNewFrame")
+
+    private var _latestPixelBuffer: CVPixelBuffer?
+    private let pixelBufferLock = NSLock()
+    /// Thread-safe snapshot of the most recent decoded frame (read off-main by
+    /// mirror tiles in their notification handler).
+    var latestPixelBuffer: CVPixelBuffer? {
+        pixelBufferLock.lock(); defer { pixelBufferLock.unlock() }
+        return _latestPixelBuffer
+    }
+
+    /// Clockwise present rotation (0/90/180/270) from the camera's snapshot.  A
+    /// plain Int read off-main by mirrors (atomic-enough, same trade-off as Studio).
+    var outputRotation: Int = 0
+
+    /// Receiver entry point: store the latest frame and notify mirrors.  Called on
+    /// the receiver's present thread (OFF main) so a busy main thread can never
+    /// freeze the live preview.  Pass nil to blank every mirror ("no signal").
+    func publishFrame(_ buffer: CVPixelBuffer?) {
+        pixelBufferLock.lock(); _latestPixelBuffer = buffer; pixelBufferLock.unlock()
+        NotificationCenter.default.post(name: Self.newFrameNotification, object: self)
+    }
 
     /// The camera's last-reported state (ISO, lens, fps, …).  Drives the remote
     /// control UI.  nil until the first `.control` snapshot arrives.
@@ -103,18 +107,7 @@ final class BridgeChannel: ObservableObject, Identifiable {
     init(id: UUID = UUID(), name: String, delay: LatencyPreset = .normal) {
         self.id = id
         self.name = name
-        self.displayLayer = AVSampleBufferDisplayLayer()
-        // Letterbox / downscale on the GPU for free — a 4K buffer in a small
-        // pane costs nothing extra; black backing so an empty layer reads as
-        // "no signal" rather than transparent.
-        self.displayLayer.videoGravity = .resizeAspect
-        self.displayLayer.backgroundColor = NSColor.black.cgColor
-        // Default-clear flushes the owned layer to black.  `flushAndRemoveImage`
-        // drops the queued sample and blanks the layer in one call.
         self.delay = delay
-        self.onClear = { [weak self] in
-            self?.displayLayer.flushAndRemoveImage()
-        }
     }
 
     // MARK: - Lifecycle
@@ -137,25 +130,24 @@ final class BridgeChannel: ObservableObject, Identifiable {
         }
     }
 
-    /// Take the channel offline: stop outputs and the receiver, and clear the
-    /// transient connection state so the UI reflects "not connected".
+    /// Take the channel offline: stop outputs and the receiver, blank the mirrors,
+    /// and clear the transient connection state so the UI reflects "not connected".
     ///
-    /// The `@Published` writes and the `onClear` layer flush must run on the
-    /// main thread (SwiftUI state + CALayer).  The sole current caller
-    /// (`BridgeModel.removeChannel`) is already on main, but a future off-main
-    /// caller must not tear SwiftUI state from a background thread — so the
-    /// UI-side cleanup is hopped to main explicitly while the receiver/output
-    /// teardown (thread-safe) runs inline.
+    /// The `@Published` writes must run on the main thread (SwiftUI state).  The
+    /// sole current caller (`BridgeModel.removeChannel`) is already on main, but a
+    /// future off-main caller must not tear SwiftUI state from a background thread
+    /// — so the UI-side cleanup is hopped to main explicitly while the receiver /
+    /// output teardown (thread-safe) runs inline.
     func stop() {
         for output in outputs where output.isLive {
             output.stop()
         }
         receiver?.stop()
+        publishFrame(nil)   // blank every mirror tile to black ("no signal")
         let clearUI = { [weak self] in
             guard let self else { return }
             self.isConnected = false
             self.latestFrame = nil
-            self.onClear?()
         }
         if Thread.isMainThread {
             clearUI()
