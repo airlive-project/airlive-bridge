@@ -145,18 +145,35 @@ final class BridgeModel: ObservableObject {
     /// camera.  We force a keyframe only when the program SOURCE actually changes (a
     /// real CUT) or when a relay first connects (`force`).
     private var lastKeyframeProgramID: UUID?
+    private var keyframeDebounce: DispatchWorkItem?
+    /// Coalesce window for forced IDRs.  ≥ the camera's own ~250 ms rate-limit and a
+    /// GOP floor, so a director hammering CUT (A→B→A…) yields ONE forceKeyframe on
+    /// the SETTLED program, not one per intermediate click (per the camera team's
+    /// thermal note — bursts pushed the phone nominal→fair).
+    private let keyframeDebounceSeconds = 0.3
 
     /// Ask the on-air camera for a fresh keyframe — but ONLY when an OBS relay is
     /// ACTUALLY connected and receiving, AND the program source genuinely changed (or
     /// `force` for a fresh relay connect).  Gated tightly so the phone emits at most
-    /// one extra I-frame per real CUT and never for routine UI churn or for NDI.
+    /// one extra I-frame per real CUT and never for routine UI churn or for NDI, and
+    /// DEBOUNCED so rapid CUTs collapse to a single IDR on the settled program.
     private func requestKeyframeForProgram(force: Bool = false) {
         let obsReceiving = programOutputs.contains { ($0 as? AirliveRelayOutput)?.isConnected == true }
         guard obsReceiving else { return }
         let pid = effectiveProgramID
         guard force || pid != lastKeyframeProgramID else { return }   // real source change only
         lastKeyframeProgramID = pid
-        channels.first { $0.id == pid }?.send(.forceKeyframe())
+
+        keyframeDebounce?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            // Re-check at fire time: the program may have moved again and the relay
+            // may have dropped — never poke the phone for nothing.
+            guard self.programOutputs.contains(where: { ($0 as? AirliveRelayOutput)?.isConnected == true }) else { return }
+            self.channels.first { $0.id == self.effectiveProgramID }?.send(.forceKeyframe())
+        }
+        keyframeDebounce = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + keyframeDebounceSeconds, execute: work)
     }
 
     private func feedProgram(_ buffer: CVPixelBuffer, timeNs: UInt64) {
