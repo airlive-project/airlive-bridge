@@ -59,7 +59,7 @@ enum OutputKind: String, CaseIterable, Identifiable {
     /// disabled controls on placeholder cards and the add menu — the single
     /// source of truth so the card and the menu can never disagree about which
     /// kinds are real.
-    var isImplemented: Bool { self == .ndi || self == .obs || self == .rtsp }
+    var isImplemented: Bool { self == .ndi || self == .obs || self == .rtsp || self == .srt }
 }
 
 /// One downstream re-publishing sink.  Reference type (`AnyObject`) because an
@@ -94,9 +94,15 @@ protocol VideoOutput: AnyObject {
     /// length-prefixed SPS/PPS the camera resends each keyframe.
     func relayFormat(_ payload: Data)
     func relaySample(_ payload: Data, timestampMicros: Int64)
+
+    /// Transport-specific config string from the output card's second field — e.g.
+    /// the SRT destination `srt://host:port`.  Defaults to a no-op (NDI group / RTSP
+    /// path are not wired today); only SRT stores it.
+    var config: String { get set }
 }
 
 extension VideoOutput {
     func relayFormat(_ payload: Data) {}
     func relaySample(_ payload: Data, timestampMicros: Int64) {}
+    var config: String { get { "" } set {} }
 }

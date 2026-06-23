@@ -148,7 +148,8 @@ private func addProgramOutput(_ kind: OutputKind, to model: BridgeModel) {
     case .ndi:  model.addProgramOutput(NDIOutput(label: name))
     case .obs:  model.addProgramOutput(AirliveRelayOutput(label: name))
     case .rtsp: model.addProgramOutput(RTSPOutput(label: name, port: nextRTSPPort(model)))
-    default: break   // srt / vcam are "soon"
+    case .srt:  model.addProgramOutput(SRTOutput(label: name))
+    case .vcam: break   // Virtual Camera is "soon"
     }
 }
 
@@ -261,7 +262,7 @@ private struct OutputCard: View {
                 footerRow
             }
         }
-        .onAppear { draftLabel = output.label }
+        .onAppear { draftLabel = output.label; config = output.config }
     }
 
     private var headerRow: some View {
@@ -353,6 +354,7 @@ private struct OutputCard: View {
                     RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
                         .stroke(Theme.stroke, lineWidth: 1)
                 )
+                .onSubmit { output.config = config.trimmingCharacters(in: .whitespaces); refresh += 1 }
         }
     }
 
