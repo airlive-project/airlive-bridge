@@ -49,7 +49,7 @@ struct MultiviewGrid: View {
         Button { model.take() } label: {
             Text("CUT  (Space)")
                 .font(.system(size: 13, weight: .bold))
-                .foregroundColor(Theme.accentRed)
+                .foregroundColor(.white)
                 .frame(maxWidth: .infinity)
                 .frame(height: 38)
         }
@@ -130,7 +130,8 @@ private struct BigPane: View {
         .background(Color.black)
         .clipped()
         .overlay(Rectangle().stroke(accent, lineWidth: 2))
-        .overlay(alignment: .bottom) { bottomChip(title, color: accent) }
+        // White label (the coloured border already signals preview/program).
+        .overlay(alignment: .bottom) { bottomChip(title) }
     }
 
     private var placeholder: some View {
