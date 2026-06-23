@@ -42,16 +42,18 @@ struct MultiviewGrid: View {
         }
     }
 
-    // Full-width CUT (cut Preview → Program).  Space triggers it; the shortcut is
-    // shown in the label and will be reassignable later.
+    // Full-width CUT (cut Preview → Program).  A normal semi-transparent box like
+    // every other button — not a big solid-red slab; the red is just the label
+    // tint hinting "to air".  Space triggers it (shortcut shown, reassignable later).
     private var cutBar: some View {
         Button { model.take() } label: {
             Text("CUT  (Space)")
                 .font(.system(size: 13, weight: .bold))
+                .foregroundColor(Theme.accentRed)
                 .frame(maxWidth: .infinity)
-                .frame(height: 40)
+                .frame(height: 38)
         }
-        .bridgeButton(selected: model.previewChannel() != nil, accent: Theme.accentRed)
+        .bridgeButton()
         .keyboardShortcut(.space, modifiers: [])
         .disabled(model.previewChannel() == nil)
         .opacity(model.previewChannel() == nil ? 0.5 : 1)

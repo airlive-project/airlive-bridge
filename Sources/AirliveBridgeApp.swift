@@ -27,10 +27,11 @@ struct AirliveBridgeApp: App {
                        minHeight: 680, idealHeight: 760)
                 .preferredColorScheme(.dark)
         }
-        // Hidden title bar so the top strip is OUR dark background (not the grey
-        // native toolbar chrome); ContentView paints a full-width Solo ⇄ Multiview
-        // switch there, inset past the traffic lights.
-        .windowStyle(.hiddenTitleBar)
+        // Real title bar — it IS our control strip: ContentView puts our themed
+        // Solo ⇄ Multiview switch in it (`.toolbar` principal) and paints the bar
+        // our dark background (`.toolbarBackground`), so there's no extra empty
+        // row and no grey native chrome.
+        .windowStyle(.titleBar)
         // First-launch window size — matches the ideal content frame so the
         // operator never has to resize to see all three zones.
         .defaultSize(width: 1200, height: 760)

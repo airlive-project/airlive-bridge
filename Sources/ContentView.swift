@@ -16,34 +16,29 @@ struct ContentView: View {
     @EnvironmentObject var model: BridgeModel
 
     var body: some View {
-        VStack(spacing: 0) {
-            modeBar
-            HStack(spacing: 0) {
-                // No explicit dividers between zones — the rails' darker `bgRail`
-                // already separates them, and standalone Dividers were crossing
-                // the preview's rounded corners (the "overlapping lines" artifact).
-                ChannelsRail(model: model)
-                CenterPane(model: model)
-                OutputsRail(model: model)
-            }
+        HStack(spacing: 0) {
+            // No explicit dividers between zones — the rails carry faint edge
+            // hairlines (see ChannelsRail / OutputsRail).
+            ChannelsRail(model: model)
+            CenterPane(model: model)
+            OutputsRail(model: model)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.bgApp)
         .preferredColorScheme(.dark)
-    }
-
-    /// GLOBAL Solo ⇄ Multiview switch in the top strip — OUR background colour
-    /// (not native toolbar grey), a compact centered control (full-width read too
-    /// heavy).  A hairline under it ties the strip to the rest of the chrome.
-    private var modeBar: some View {
-        SegmentedBar(selection: $model.mode,
-                     options: AppMode.allCases,
-                     label: { $0.label })
-            .frame(width: 320)
-            .frame(maxWidth: .infinity)   // center the compact control
-            .padding(.vertical, Spacing.sm)
-            .background(Theme.bgApp)
-            .overlay(Rectangle().frame(height: 1).foregroundColor(Theme.stroke),
-                     alignment: .bottom)
+        // GLOBAL Solo ⇄ Multiview switch lives IN the title bar — our themed
+        // control, on our dark background, so the title bar is the working strip
+        // (no separate empty row, no grey chrome).
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                SegmentedBar(selection: $model.mode,
+                             options: AppMode.allCases,
+                             label: { $0.label })
+                    .frame(width: 320)
+            }
+        }
+        .toolbarBackground(Theme.bgApp, for: .windowToolbar)
+        .toolbarBackground(.visible, for: .windowToolbar)
+        .navigationTitle("")
     }
 }

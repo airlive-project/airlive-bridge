@@ -253,29 +253,29 @@ private struct OutputCard: View {
 
     private var headerRow: some View {
         HStack(spacing: Spacing.sm) {
-            kindBadge
+            kindBadge       // the kind tag itself turns red when live
             Spacer()
-            StatusPill(text: output.isLive ? "LIVE" : "OFF",
-                       on: output.isLive,
-                       accent: Theme.accentRed)
             onOffToggle
         }
     }
 
+    /// The "NDI" tag IS the live indicator: red fill + white text when publishing,
+    /// neutral otherwise (no separate LIVE/OFF pill).
     private var kindBadge: some View {
-        HStack(spacing: Spacing.xs) {
+        let live = output.isLive
+        return HStack(spacing: Spacing.xs) {
             Image(systemName: output.kind.symbolName)
                 .font(.system(size: 10, weight: .semibold))
             Text(output.kind.displayName.uppercased())
                 .font(.system(size: 10, weight: .bold))
                 .tracking(1.0)
         }
-        .foregroundColor(Theme.textSecondary)
+        .foregroundColor(live ? .white : Theme.textSecondary)
         .padding(.horizontal, Spacing.sm)
         .padding(.vertical, 3)
         .background(
             RoundedRectangle(cornerRadius: 5, style: .continuous)
-                .fill(Theme.bgSelected)
+                .fill(live ? Theme.accentRed : Theme.bgSelected)
         )
     }
 
