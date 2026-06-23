@@ -209,6 +209,13 @@ final class BridgeModel: ObservableObject {
     /// tracked by id, so they stay valid.
     func moveChannel(from source: IndexSet, to destination: Int) {
         channels.move(fromOffsets: source, toOffset: destination)
+        pushChannelOrder()
+    }
+
+    /// Publish each channel's position (Bonjour TXT `ord`) so the iPhone lists
+    /// channels in the operator's Bridge order — names stay free to rename.
+    private func pushChannelOrder() {
+        for (index, channel) in channels.enumerated() { channel.receiver?.updateOrder(index) }
     }
 
     // MARK: - Channel management
@@ -224,6 +231,7 @@ final class BridgeModel: ObservableObject {
         channel.start()             // bring the receiver + Bonjour online
         applyAuth(to: channel)      // gate it with the current global password
         routeProgram()              // wire the program tap (covers the new channel)
+        pushChannelOrder()          // advertise positions (this one + any shifted)
         return channel
     }
 
@@ -238,7 +246,8 @@ final class BridgeModel: ObservableObject {
         // Keep the switcher buses valid: a removed camera can't be PVW/PGM.
         if previewID == id { previewID = channels.first?.id }
         if programID == id { programID = nil }
-        routeProgram()   // re-wire the program tap after the list changed
+        routeProgram()       // re-wire the program tap after the list changed
+        pushChannelOrder()   // re-number remaining channels' positions
 
         guard selectedID == id else { return }
         if channels.isEmpty {

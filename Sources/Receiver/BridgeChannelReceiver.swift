@@ -70,6 +70,10 @@ final class BridgeChannelReceiver: ChannelReceiver {
     private let instanceName: String
     /// Source display name advertised as TXT `src`.  Mutated only on `queue`.
     private var src: String
+    /// Order index advertised as TXT `ord` — the channel's position in the
+    /// operator's Bridge list, so the iPhone can sort by it instead of by the
+    /// (renameable) name.  Mutated only on `queue`.
+    private var order: Int = 0
 
     // ── Network ───────────────────────────────────────────────────────────
     private var listener: NWListener?
@@ -255,6 +259,14 @@ final class BridgeChannelReceiver: ChannelReceiver {
         }
     }
 
+    func updateOrder(_ index: Int) {
+        queue.async { [weak self] in
+            guard let self, self.order != index else { return }
+            self.order = index
+            self.readvertise()
+        }
+    }
+
     /// Re-read the operator's playout-delay preset and apply it live.  Called by
     /// `BridgeChannel` when `delay` changes.  Re-anchors and drops the frames
     /// queued under the old depth (cleaner than re-timing them).
@@ -341,6 +353,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
         r["dev"]  = identity.dev
         r["sid"]  = sid
         r["src"]  = src
+        r["ord"]  = String(order)   // operator's Bridge order → iPhone sorts by this
         r["busy"] = occupied ? "1" : "0"
         return r
     }

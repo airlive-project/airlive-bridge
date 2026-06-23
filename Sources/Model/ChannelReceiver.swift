@@ -34,6 +34,11 @@ protocol ChannelReceiver: AnyObject {
     /// service down.
     func rename(_ newName: String)
 
+    /// Publish this channel's ORDER index (Bonjour TXT `ord`) so the iPhone can
+    /// list channels in the operator's Bridge order — independent of the (freely
+    /// renameable) display name.  Re-advertises live; no teardown.
+    func updateOrder(_ index: Int)
+
     /// Apply a live change to the playout-delay preset (jitter-buffer depth).
     /// Re-anchors and drops frames queued under the old depth.  Added to the
     /// foundation seam so `BridgeChannel` can forward `delay` changes without a
