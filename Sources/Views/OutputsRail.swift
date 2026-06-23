@@ -145,16 +145,32 @@ struct OutputsRail: View {
 private func addProgramOutput(_ kind: OutputKind, to model: BridgeModel) {
     let name = defaultName(kind, model)
     switch kind {
-    case .ndi: model.addProgramOutput(NDIOutput(label: name))
-    case .obs: model.addProgramOutput(AirliveRelayOutput(label: name))
-    default: break   // srt / rtsp / vcam are "soon"
+    case .ndi:  model.addProgramOutput(NDIOutput(label: name))
+    case .obs:  model.addProgramOutput(AirliveRelayOutput(label: name))
+    case .rtsp: model.addProgramOutput(RTSPOutput(label: name, port: nextRTSPPort(model)))
+    default: break   // srt / vcam are "soon"
     }
+}
+
+/// Lowest free RTSP port from 8554 up, so multiple RTSP outputs don't collide.
+private func nextRTSPPort(_ model: BridgeModel) -> UInt16 {
+    let used = Set(model.programOutputs.compactMap { ($0 as? RTSPOutput)?.port })
+    var p: UInt16 = 8554
+    while used.contains(p) { p += 1 }
+    return p
 }
 
 /// Auto-numbered default name per kind, lowest free index, so LAN source names
 /// stay stable and readable.
 private func defaultName(_ kind: OutputKind, _ model: BridgeModel) -> String {
-    let base = kind == .obs ? "OBS Airlive Bridge" : "Program NDI"
+    let base: String
+    switch kind {
+    case .ndi:  base = "Program NDI"
+    case .obs:  base = "OBS Airlive Bridge"
+    case .rtsp: base = "RTSP"
+    case .srt:  base = "SRT"
+    case .vcam: base = "Virtual Camera"
+    }
     let used = Set(model.programOutputs.map(\.label))
     var n = 1
     while used.contains("\(base) \(n)") { n += 1 }

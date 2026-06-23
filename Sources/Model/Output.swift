@@ -59,7 +59,7 @@ enum OutputKind: String, CaseIterable, Identifiable {
     /// disabled controls on placeholder cards and the add menu — the single
     /// source of truth so the card and the menu can never disagree about which
     /// kinds are real.
-    var isImplemented: Bool { self == .ndi || self == .obs }
+    var isImplemented: Bool { self == .ndi || self == .obs || self == .rtsp }
 }
 
 /// One downstream re-publishing sink.  Reference type (`AnyObject`) because an
