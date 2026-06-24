@@ -29,6 +29,16 @@ enum ChannelKind: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Short source-type label for the channel card header (e.g. "Airlive").  Distinct
+    /// from `displayName` (the add-menu's full "Airlive Camera").
+    var sourceLabel: String {
+        switch self {
+        case .airlive: return "Airlive"
+        case .capture: return "HDMI / USB"
+        case .airplay: return "Screen Mirroring"
+        }
+    }
+
     /// One-line description for the add menu.
     var subtitle: String {
         switch self {

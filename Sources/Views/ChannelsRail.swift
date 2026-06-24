@@ -178,8 +178,8 @@ private struct ChannelRow: View {
     var body: some View {
         Card(padding: Spacing.sm) {
             VStack(alignment: .leading, spacing: Spacing.sm) {
-                topRow        // ordinal · arrows · signal status
-                nameRow       // name field + delete (right of it)
+                topRow        // source kind · signal status · delete
+                bottomRow     // ordinal · arrows · name
             }
         }
         // No selection outline for now (operator: remove the sticky blue until it has a
@@ -203,12 +203,26 @@ private struct ChannelRow: View {
 
     // MARK: Top row
 
+    // TOP: source kind (left) · signal status · delete (right).
     private var topRow: some View {
         HStack(spacing: Spacing.sm) {
-            ordinalBadge
-            reorderArrows         // ▲/▼ right of the number, always visible
+            Text(channel.kind.sourceLabel)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(Theme.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
             Spacer(minLength: Spacing.xs)
             statusLine
+            trashButton
+        }
+    }
+
+    // BOTTOM: ordinal · reorder arrows · editable name.
+    private var bottomRow: some View {
+        HStack(spacing: Spacing.sm) {
+            ordinalBadge
+            reorderArrows
+            nameField
         }
     }
 
@@ -277,14 +291,6 @@ private struct ChannelRow: View {
                     .stroke(Theme.stroke, lineWidth: 1)
             )
             .onSubmit { commitRename() }
-    }
-
-    /// Name + delete on one row — the trash sits to the right of the name field.
-    private var nameRow: some View {
-        HStack(spacing: Spacing.sm) {
-            nameField
-            trashButton
-        }
     }
 
     private var trashButton: some View {
