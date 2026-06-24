@@ -48,8 +48,10 @@ struct OutputsRail: View {
             Text(model.mode == .multiview ? "Multiview outputs" : "Solo outputs")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
-            // "+" opens a menu of output TYPES — NDI adds a real output;
-            // SRT / RTSP / Virtual Camera show as "soon" (disabled).
+            Spacer()
+            // "+" (semi-transparent box, right edge — replaces the old count) opens a
+            // menu of output TYPES: NDI adds a real output; SRT / RTSP / Virtual
+            // Camera show as "soon" (disabled).
             Menu {
                 ForEach(OutputKind.allCases) { kind in
                     Button {
@@ -79,12 +81,6 @@ struct OutputsRail: View {
             .menuIndicator(.hidden)
             .fixedSize()
             .help("Add a program output")
-            Spacer()
-            if !model.programOutputs.isEmpty {
-                Text("\(model.programOutputs.count)")
-                    .font(.system(size: 12, weight: .medium).monospacedDigit())
-                    .foregroundColor(Theme.textFaint)
-            }
         }
         .padding(.horizontal, Spacing.lg)
         .padding(.top, Spacing.md)
