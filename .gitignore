@@ -8,3 +8,6 @@ target/
 dist/
 *.o
 *.xcodeproj/
+
+# AirPlay lib build output (rebuild via scripts/build-airplay-lib.sh)
+Vendor/airplay-lib/
