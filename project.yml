@@ -47,6 +47,12 @@ targets:
         # for unsigned debug builds, which pass CODE_SIGNING_ALLOWED=NO):
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_ENTITLEMENTS: AirliveBridge.entitlements
+        # Stable signing identity (David Evsyukov Personal Team) — REQUIRED for macOS
+        # Local Network privacy: an ad-hoc-signed app can't be granted Local Network,
+        # so Bonjour PUBLISHING (Airlive channels + AirPlay _raop/_airplay) is denied
+        # (-65555 / -72008). A real Team gives TCC a stable identity to grant + persist.
+        DEVELOPMENT_TEAM: XWBJP49FTR
+        CODE_SIGN_STYLE: Automatic
         # --- AirPlay receiver (Sources/AirPlay + vendored UxPlay static libs) ---
         # Build the libs first: scripts/build-airplay-lib.sh (brew cmake openssl@3 libplist).
         CLANG_CXX_LANGUAGE_STANDARD: "gnu++20"
