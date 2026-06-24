@@ -41,12 +41,16 @@ struct MultiviewGrid: View {
     // MARK: Top bar — lenses (over Preview, left) · CUT (center) · Fullscreen (right)
 
     private var topBar: some View {
-        HStack(spacing: Spacing.sm) {
-            lensQuickRow                       // above PREVIEW
-            Spacer(minLength: Spacing.md)
-            cutButton                          // center
-            Spacer(minLength: Spacing.md)
-            fullscreenButton                   // right
+        // CUT must sit on the TRUE center (the PVW/PGM seam), not between the lens row
+        // and Fullscreen (the lens row is wider, which pushed it left).  ZStack centers
+        // CUT in the full bar width; the edges (lenses left, Fullscreen right) overlay.
+        ZStack {
+            HStack(spacing: Spacing.sm) {
+                lensQuickRow                   // above PREVIEW (left)
+                Spacer(minLength: Spacing.sm)
+                fullscreenButton               // right
+            }
+            cutButton                          // dead-center over the PVW/PGM seam
         }
     }
 
