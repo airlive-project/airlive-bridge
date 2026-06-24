@@ -99,6 +99,28 @@ std::string random_mac()
   return mac_address;
 }
 
+// Per-channel device id: derive a stable, unique, locally-administered unicast MAC
+// from the channel name. Each AirPlay channel MUST have a distinct MAC or the iPhone
+// dedupes them (the system MAC is shared across channels → only one Apple TV shows up).
+// Same name → same MAC across restarts (iPhone remembers it, no re-pair).
+std::string mac_from_name(const std::string &name)
+{
+  uint64_t h = 1469598103934665603ULL;               // FNV-1a 64
+  for (unsigned char c : name) { h ^= c; h *= 1099511628211ULL; }
+  unsigned char o[OCTETS];
+  for (int i = 0; i < OCTETS; i++) o[i] = (unsigned char)(h >> (8 * i));
+  o[0] = (unsigned char)((o[0] & 0xFC) | (LOCAL << 1) | MULTICAST);  // locally-administered, unicast
+  char str[3];
+  std::string mac;
+  for (int i = 0; i < OCTETS; i++)
+  {
+    snprintf(str, sizeof(str), "%02x", o[i]);
+    mac += str;
+    if (i < OCTETS - 1) mac += ":";
+  }
+  return mac;
+}
+
 std::string find_mac()
 {
   std::string mac;
@@ -445,14 +467,12 @@ private:
 
   int startServerLocked(const std::string &name)
   {
-    // Resolve a MAC (system MAC preferred; fall back to random).
-    std::string mac = find_mac();
-    if (mac.empty())
-    {
-      srand((unsigned)(time(nullptr) * getpid()));
-      mac = random_mac();
-      os_log(ap_log(), "using random MAC %{public}s", mac.c_str());
-    }
+    // Per-channel UNIQUE device id, derived from the channel name. The system MAC
+    // (find_mac) is shared across channels → the iPhone would see every channel as
+    // the SAME Apple TV and show only one. A name-derived MAC makes each channel a
+    // distinct, stable receiver. (find_mac/random_mac kept for reference.)
+    std::string mac = mac_from_name(name);
+    os_log(ap_log(), "device MAC %{public}s for \"%{public}s\"", mac.c_str(), name.c_str());
     std::vector<char> hwAddr;
     parse_hw_addr(mac, hwAddr);
 
