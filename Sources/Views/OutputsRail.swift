@@ -20,6 +20,7 @@
 // token so the pill and field reflect the new value immediately.
 
 import SwiftUI
+import AppKit   // NSPasteboard — copy the RTSP URL
 
 struct OutputsRail: View {
     @ObservedObject var model: BridgeModel
@@ -243,40 +244,50 @@ private struct OutputCard: View {
     let output: VideoOutput
 
     @State private var draftLabel: String = ""
-    @State private var config: String = ""
+    @State private var draftConfig: String = ""
     @State private var refresh = 0
+    @State private var confirmingDelete = false
 
     var body: some View {
-        _ = refresh // re-evaluate body after a start/stop/rename bump
-        return Card {
-            VStack(alignment: .leading, spacing: Spacing.md) {
-                headerRow
-                labelField
-                configField
-                footerRow
+        _ = refresh // re-evaluate after a start/stop/rename bump
+        return Card(padding: Spacing.sm) {
+            VStack(alignment: .leading, spacing: Spacing.sm) {
+                topRow        // badge · name · trash · on-off — one line
+                secondRow     // only SRT (destination) / RTSP (URL) add a line
             }
         }
-        .onAppear { draftLabel = output.label; config = output.config }
+        .onAppear { draftLabel = output.label; draftConfig = output.config }
+        // Removing a LIVE output cuts the stream — confirm first (an idle one deletes
+        // straight away).
+        .confirmationDialog("Remove “\(output.label)” while it’s live?",
+                            isPresented: $confirmingDelete, titleVisibility: .visible) {
+            Button("Remove output", role: .destructive) { model.removeProgramOutput(output) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("\(output.kind.displayName) is publishing right now — removing it stops the stream.")
+        }
     }
 
-    private var headerRow: some View {
+    // ONE line: live-aware kind badge · inline name · trash · on/off switch.
+    private var topRow: some View {
         HStack(spacing: Spacing.sm) {
-            kindBadge       // the kind tag itself turns red when live
-            Spacer()
+            kindBadge
+            nameField
+            trashButton
             onOffToggle
         }
     }
 
-    /// The "NDI" tag IS the live indicator: red fill + white text when publishing,
+    /// The kind tag IS the live indicator: red fill + white text when publishing,
     /// neutral otherwise (no separate LIVE/OFF pill).
     private var kindBadge: some View {
         let live = output.isLive
-        return HStack(spacing: Spacing.xs) {
+        return HStack(spacing: Spacing.xxs) {
             Image(systemName: output.kind.symbolName)
                 .font(.system(size: 10, weight: .semibold))
             Text(output.kind.displayName.uppercased())
                 .font(.system(size: 10, weight: .bold))
-                .tracking(1.0)
+                .tracking(0.8)
         }
         .foregroundColor(live ? .white : Theme.textSecondary)
         .padding(.horizontal, Spacing.sm)
@@ -285,6 +296,40 @@ private struct OutputCard: View {
             RoundedRectangle(cornerRadius: 5, style: .continuous)
                 .fill(live ? Theme.accentRed : Theme.bgSelected)
         )
+        .fixedSize()
+    }
+
+    /// Inline, flexible source-name field (the real NDI source name; a display label
+    /// for the others). Takes the row's slack width between the badge and the trash.
+    private var nameField: some View {
+        TextField(output.kind.displayName, text: $draftLabel)
+            .textFieldStyle(.plain)
+            .font(.system(size: 13, weight: .medium))
+            .foregroundColor(Theme.textPrimary)
+            .padding(.horizontal, Spacing.sm)
+            .frame(height: 28)
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+                    .fill(Theme.bgApp)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+                    .stroke(Theme.stroke, lineWidth: 1)
+            )
+            .onSubmit { commitLabel() }
+    }
+
+    private var trashButton: some View {
+        Button { requestDelete() } label: {
+            Image(systemName: "trash")
+                .font(.system(size: 12))
+                .foregroundColor(Theme.textFaint)
+                .frame(width: 22, height: 22)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Remove output")
     }
 
     private var onOffToggle: some View {
@@ -293,35 +338,81 @@ private struct OutputCard: View {
             set: { newValue in
                 if newValue { output.start() } else { output.stop() }
                 refresh += 1
-                // `output.isLive` changed but the array didn't — nudge the model
-                // so observers (the tag colour, channel rows) re-read.
+                // isLive changed but the array didn't — nudge the model so observers
+                // (the badge colour, channel rows) re-read.
                 model.objectWillChange.send()
             }
         ))
         .toggleStyle(.switch)
         .tint(Theme.accentRed)
         .labelsHidden()
+        .fixedSize()
     }
 
-    private var labelField: some View {
-        VStack(alignment: .leading, spacing: Spacing.xs) {
-            SectionLabel(text: "Source name")
-            TextField("NDI source name", text: $draftLabel)
-                .textFieldStyle(.plain)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundColor(Theme.textPrimary)
-                .padding(.horizontal, Spacing.sm)
-                .frame(height: 30)
-                .background(
-                    RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
-                        .fill(Theme.bgApp)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
-                        .stroke(Theme.stroke, lineWidth: 1)
-                )
-                .onSubmit { commitLabel() }
+    /// A second line ONLY where it carries real information: SRT's destination (the
+    /// one editable transport field) and RTSP's live serving URL (read-only + copy).
+    /// NDI and OBS need no extra field — the dead "NDI group" / OBS-instruction
+    /// fields were removed.
+    @ViewBuilder
+    private var secondRow: some View {
+        switch output.kind {
+        case .srt:  srtDestinationField
+        case .rtsp: rtspURLLine
+        default:    EmptyView()
         }
+    }
+
+    private var srtDestinationField: some View {
+        TextField(output.kind.configFieldExample, text: $draftConfig)
+            .textFieldStyle(.plain)
+            .font(.system(size: 11).monospaced())
+            .foregroundColor(Theme.textSecondary)
+            .padding(.horizontal, Spacing.sm)
+            .frame(height: 28)
+            .background(
+                RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+                    .fill(Theme.bgApp)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+                    .stroke(Theme.stroke, lineWidth: 1)
+            )
+            .onSubmit { output.config = draftConfig.trimmingCharacters(in: .whitespaces); refresh += 1 }
+    }
+
+    /// The actual address a client connects to: rtsp://<this-mac>:<port>/program.
+    /// Read-only (the path/port are fixed by the server) with a copy button.
+    private var rtspURLLine: some View {
+        let port = (output as? RTSPOutput)?.port ?? 8554
+        let url = "rtsp://\(ProcessInfo.processInfo.hostName):\(port)/program"
+        return HStack(spacing: Spacing.xs) {
+            Image(systemName: "link").font(.system(size: 10)).foregroundColor(Theme.textFaint)
+            Text(url)
+                .font(.system(size: 11).monospaced())
+                .foregroundColor(Theme.textSecondary)
+                .lineLimit(1).truncationMode(.middle)
+            Spacer(minLength: 0)
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(url, forType: .string)
+            } label: {
+                Image(systemName: "doc.on.doc").font(.system(size: 10)).foregroundColor(Theme.textFaint)
+            }
+            .buttonStyle(.plain)
+            .help("Copy RTSP URL")
+        }
+        .padding(.horizontal, Spacing.sm)
+        .frame(height: 28)
+        .background(
+            RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+                .fill(Theme.bgApp)
+        )
+    }
+
+    /// Live outputs confirm before removal; idle ones delete immediately.
+    private func requestDelete() {
+        if output.isLive { confirmingDelete = true }
+        else { model.removeProgramOutput(output) }
     }
 
     private func commitLabel() {
@@ -330,45 +421,6 @@ private struct OutputCard: View {
         output.label = trimmed
         refresh += 1
     }
-
-    private var configField: some View {
-        VStack(alignment: .leading, spacing: Spacing.xs) {
-            SectionLabel(text: output.kind.configFieldLabel)
-            TextField(output.kind.configFieldExample, text: $config)
-                .textFieldStyle(.plain)
-                .font(.system(size: 12).monospaced())
-                .foregroundColor(Theme.textSecondary)
-                .padding(.horizontal, Spacing.sm)
-                .frame(height: 28)
-                .background(
-                    RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
-                        .fill(Theme.bgApp)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
-                        .stroke(Theme.stroke, lineWidth: 1)
-                )
-                .onSubmit { output.config = config.trimmingCharacters(in: .whitespaces); refresh += 1 }
-        }
-    }
-
-    private var footerRow: some View {
-        HStack {
-            Spacer()
-            Button(role: .destructive) {
-                model.removeProgramOutput(output)
-            } label: {
-                HStack(spacing: Spacing.xs) {
-                    Image(systemName: "trash")
-                        .font(.system(size: 10))
-                    Text("Remove")
-                        .font(.system(size: 11, weight: .medium))
-                }
-                .foregroundColor(Theme.accentRed)
-            }
-            .buttonStyle(.plain)
-        }
-    }
 }
 
 // MARK: - Per-kind config field copy
@@ -376,16 +428,6 @@ private struct OutputCard: View {
 /// The config field's caption and example value, per transport. ONE source of
 /// truth shared by the real `OutputCard` and the chooser tiles.
 private extension OutputKind {
-    var configFieldLabel: String {
-        switch self {
-        case .ndi:  return "NDI group (optional)"
-        case .obs:  return "OBS source (auto-discovered)"
-        case .srt:  return "SRT destination"
-        case .rtsp: return "RTSP mount point"
-        case .vcam: return "Virtual Camera name"
-        }
-    }
-
     var configFieldExample: String {
         switch self {
         case .ndi:  return "public"

@@ -168,6 +168,7 @@ private struct ChannelRow: View {
     @State private var editing = false
     @State private var draftName = ""
     @State private var hovering = false
+    @State private var confirmingDelete = false
     @FocusState private var nameFocused: Bool
 
     var body: some View {
@@ -196,8 +197,23 @@ private struct ChannelRow: View {
         .contextMenu {
             Button("Rename") { beginRename() }
             Divider()
-            Button("Remove Channel", role: .destructive) { onRemove() }
+            Button("Remove Channel", role: .destructive) { requestRemove() }
         }
+        // An active channel (ON AIR or receiving video) confirms before removal; an
+        // idle (Standby, unconnected) channel deletes straight away.
+        .confirmationDialog("Remove “\(channel.name)”?",
+                            isPresented: $confirmingDelete, titleVisibility: .visible) {
+            Button("Remove channel", role: .destructive) { onRemove() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(isProgram ? "This channel is ON AIR — removing it cuts the program feed."
+                           : "This channel is receiving video — removing it drops the connection.")
+        }
+    }
+
+    private func requestRemove() {
+        if channel.isConnected || isProgram { confirmingDelete = true }
+        else { onRemove() }
     }
 
     // MARK: Name (with inline rename)
