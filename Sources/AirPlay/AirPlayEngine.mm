@@ -486,17 +486,16 @@ private:
     raop_start_httpd(raop_, &port);
     raop_set_port(raop_, port);
 
-    // 5) bind dnssd to raop. raop_set_dnssd() populates dnssd_->pk.
+    // 5) bind dnssd to raop + register the RAOP/AirPlay services (native dns_sd, like
+    //    the OBS plugin). With a TEAM-SIGNED app that has Local Network access this
+    //    returns 0 and the iPhone discovers "Camera N" in Screen Mirroring. (An
+    //    ad-hoc/unsigned build gets -65555 NoAuth — sign with a Team + grant Local
+    //    Network; do NOT also advertise via NSNetService or the duplicate name
+    //    collides in mDNSResponder.)
     raop_set_dnssd(raop_, dnssd_);
-    // dnssd_register_* BUILDS the raop/airplay TXT records (TXTRecordCreate/SetValue)
-    // as a side effect BEFORE its DNSServiceRegister call — and that call returns
-    // -65555 (NoAuth) on macOS 26, which we IGNORE. We don't rely on dns_sd for
-    // discovery; Swift advertises _raop._tcp/_airplay._tcp via NSNetService using the
-    // TXT built here (read via the getters below). Without these calls the TXT records
-    // are empty and the getters return nil → nothing gets advertised.
     int rcRaop = dnssd_register_raop(dnssd_, port);
     int rcAir = dnssd_register_airplay(dnssd_, port);
-    os_log(ap_log(), "dnssd TXT built (dns_sd register rc raop=%d air=%d — ignored; NSNetService advertises)", rcRaop, rcAir);
+    os_log(ap_log(), "dnssd registered raop=%d airplay=%d (0 = OK)", rcRaop, rcAir);
 
     os_log(ap_log(), "AirPlay server up on port %d", (int)port);
     return 0;
@@ -511,8 +510,8 @@ private:
     }
     if (dnssd_)
     {
-      // No dnssd_unregister_* — we never registered via dns_sd (NSNetService does
-      // the advertising; the Swift side stops it). Just free the object.
+      dnssd_unregister_raop(dnssd_);
+      dnssd_unregister_airplay(dnssd_);
       dnssd_destroy(dnssd_);
       dnssd_ = nullptr;
     }
