@@ -486,13 +486,17 @@ private:
     raop_start_httpd(raop_, &port);
     raop_set_port(raop_, port);
 
-    // 5) bind dnssd to raop. raop_set_dnssd() populates dnssd_->pk + the pre-built
-    //    TXT records that the AirPlay /info handshake reads at runtime.
+    // 5) bind dnssd to raop. raop_set_dnssd() populates dnssd_->pk.
     raop_set_dnssd(raop_, dnssd_);
-    // NOTE: advertising is NOT done via dnssd_register_* — the raw DNSServiceRegister
-    // C API returns -65555 (NoAuth) on macOS 26. Swift advertises _raop._tcp /
-    // _airplay._tcp via NSNetService (AirPlayBonjour), which inherits the app's
-    // Local Network grant (same path as _airlive._tcp). The getters below feed it.
+    // dnssd_register_* BUILDS the raop/airplay TXT records (TXTRecordCreate/SetValue)
+    // as a side effect BEFORE its DNSServiceRegister call — and that call returns
+    // -65555 (NoAuth) on macOS 26, which we IGNORE. We don't rely on dns_sd for
+    // discovery; Swift advertises _raop._tcp/_airplay._tcp via NSNetService using the
+    // TXT built here (read via the getters below). Without these calls the TXT records
+    // are empty and the getters return nil → nothing gets advertised.
+    int rcRaop = dnssd_register_raop(dnssd_, port);
+    int rcAir = dnssd_register_airplay(dnssd_, port);
+    os_log(ap_log(), "dnssd TXT built (dns_sd register rc raop=%d air=%d — ignored; NSNetService advertises)", rcRaop, rcAir);
 
     os_log(ap_log(), "AirPlay server up on port %d", (int)port);
     return 0;
