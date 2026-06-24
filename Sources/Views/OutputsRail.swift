@@ -99,11 +99,19 @@ struct OutputsRail: View {
             // card and the rest shift to make room, then it drops in. Same idiom as
             // the channel list. Plain + clear rows keep the custom rail look.
             List {
-                ForEach(model.programOutputs, id: \.id) { output in
+                ForEach(Array(model.programOutputs.enumerated()), id: \.element.id) { pair in
+                    let idx = pair.offset
+                    let output = pair.element
                     OutputCard(model: model,
                                output: output,
+                               isFirst: idx == 0,
+                               isLast: idx == model.programOutputs.count - 1,
                                selected: output.id == selectedOutputID,
-                               onSelect: { selectedOutputID = output.id })
+                               // Tap toggles: re-tap (or tap another) clears the blue —
+                               // the selection never sticks.
+                               onSelect: { selectedOutputID = (selectedOutputID == output.id) ? nil : output.id },
+                               onMoveUp:   { model.moveProgramOutput(from: IndexSet(integer: idx), to: idx - 1) },
+                               onMoveDown: { model.moveProgramOutput(from: IndexSet(integer: idx), to: idx + 2) })
                         .listRowInsets(EdgeInsets(top: Spacing.xs, leading: Spacing.lg,
                                                   bottom: Spacing.xs, trailing: Spacing.lg))
                         .listRowBackground(Color.clear)
@@ -238,8 +246,12 @@ private struct SoonPill: View {
 private struct OutputCard: View {
     @ObservedObject var model: BridgeModel
     let output: VideoOutput
+    let isFirst: Bool
+    let isLast: Bool
     let selected: Bool
     let onSelect: () -> Void
+    let onMoveUp: () -> Void
+    let onMoveDown: () -> Void
 
     @State private var draftLabel: String = ""
     @State private var draftConfig: String = ""
@@ -282,10 +294,32 @@ private struct OutputCard: View {
     private var controlRow: some View {
         HStack(spacing: Spacing.sm) {
             kindBadge
-            Spacer(minLength: Spacing.sm)
+            reorderArrows           // ▲/▼ right of the protocol tag
+            Spacer(minLength: Spacing.xs)
             trashButton
             onOffToggle
         }
+    }
+
+    /// ▲/▼ reorder-by-one (also drag-reorder via the List).
+    private var reorderArrows: some View {
+        HStack(spacing: 1) {
+            arrowButton("chevron.up",   enabled: !isFirst, action: onMoveUp)
+            arrowButton("chevron.down", enabled: !isLast,  action: onMoveDown)
+        }
+    }
+
+    private func arrowButton(_ system: String, enabled: Bool,
+                             action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: system)
+                .font(.system(size: 9, weight: .bold))
+                .foregroundColor(enabled ? Theme.textSecondary : Theme.textFaint.opacity(0.4))
+                .frame(width: 16, height: 16)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
     }
 
     /// The kind tag IS the live indicator: red fill + white text when publishing,
@@ -295,9 +329,11 @@ private struct OutputCard: View {
         return HStack(spacing: Spacing.xxs) {
             Image(systemName: output.kind.symbolName)
                 .font(.system(size: 10, weight: .semibold))
-            Text(output.kind.badgeLabel)              // short code, never the long name
+                .frame(width: 13)                      // uniform icon column
+            Text(output.kind.badgeLabel)               // short code, never the long name
                 .font(.system(size: 10, weight: .bold))
                 .tracking(0.8)
+                .frame(minWidth: 30, alignment: .leading)   // pad every tag to the widest (RTSP)
         }
         .foregroundColor(live ? .white : Theme.textSecondary)
         .padding(.horizontal, Spacing.sm)

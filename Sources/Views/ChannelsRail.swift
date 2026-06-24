@@ -177,7 +177,6 @@ private struct ChannelRow: View {
     let onMoveDown: () -> Void
 
     @State private var draftName = ""
-    @State private var hovering = false
     @State private var confirmingDelete = false
 
     var body: some View {
@@ -194,7 +193,6 @@ private struct ChannelRow: View {
         )
         .contentShape(Rectangle())
         .onTapGesture { onSelect() }
-        .onHover { hovering = $0 }
         .onAppear { draftName = channel.name }
         .contextMenu {
             Button("Remove Channel", role: .destructive) { requestRemove() }
@@ -215,8 +213,8 @@ private struct ChannelRow: View {
     private var topRow: some View {
         HStack(spacing: Spacing.sm) {
             ordinalBadge
+            reorderArrows         // ▲/▼ right of the number, always visible
             Spacer(minLength: Spacing.xs)
-            if hovering { reorderArrows }
             statusLine
             ConnectionDot(connected: channel.isConnected)
         }
@@ -227,7 +225,7 @@ private struct ChannelRow: View {
         Text("\(index)")
             .font(.system(size: 11, weight: .bold).monospacedDigit())
             .foregroundColor(Theme.textSecondary)
-            .frame(minWidth: 16)
+            .frame(minWidth: 18, alignment: .center)   // sized for "00" — every ordinal equal width
             .padding(.horizontal, Spacing.xs)
             .padding(.vertical, 2)
             .background(
