@@ -53,16 +53,26 @@ struct ChannelsRail: View {
     /// `addChannel` builds the model object, brings the receiver slot + Bonjour
     /// advert online, and applies the global auth so the iPhone can connect.
     private var addButton: some View {
-        Button {
-            model.addChannel()
+        Menu {
+            ForEach(ChannelKind.allCases) { kind in
+                Button {
+                    if kind.isImplemented { model.addChannel() }   // .airlive today
+                } label: {
+                    Label(kind.isImplemented ? kind.displayName : "\(kind.displayName) — soon",
+                          systemImage: kind.symbolName)
+                }
+                .disabled(!kind.isImplemented)
+            }
         } label: {
             Image(systemName: "plus")
                 .font(.system(size: 11, weight: .bold))
                 .foregroundColor(Theme.textPrimary)
                 .frame(width: 22, height: 22)
         }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
         .bridgeButton(corner: Radius.control)
-        .help("Create channel")
+        .help("Add source — Airlive Camera or Screen Mirroring")
     }
 
     // MARK: - List
