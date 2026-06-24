@@ -284,8 +284,11 @@ final class BridgeModel: ObservableObject {
     /// Create a new channel with an auto-numbered default name, append it, and
     /// select it.  Returns the new channel.
     @discardableResult
-    func addChannel() -> BridgeChannel {
-        let channel = BridgeChannel(name: defaultChannelName())
+    func addChannel(kind: ChannelKind = .airlive,
+                    captureDeviceID: String? = nil,
+                    name: String? = nil) -> BridgeChannel {
+        let channel = BridgeChannel(name: name ?? defaultChannelName(),
+                                    kind: kind, captureDeviceID: captureDeviceID)
         channels.append(channel)
         selectedID = channel.id
         if previewID == nil { previewID = channel.id }   // stage the first camera

@@ -21,6 +21,9 @@ targets:
         # NDI service type declared, macOS can block the NDI source from being
         # discovered by receivers like OBS/DistroAV.
         NSLocalNetworkUsageDescription: "Airlive Bridge discovers Airlive Camera streams and publishes NDI on your local network."
+        # Capturing a UVC/HDMI capture card (the "HDMI / USB Capture" source) goes
+        # through AVFoundation, which needs the camera-access usage string + grant.
+        NSCameraUsageDescription: "Airlive Bridge captures video from connected HDMI / USB capture devices."
         NSBonjourServices:
           - _airlive._tcp
           - _ndi._tcp

@@ -16,6 +16,7 @@ import Foundation
 
 enum ChannelKind: String, CaseIterable, Identifiable {
     case airlive
+    case capture   // HDMI/USB capture card (UVC) — the camera's clean HDMI out, wired
     case airplay
 
     var id: String { rawValue }
@@ -23,6 +24,7 @@ enum ChannelKind: String, CaseIterable, Identifiable {
     var displayName: String {
         switch self {
         case .airlive: return "Airlive Camera"
+        case .capture: return "HDMI / USB Capture"
         case .airplay: return "Screen Mirroring"
         }
     }
@@ -31,6 +33,7 @@ enum ChannelKind: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .airlive: return "iPhone running the Airlive app"
+        case .capture: return "Capture card (clean HDMI in)"
         case .airplay: return "Any iPhone via AirPlay"
         }
     }
@@ -38,11 +41,13 @@ enum ChannelKind: String, CaseIterable, Identifiable {
     var symbolName: String {
         switch self {
         case .airlive: return "camera"
+        case .capture: return "cable.connector"
         case .airplay: return "rectangle.on.rectangle"
         }
     }
 
     /// AirPlay's receiver backend (UxPlay) isn't wired yet — gate it off so the menu
-    /// shows the option but can't create a non-functional channel.
-    var isImplemented: Bool { self == .airlive }
+    /// shows the option but can't create a non-functional channel.  HDMI/USB capture
+    /// is plain AVFoundation — implemented.
+    var isImplemented: Bool { self != .airplay }
 }

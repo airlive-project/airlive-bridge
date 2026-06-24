@@ -27,6 +27,8 @@
 		<string>_airlive._tcp</string>
 		<string>_ndi._tcp</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Airlive Bridge captures video from connected HDMI / USB capture devices.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Airlive Bridge discovers Airlive Camera streams and publishes NDI on your local network.</string>
 </dict>

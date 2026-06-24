@@ -25,6 +25,13 @@ final class BridgeChannel: ObservableObject, Identifiable {
     /// Stable routing id — survives rename and list reorder.
     let id: UUID
 
+    /// What feeds this channel: the Airlive app (ARLV), a UVC capture card (HDMI),
+    /// or AirPlay.  Decides which receiver `start()` builds.
+    let kind: ChannelKind
+
+    /// For `.capture` channels: the `AVCaptureDevice.uniqueID` of the capture card.
+    let captureDeviceID: String?
+
     /// Renameable, iPhone-facing source label.  Published in the receiver's
     /// Bonjour TXT (`src`) so a channels-aware iPhone shows this name.  Setting
     /// it directly only updates the model; use `rename(_:)` to also push the new
@@ -114,9 +121,12 @@ final class BridgeChannel: ObservableObject, Identifiable {
     /// `start()` and the published bindings flow from it.
     var receiver: ChannelReceiver?
 
-    init(id: UUID = UUID(), name: String, delay: LatencyPreset = .normal) {
+    init(id: UUID = UUID(), name: String, kind: ChannelKind = .airlive,
+         captureDeviceID: String? = nil, delay: LatencyPreset = .normal) {
         self.id = id
         self.name = name
+        self.kind = kind
+        self.captureDeviceID = captureDeviceID
         self.delay = delay
     }
 
@@ -131,7 +141,12 @@ final class BridgeChannel: ObservableObject, Identifiable {
     /// so the model layer can construct channels cheaply in tests.
     func start(order: Int = 0) {
         if receiver == nil {
-            receiver = BridgeChannelReceiver(channel: self, order: order)
+            switch kind {
+            case .capture:
+                receiver = CaptureDeviceReceiver(channel: self, deviceID: captureDeviceID)
+            case .airlive, .airplay:   // .airplay UI-gated until its backend lands
+                receiver = BridgeChannelReceiver(channel: self, order: order)
+            }
         }
         receiver?.start()
         // The global auth config is pushed to this receiver by `BridgeModel`
