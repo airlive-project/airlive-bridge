@@ -43,7 +43,9 @@ struct OutputsRail: View {
     // channel.
     private var header: some View {
         HStack(spacing: Spacing.sm) {
-            Text("Outputs")
+            // Title reflects the current mode so it's clear what the program (and
+            // thus these outputs) is fed from: the solo channel vs the multiview CUT.
+            Text(model.mode == .multiview ? "Multiview outputs" : "Solo outputs")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
             // "+" opens a menu of output TYPES — NDI adds a real output;
@@ -96,7 +98,6 @@ struct OutputsRail: View {
         } else {
             ScrollView {
                 VStack(spacing: Spacing.md) {
-                    programSourceLine
                     ForEach(model.programOutputs, id: \.id) { output in
                         OutputCard(model: model, output: output)
                     }
@@ -106,19 +107,6 @@ struct OutputsRail: View {
                 .padding(.bottom, Spacing.lg)
             }
         }
-    }
-
-    /// What's currently feeding the program (the on-air camera, or "—").
-    private var programSourceLine: some View {
-        let name = model.channels.first { $0.id == model.effectiveProgramID }?.name
-        return HStack(spacing: Spacing.xs) {
-            Image(systemName: "dot.radiowaves.left.and.right").font(.system(size: 10))
-            Text("Program: \(name ?? "—")").font(.system(size: 11, weight: .medium))
-                .lineLimit(1).truncationMode(.tail)
-            Spacer()
-        }
-        .foregroundColor(Theme.textFaint)
-        .padding(.horizontal, Spacing.xs)
     }
 
     /// First-step quick-pick — what protocol the PROGRAM publishes to.
