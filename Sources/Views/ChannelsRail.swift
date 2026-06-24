@@ -101,35 +101,33 @@ struct ChannelsRail: View {
         if model.channels.isEmpty {
             emptyState
         } else {
-            // A List so rows DRAG-REORDER via `.onMove` (the ▲/▼ arrows do the same
-            // by index).  The order is the channel order — multiview + shortcuts read it.
-            List {
-                ForEach(Array(model.channels.enumerated()), id: \.element.id) { pair in
-                    let idx = pair.offset
-                    let channel = pair.element
-                    ChannelRow(
-                        channel: channel,
-                        index: idx + 1,                              // 1-based ordinal = list position
-                        isProgram: channel.id == model.effectiveProgramID,
-                        isFirst: idx == 0,
-                        isLast: idx == model.channels.count - 1,
-                        onSelect: { model.select(channel.id) },
-                        onRemove: {
-                            TallyStore.shared.clear(channel.id)
-                            model.removeChannel(channel.id)
-                        },
-                        onMoveUp:   { model.moveChannel(from: IndexSet(integer: idx), to: idx - 1) },
-                        onMoveDown: { model.moveChannel(from: IndexSet(integer: idx), to: idx + 2) }
-                    )
-                    .listRowInsets(EdgeInsets(top: Spacing.xs, leading: Spacing.md,
-                                              bottom: Spacing.xs, trailing: Spacing.md))
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
+            // ScrollView + VStack (not a List) for UNIFORM spacing — gap above the first
+            // card == gap between cards == Spacing.sm, side margins == Spacing.lg, same
+            // as the header.  Reorder via the ▲/▼ arrows (order drives multiview + shortcuts).
+            ScrollView {
+                VStack(spacing: Spacing.sm) {
+                    ForEach(Array(model.channels.enumerated()), id: \.element.id) { pair in
+                        let idx = pair.offset
+                        let channel = pair.element
+                        ChannelRow(
+                            channel: channel,
+                            index: idx + 1,                          // 1-based ordinal = list position
+                            isProgram: channel.id == model.effectiveProgramID,
+                            isFirst: idx == 0,
+                            isLast: idx == model.channels.count - 1,
+                            onSelect: { model.select(channel.id) },
+                            onRemove: {
+                                TallyStore.shared.clear(channel.id)
+                                model.removeChannel(channel.id)
+                            },
+                            onMoveUp:   { model.moveChannel(from: IndexSet(integer: idx), to: idx - 1) },
+                            onMoveDown: { model.moveChannel(from: IndexSet(integer: idx), to: idx + 2) }
+                        )
+                    }
                 }
-                .onMove { from, to in model.moveChannel(from: from, to: to) }
+                .padding(.horizontal, Spacing.lg)
+                .padding(.bottom, Spacing.lg)
             }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
         }
     }
 

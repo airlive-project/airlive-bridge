@@ -92,28 +92,25 @@ struct OutputsRail: View {
         if model.programOutputs.isEmpty {
             chooser
         } else {
-            // A List (not a ScrollView) so cards DRAG-REORDER via `.onMove` — grab a
-            // card and the rest shift to make room, then it drops in. Same idiom as
-            // the channel list. Plain + clear rows keep the custom rail look.
-            List {
-                ForEach(Array(model.programOutputs.enumerated()), id: \.element.id) { pair in
-                    let idx = pair.offset
-                    let output = pair.element
-                    OutputCard(model: model,
-                               output: output,
-                               isFirst: idx == 0,
-                               isLast: idx == model.programOutputs.count - 1,
-                               onMoveUp:   { model.moveProgramOutput(from: IndexSet(integer: idx), to: idx - 1) },
-                               onMoveDown: { model.moveProgramOutput(from: IndexSet(integer: idx), to: idx + 2) })
-                        .listRowInsets(EdgeInsets(top: Spacing.xs, leading: Spacing.lg,
-                                                  bottom: Spacing.xs, trailing: Spacing.lg))
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
+            // ScrollView + VStack (not a List) for UNIFORM spacing: the gap above the
+            // first card == the gap between cards == Spacing.sm, and the side margins ==
+            // Spacing.lg, matching the header.  Reorder is via the ▲/▼ arrows.
+            ScrollView {
+                VStack(spacing: Spacing.sm) {
+                    ForEach(Array(model.programOutputs.enumerated()), id: \.element.id) { pair in
+                        let idx = pair.offset
+                        let output = pair.element
+                        OutputCard(model: model,
+                                   output: output,
+                                   isFirst: idx == 0,
+                                   isLast: idx == model.programOutputs.count - 1,
+                                   onMoveUp:   { model.moveProgramOutput(from: IndexSet(integer: idx), to: idx - 1) },
+                                   onMoveDown: { model.moveProgramOutput(from: IndexSet(integer: idx), to: idx + 2) })
+                    }
                 }
-                .onMove { from, to in model.moveProgramOutput(from: from, to: to) }
+                .padding(.horizontal, Spacing.lg)
+                .padding(.bottom, Spacing.lg)
             }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
         }
     }
 
