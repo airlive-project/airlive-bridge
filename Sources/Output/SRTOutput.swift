@@ -79,7 +79,17 @@ final class SRTOutput: VideoOutput {
     let kind: OutputKind = .srt
     var config: String = ""        // destination: srt://host:port
 
-    private(set) var isLive = false
+    /// Live flag — written from `queue` (connect / stop / dropConnection) AND from
+    /// main (start's optimistic set), read from main (BridgeModel.feedProgram) and
+    /// from `queue` (relaySample).  Lock-backed `_isLive` so a main read can never
+    /// observe a torn write (the NDIOutput pattern); every existing `isLive = …`
+    /// assignment goes through the locked setter unchanged.
+    var isLive: Bool {
+        get { liveLock.lock(); defer { liveLock.unlock() }; return _isLive }
+        set { liveLock.lock(); _isLive = newValue; liveLock.unlock() }
+    }
+    private var _isLive = false
+    private let liveLock = NSLock()
 
     private let queue = DispatchQueue(label: "studio.airlive.bridge.srt", qos: .userInitiated)
     private var sock: Int32 = SRT_INVALID_SOCK

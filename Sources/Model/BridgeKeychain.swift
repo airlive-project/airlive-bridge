@@ -25,7 +25,13 @@ enum BridgeKeychain {
             // This Mac only; never synced to iCloud Keychain.
             kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
         ]
-        SecItemAdd(item as CFDictionary, nil)
+        let status = SecItemAdd(item as CFDictionary, nil)
+        if status != errSecSuccess {
+            // Loud, not silent: a failed write means the UI thinks a password is set
+            // but the next launch finds none — surface it so it isn't chased as a
+            // phantom "auth keeps resetting" bug.
+            print("[BridgeKeychain] ⚠️ SecItemAdd failed for account '\(account)': OSStatus \(status)")
+        }
     }
 
     /// Read the stored password for `account`, or nil if none is set.

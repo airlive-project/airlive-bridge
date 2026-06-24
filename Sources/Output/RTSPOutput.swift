@@ -23,7 +23,16 @@ final class RTSPOutput: VideoOutput {
     var label: String
     let kind: OutputKind = .rtsp
 
-    private(set) var isLive = false
+    /// Live flag — written from main (start/stop) AND from `queue` (startListener's
+    /// failure path), read from main (BridgeModel.feedProgram).  Lock-backed so a
+    /// main read can't observe a torn write (NDIOutput pattern); existing
+    /// `isLive = …` assignments go through the locked setter unchanged.
+    var isLive: Bool {
+        get { liveLock.lock(); defer { liveLock.unlock() }; return _isLive }
+        set { liveLock.lock(); _isLive = newValue; liveLock.unlock() }
+    }
+    private var _isLive = false
+    private let liveLock = NSLock()
     let port: UInt16
 
     private let queue = DispatchQueue(label: "studio.airlive.bridge.rtsp", qos: .userInitiated)
