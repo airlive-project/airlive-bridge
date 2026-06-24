@@ -28,7 +28,7 @@ struct MultiviewGrid: View {
                 // PVW/PGM and the thumbnail wall sit TIGHT together (a small gap, not
                 // the old full-width CUT bar between them) — one clean seam, no doubled
                 // borders.  CUT moved up into the top bar.
-                VStack(spacing: Spacing.xs) {
+                VStack(spacing: 0) {
                     bigRow
                     thumbnails
                 }
@@ -194,7 +194,7 @@ private struct BigPane: View {
         .background(Color.black)
         .clipped()
         // strokeBorder draws INSIDE the cell so touching tiles never double up.
-        .overlay(Rectangle().strokeBorder(accent, lineWidth: 2))
+        .overlay(Rectangle().strokeBorder(accent, lineWidth: 1))
         // White label (the coloured border already signals preview/program).
         .overlay(alignment: .bottom) { bottomChip(title) }
     }
@@ -289,7 +289,7 @@ private struct ThumbCell: View {
         if isPreview { return Theme.previewGreen }
         return Theme.stroke
     }
-    private var borderWidth: CGFloat { (isProgram || isPreview) ? 2 : 1 }
+    private var borderWidth: CGFloat { 1 }   // always 1px — 2px read too heavy at the seams
 }
 
 // MARK: - Fullscreen multiview wall (its own window)
