@@ -24,32 +24,91 @@ struct MultiviewGrid: View {
     var body: some View {
         ScrollView {
             VStack(spacing: Spacing.md) {
-                header
-                bigRow
-                cutBar
-                thumbnails
+                topBar
+                // PVW/PGM and the thumbnail wall sit TIGHT together (a small gap, not
+                // the old full-width CUT bar between them) — one clean seam, no doubled
+                // borders.  CUT moved up into the top bar.
+                VStack(spacing: Spacing.xs) {
+                    bigRow
+                    thumbnails
+                }
                 cameraControl
             }
             .padding(Spacing.lg)
         }
     }
 
-    /// Open a clean fullscreen multiview wall (just the cameras + PVW/PGM) in its
-    /// own window — for a second monitor.
-    private var header: some View {
-        HStack {
-            Spacer()
-            Button { openWindow(id: MultiviewWall.windowID) } label: {
-                HStack(spacing: Spacing.xs) {
-                    Image(systemName: "arrow.up.left.and.arrow.down.right")
-                    Text("Fullscreen Multicam").font(.system(size: 11, weight: .medium))
-                }
-                .frame(height: 26)
-                .padding(.horizontal, Spacing.sm)
-            }
-            .bridgeButton()
-            .help("Open the multiview on its own window (drag to a second screen, then full-screen it)")
+    // MARK: Top bar — lenses (over Preview, left) · CUT (center) · Fullscreen (right)
+
+    private var topBar: some View {
+        HStack(spacing: Spacing.sm) {
+            lensQuickRow                       // above PREVIEW
+            Spacer(minLength: Spacing.md)
+            cutButton                          // center
+            Spacer(minLength: Spacing.md)
+            fullscreenButton                   // right
         }
+    }
+
+    /// Quick lens picker for the STAGED (Preview) camera — pick the look before you
+    /// cut it to air.  Labels are the camera's reported ladder (0.5x / 1x / 2x …),
+    /// falling back to the canonical iPhone ladder until it reports.
+    @ViewBuilder
+    private var lensQuickRow: some View {
+        if let preview = model.previewChannel() {
+            HStack(spacing: Spacing.xs) {
+                ForEach(lensLadder(preview), id: \.self) { label in
+                    Button { preview.send(.setLens(label)) } label: {
+                        Text(label)
+                            .font(.system(size: 11, weight: .semibold))
+                            .frame(height: 26)
+                            .padding(.horizontal, Spacing.sm)
+                    }
+                    .bridgeButton(selected: preview.remote?.lens == label)
+                    .disabled(!preview.isConnected)
+                }
+            }
+            .opacity(preview.isConnected ? 1 : 0.4)
+        } else {
+            Text("Stage a camera to pick its lens")
+                .font(.system(size: 11)).foregroundColor(Theme.textFaint)
+        }
+    }
+
+    private func lensLadder(_ channel: BridgeChannel) -> [String] {
+        let reported = channel.remote?.availableLenses ?? []
+        return reported.isEmpty ? ["0.5x", "1x", "2x", "3x", "5x"] : reported
+    }
+
+    /// CUT preview → program (also Space, handled centrally by ShortcutCenter so it
+    /// works globally — no per-button shortcut, to avoid a double cut).  Moved to the
+    /// top-center; the old full-width bar under the panes is gone.
+    private var cutButton: some View {
+        Button { model.take() } label: {
+            Text("CUT  (Space)")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundColor(.white)
+                .frame(height: 30)
+                .padding(.horizontal, Spacing.xl)
+        }
+        .bridgeButton()
+        .disabled(model.previewChannel() == nil)
+        .opacity(model.previewChannel() == nil ? 0.5 : 1)
+        .help("Cut the Preview camera to Program (Space)")
+    }
+
+    /// Open the clean fullscreen multiview wall on its own window (second monitor).
+    private var fullscreenButton: some View {
+        Button { openWindow(id: MultiviewWall.windowID) } label: {
+            HStack(spacing: Spacing.xs) {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                Text("Fullscreen Multicam").font(.system(size: 11, weight: .medium))
+            }
+            .frame(height: 26)
+            .padding(.horizontal, Spacing.sm)
+        }
+        .bridgeButton()
+        .help("Open the multiview on its own window (drag to a second screen, then full-screen it)")
     }
 
     // MARK: Preview + Program (the two big windows)
@@ -60,25 +119,6 @@ struct MultiviewGrid: View {
             BigPane(title: "PREVIEW", accent: Theme.previewGreen, channel: model.previewChannel())
             BigPane(title: "PROGRAM", accent: Theme.accentRed, channel: model.programChannel())
         }
-    }
-
-    // Full-width CUT (cut Preview → Program).  A normal semi-transparent box like
-    // every other button — not a big solid-red slab; the red is just the label
-    // tint hinting "to air".  Space triggers it (shortcut shown, reassignable later).
-    private var cutBar: some View {
-        Button { model.take() } label: {
-            Text("CUT  (Space)")
-                .font(.system(size: 13, weight: .bold))
-                .foregroundColor(.white)
-                .frame(maxWidth: .infinity)
-                .frame(height: 38)
-        }
-        .bridgeButton()
-        // Space is handled centrally by ShortcutCenter (so it also works in the
-        // background when "global" is on) — no per-button shortcut to avoid a
-        // double cut.
-        .disabled(model.previewChannel() == nil)
-        .opacity(model.previewChannel() == nil ? 0.5 : 1)
     }
 
     // Camera control for the STAGED (Preview) camera, kept under the multiview —
