@@ -24,9 +24,6 @@ import AppKit   // NSPasteboard — copy the RTSP URL
 
 struct OutputsRail: View {
     @ObservedObject var model: BridgeModel
-    /// Which card is highlighted (blue stroke).  Pure UI selection — outputs aren't
-    /// "selected" for any behaviour, it's just a grab/focus affordance.
-    @State private var selectedOutputID: UUID?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -106,10 +103,6 @@ struct OutputsRail: View {
                                output: output,
                                isFirst: idx == 0,
                                isLast: idx == model.programOutputs.count - 1,
-                               selected: output.id == selectedOutputID,
-                               // Tap toggles: re-tap (or tap another) clears the blue —
-                               // the selection never sticks.
-                               onSelect: { selectedOutputID = (selectedOutputID == output.id) ? nil : output.id },
                                onMoveUp:   { model.moveProgramOutput(from: IndexSet(integer: idx), to: idx - 1) },
                                onMoveDown: { model.moveProgramOutput(from: IndexSet(integer: idx), to: idx + 2) })
                         .listRowInsets(EdgeInsets(top: Spacing.xs, leading: Spacing.lg,
@@ -248,8 +241,6 @@ private struct OutputCard: View {
     let output: VideoOutput
     let isFirst: Bool
     let isLast: Bool
-    let selected: Bool
-    let onSelect: () -> Void
     let onMoveUp: () -> Void
     let onMoveDown: () -> Void
 
@@ -262,20 +253,11 @@ private struct OutputCard: View {
         _ = refresh // re-evaluate after a start/stop/rename bump
         return Card(padding: Spacing.sm) {
             VStack(alignment: .leading, spacing: Spacing.sm) {
-                controlRow    // badge (left) · delete + on/off (right)
-                nameField     // full-width source name
+                controlRow    // badge · arrows · on/off
+                nameRow       // name field + delete (right of it)
                 secondRow     // SRT destination / RTSP URL — only where it carries info
             }
         }
-        // Blue stroke when this card is grabbed / selected (over the card's own
-        // neutral border).  The whole card is the select target; the inner controls
-        // (name field, toggle, trash) still take their own taps first.
-        .overlay(
-            RoundedRectangle(cornerRadius: Radius.panel, style: .continuous)
-                .stroke(selected ? Theme.accentBlue : Color.clear, lineWidth: 1.5)
-        )
-        .contentShape(Rectangle())
-        .onTapGesture { onSelect() }
         .onAppear { draftLabel = output.label; draftConfig = output.config }
         // Removing a LIVE output cuts the stream — confirm first (an idle one deletes
         // straight away).
@@ -296,8 +278,15 @@ private struct OutputCard: View {
             kindBadge
             reorderArrows           // ▲/▼ right of the protocol tag
             Spacer(minLength: Spacing.xs)
-            trashButton
             onOffToggle
+        }
+    }
+
+    /// Name + delete on one row — the trash sits to the right of the name field.
+    private var nameRow: some View {
+        HStack(spacing: Spacing.sm) {
+            nameField
+            trashButton
         }
     }
 
@@ -371,7 +360,11 @@ private struct OutputCard: View {
             Image(systemName: "trash")
                 .font(.system(size: 12))
                 .foregroundColor(Theme.textFaint)
-                .frame(width: 22, height: 22)
+                .frame(width: 32, height: 28)
+                .background(
+                    RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+                        .fill(Theme.bgSelected.opacity(0.6))
+                )
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

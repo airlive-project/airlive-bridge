@@ -110,9 +110,7 @@ struct ChannelsRail: View {
                     ChannelRow(
                         channel: channel,
                         index: idx + 1,                              // 1-based ordinal = list position
-                        selected: channel.id == model.selectedID,
                         isProgram: channel.id == model.effectiveProgramID,
-                        programPublishing: model.programOutputs.contains { $0.isLive },
                         isFirst: idx == 0,
                         isLast: idx == model.channels.count - 1,
                         onSelect: { model.select(channel.id) },
@@ -166,9 +164,7 @@ struct ChannelsRail: View {
 private struct ChannelRow: View {
     @ObservedObject var channel: BridgeChannel
     let index: Int               // 1-based position = the displayed ordinal
-    let selected: Bool
-    let isProgram: Bool          // this camera is the program source (on air)
-    let programPublishing: Bool  // a program output is live
+    let isProgram: Bool          // kept only for the delete-confirm wording
     let isFirst: Bool
     let isLast: Bool
     let onSelect: () -> Void
@@ -182,15 +178,12 @@ private struct ChannelRow: View {
     var body: some View {
         Card(padding: Spacing.sm) {
             VStack(alignment: .leading, spacing: Spacing.sm) {
-                topRow        // ordinal (left) · reorder arrows (hover) · status · dot
-                nameField     // full-width editable name
+                topRow        // ordinal · arrows · signal status
+                nameRow       // name field + delete (right of it)
             }
         }
-        // Blue stroke when grabbed / selected, over the card's neutral border.
-        .overlay(
-            RoundedRectangle(cornerRadius: Radius.panel, style: .continuous)
-                .stroke(selected ? Theme.accentBlue : Color.clear, lineWidth: 1.5)
-        )
+        // No selection outline for now (operator: remove the sticky blue until it has a
+        // real function).  Click still drives the Solo preview, exactly as before.
         .contentShape(Rectangle())
         .onTapGesture { onSelect() }
         .onAppear { draftName = channel.name }
@@ -216,7 +209,6 @@ private struct ChannelRow: View {
             reorderArrows         // ▲/▼ right of the number, always visible
             Spacer(minLength: Spacing.xs)
             statusLine
-            ConnectionDot(connected: channel.isConnected)
         }
     }
 
@@ -255,17 +247,15 @@ private struct ChannelRow: View {
         .disabled(!enabled)
     }
 
-    /// On-air status: PROGRAM source (red), publishing downstream (green "→ NDI"),
-    /// or Standby (faint).
+    /// Signal status — is this camera's stream actually arriving?  The director spots a
+    /// dropped phone at a glance (green Connected → grey Disconnected).  Whether it's on
+    /// air is read from the center preview, not from this list.
     private var statusLine: some View {
-        let onAir = isProgram && programPublishing
-        let color: Color = onAir ? Color(hex: 0x37CF83)
-                                  : (isProgram ? Theme.accentRed : Theme.textFaint)
-        let text = onAir ? "ON AIR → NDI" : (isProgram ? "ON AIR" : "Standby")
-        return Text(text)
+        let connected = channel.isConnected
+        return Text(connected ? "Connected" : "Disconnected")
             .font(.system(size: 10, weight: .medium))
             .lineLimit(1)
-            .foregroundColor(color)
+            .foregroundColor(connected ? Color(hex: 0x37CF83) : Theme.textFaint)
     }
 
     // MARK: Name (always-editable, like the Outputs card)
@@ -287,6 +277,30 @@ private struct ChannelRow: View {
                     .stroke(Theme.stroke, lineWidth: 1)
             )
             .onSubmit { commitRename() }
+    }
+
+    /// Name + delete on one row — the trash sits to the right of the name field.
+    private var nameRow: some View {
+        HStack(spacing: Spacing.sm) {
+            nameField
+            trashButton
+        }
+    }
+
+    private var trashButton: some View {
+        Button { requestRemove() } label: {
+            Image(systemName: "trash")
+                .font(.system(size: 12))
+                .foregroundColor(Theme.textFaint)
+                .frame(width: 32, height: 28)
+                .background(
+                    RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+                        .fill(Theme.bgSelected.opacity(0.6))
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Remove channel")
     }
 
     private func commitRename() {
