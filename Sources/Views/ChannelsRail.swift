@@ -55,36 +55,32 @@ struct ChannelsRail: View {
     /// advert online, and applies the global auth so the iPhone can connect.
     private var addButton: some View {
         Menu {
+            // FLAT list — no nested submenu (it dismissed on hover).  Primary sources
+            // first; the HDMI/USB capture devices sit at the bottom as extras.
             Button {
                 model.addChannel()
             } label: {
                 Label("Airlive Camera", systemImage: "camera")
             }
 
-            // HDMI / USB capture: a submenu of the connected capture cards (UVC),
-            // each creates a channel bound to that device — like OBS's Video Capture
-            // Device.  Re-enumerated each time the menu opens.
-            Menu {
-                let devices = CaptureDevices.discover()
-                if devices.isEmpty {
-                    Text("No capture device connected")
-                } else {
-                    ForEach(devices, id: \.uniqueID) { device in
-                        Button(device.localizedName) {
-                            model.addChannel(kind: .capture,
-                                             captureDeviceID: device.uniqueID,
-                                             name: device.localizedName)
-                        }
-                    }
-                }
-            } label: {
-                Label("HDMI / USB Capture", systemImage: "cable.connector")
-            }
-
             Button {} label: {
                 Label("Screen Mirroring — soon", systemImage: "rectangle.on.rectangle")
             }
             .disabled(true)
+
+            let devices = CaptureDevices.discover()
+            if !devices.isEmpty {
+                Divider()
+                ForEach(devices, id: \.uniqueID) { device in
+                    Button {
+                        model.addChannel(kind: .capture,
+                                         captureDeviceID: device.uniqueID,
+                                         name: device.localizedName)
+                    } label: {
+                        Label("HDMI / USB: \(device.localizedName)", systemImage: "cable.connector")
+                    }
+                }
+            }
         } label: {
             Image(systemName: "plus")
                 .font(.system(size: 11, weight: .bold))
