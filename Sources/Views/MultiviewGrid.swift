@@ -16,6 +16,7 @@
 // thumbnail) sends it live to Program.
 
 import SwiftUI
+import AppKit   // NSApp.keyWindow.toggleFullScreen
 
 struct MultiviewGrid: View {
     @ObservedObject var model: BridgeModel
@@ -25,13 +26,15 @@ struct MultiviewGrid: View {
         ScrollView {
             VStack(spacing: Spacing.md) {
                 topBar
-                // PVW/PGM and the thumbnail wall sit TIGHT together (a small gap, not
-                // the old full-width CUT bar between them) — one clean seam, no doubled
-                // borders.  CUT moved up into the top bar.
-                VStack(spacing: 0) {
+                // TRUE 1px grid: cells are opaque black on a stroke-coloured backdrop,
+                // separated by 1px gaps — every seam is exactly 1px (no doubled inset
+                // borders).  Accent (PVW/PGM/tally) borders are drawn ON the cells.
+                VStack(spacing: 1) {
                     bigRow
                     thumbnails
                 }
+                .background(Theme.stroke)
+                .overlay(Rectangle().strokeBorder(Theme.stroke, lineWidth: 1))   // outer 1px frame
                 cameraControl
             }
             .padding(Spacing.lg)
@@ -48,7 +51,10 @@ struct MultiviewGrid: View {
             HStack(spacing: Spacing.sm) {
                 lensQuickRow                   // above PREVIEW (left)
                 Spacer(minLength: Spacing.sm)
-                fullscreenButton               // right
+                HStack(spacing: Spacing.xs) {  // right
+                    fullScreenButton
+                    detachButton
+                }
             }
             cutButton                          // dead-center over the PVW/PGM seam
         }
@@ -101,18 +107,34 @@ struct MultiviewGrid: View {
         .help("Cut the Preview camera to Program (Space)")
     }
 
-    /// Open the clean fullscreen multiview wall on its own window (second monitor).
-    private var fullscreenButton: some View {
-        Button { openWindow(id: MultiviewWall.windowID) } label: {
+    /// Full-Screen the window.  ROADMAP: a CLEAN multiview-only full-screen (hide the
+    /// rails + controls, just the PVW/PGM + wall).  For now it's the native window
+    /// full-screen so the button is live.
+    private var fullScreenButton: some View {
+        Button { NSApp.keyWindow?.toggleFullScreen(nil) } label: {
             HStack(spacing: Spacing.xs) {
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
-                Text("Fullscreen Multicam").font(.system(size: 11, weight: .medium))
+                Text("Full-Screen").font(.system(size: 11, weight: .medium))
             }
             .frame(height: 26)
             .padding(.horizontal, Spacing.sm)
         }
         .bridgeButton()
-        .help("Open the multiview on its own window (drag to a second screen, then full-screen it)")
+        .help("Full-screen this window")
+    }
+
+    /// Detach: pop the multiview into its own window (drag to a second screen).
+    private var detachButton: some View {
+        Button { openWindow(id: MultiviewWall.windowID) } label: {
+            HStack(spacing: Spacing.xs) {
+                Image(systemName: "rectangle.on.rectangle")
+                Text("Detach").font(.system(size: 11, weight: .medium))
+            }
+            .frame(height: 26)
+            .padding(.horizontal, Spacing.sm)
+        }
+        .bridgeButton()
+        .help("Open the multiview in its own window")
     }
 
     // MARK: Preview + Program (the two big windows)
@@ -141,8 +163,8 @@ struct MultiviewGrid: View {
     private var thumbnails: some View {
         let count = model.channels.count
         let capacity = max(1, (count + 3) / 4) * 4   // whole rows of 4
-        let columns = Array(repeating: GridItem(.flexible(), spacing: 0), count: 4)
-        return LazyVGrid(columns: columns, spacing: 0) {
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 1), count: 4)
+        return LazyVGrid(columns: columns, spacing: 1) {
             ForEach(0 ..< capacity, id: \.self) { index in
                 if index < count {
                     let channel = model.channels[index]
@@ -158,11 +180,11 @@ struct MultiviewGrid: View {
         }
     }
 
+    // Empty slot — black; the 1px grid gap is its separator (no own border).
     private var emptyThumb: some View {
         Rectangle()
             .fill(Color.black)
             .aspectRatio(16.0 / 9.0, contentMode: .fit)
-            .overlay(Rectangle().strokeBorder(Theme.stroke, lineWidth: 1))
             .overlay(
                 Image(systemName: "plus").font(.system(size: 13))
                     .foregroundColor(Theme.textFaint.opacity(0.3))
@@ -275,21 +297,23 @@ private struct ThumbCell: View {
             .aspectRatio(16.0 / 9.0, contentMode: .fit)
             .background(Color.black)
             .clipped()
-            // Square, no rounding; green = staged, red = on air.  strokeBorder
-            // (inset) so touching tiles' borders never overlap into a thick line.
-            .overlay(Rectangle().strokeBorder(borderColor, lineWidth: borderWidth))
+            // Neutral cells have NO border — the 1px grid gap is their separator.  Only
+            // tally cells draw a 1px accent (green = staged, red = on air) on top.
+            .overlay(accentBorder)
             .contentShape(Rectangle())
             .onTapGesture(count: 2) { onTake() }
             .onTapGesture { onStage() }
             .help(isProgram ? "On air" : "Click to stage in Preview · double-click to cut to Program")
     }
 
-    private var borderColor: Color {
-        if isProgram { return Theme.accentRed }
-        if isPreview { return Theme.previewGreen }
-        return Theme.stroke
+    @ViewBuilder
+    private var accentBorder: some View {
+        if isProgram {
+            Rectangle().strokeBorder(Theme.accentRed, lineWidth: 1)
+        } else if isPreview {
+            Rectangle().strokeBorder(Theme.previewGreen, lineWidth: 1)
+        }
     }
-    private var borderWidth: CGFloat { 1 }   // always 1px — 2px read too heavy at the seams
 }
 
 // MARK: - Fullscreen multiview wall (its own window)
@@ -305,22 +329,22 @@ struct MultiviewWall: View {
     private var program: BridgeChannel? { model.channels.first { $0.id == model.programID } }
 
     var body: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: 1) {
             HStack(spacing: 0) {
                 BigPane(title: "PREVIEW", accent: Theme.previewGreen, channel: preview)
                 BigPane(title: "PROGRAM", accent: Theme.accentRed, channel: program)
             }
             thumbnails
         }
-        .background(Color.black)
+        .background(Theme.stroke)   // 1px gaps reveal this = the grid lines
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var thumbnails: some View {
         let count = model.channels.count
         let capacity = max(1, (count + 3) / 4) * 4
-        let columns = Array(repeating: GridItem(.flexible(), spacing: 0), count: 4)
-        return LazyVGrid(columns: columns, spacing: 0) {
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 1), count: 4)
+        return LazyVGrid(columns: columns, spacing: 1) {
             ForEach(0 ..< capacity, id: \.self) { index in
                 if index < count {
                     let channel = model.channels[index]
@@ -331,7 +355,6 @@ struct MultiviewWall: View {
                               onTake: { model.stage(channel.id); model.take() })
                 } else {
                     Rectangle().fill(Color.black).aspectRatio(16.0 / 9.0, contentMode: .fit)
-                        .overlay(Rectangle().strokeBorder(Theme.stroke, lineWidth: 1))
                 }
             }
         }

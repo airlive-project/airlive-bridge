@@ -81,6 +81,12 @@ them) · all 4 orientations · NDI + OBS simultaneously, with and without passwo
   delay sits *on top* to pin jitter, not reduce the floor. Build after the skeleton is
   in place; on-device verify before calling done.
 
+- **Multiview Full-Screen / Detach (clean wall).** The multiview top bar has two
+  buttons: Full-Screen (today: native window full-screen) and Detach (opens the
+  multiview in its own window — already works). Roadmap piece: a CLEAN multiview-only
+  full-screen that hides the rails + controls (just PVW/PGM + the thumbnail wall), and
+  Detach polish (remember the window frame / place on a second screen).
+
 - **Multiview + program routing (switcher-lite).** Show all channels in a
   multiview; choose what goes to air; route a *selected* camera to a *selected*
   output seamlessly — don't blindly publish every signal, pick which camera goes
