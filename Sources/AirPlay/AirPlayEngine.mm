@@ -320,6 +320,44 @@ public:
     os_log(ap_log(), "video_report_size %dx%d", self->width_, self->height_);
   }
 
+  // --- callbacks the UxPlay handshake invokes WITHOUT a null-guard ---
+  // raop_handlers.h / raop_rtp_mirror.c call these unconditionally; leaving any
+  // one NULL makes conn_request jump to 0x0 on the first iPhone connection
+  // (EXC_BAD_ACCESS). audio_set_client_volume (initial-volume plist) + video_set_codec
+  // (mirror start) are the ones hit earliest.
+
+  static int video_set_codec(void * /*cls*/, video_codec_t codec)
+  {
+    os_log(ap_log(), "video_set_codec %{public}s",
+           codec == VIDEO_CODEC_H265 ? "HEVC" : "H264");
+    return 0;   // accept; the VT decoder reads SPS/PPS (or VPS) from the stream
+  }
+
+  static void video_pause(void * /*cls*/) {}
+  static void video_resume(void * /*cls*/) {}
+
+  static void video_reset(void *cls, reset_type_t /*reset_type*/)
+  {
+    auto *self = static_cast<AirPlayEngineImpl *>(cls);
+    os_log(ap_log(), "video_reset");
+    self->decoder_.flush();
+  }
+
+  static void conn_feedback(void * /*cls*/) {}            // client heartbeat — nothing to do
+
+  static double audio_set_client_volume(void * /*cls*/) { return 0.0; }  // 0 dB = full volume
+
+  // Access-control / pairing stubs — no password, no PIN registration: admit everyone.
+  static void report_client_request(void * /*cls*/, char * /*deviceid*/,
+                                    char * /*model*/, char * /*name*/, bool *admit)
+  {
+    if (admit) *admit = true;
+  }
+  static const char *passwd(void * /*cls*/, int *len) { if (len) *len = 0; return nullptr; }
+  static bool check_register(void * /*cls*/, const char * /*pk_str*/) { return false; }
+  static void register_client(void * /*cls*/, const char * /*device_id*/,
+                              const char * /*pk_str*/, const char * /*name*/) {}
+
   static void log_callback(void * /*cls*/, int level, const char *msg)
   {
     switch (level)
@@ -454,6 +492,17 @@ private:
     cbs.audio_set_volume = audio_set_volume;
     cbs.audio_get_format = audio_get_format;
     cbs.video_report_size = video_report_size;
+    // Unguarded callbacks (see definitions above) — all MUST be non-null:
+    cbs.video_set_codec = video_set_codec;
+    cbs.video_pause = video_pause;
+    cbs.video_resume = video_resume;
+    cbs.video_reset = video_reset;
+    cbs.conn_feedback = conn_feedback;
+    cbs.audio_set_client_volume = audio_set_client_volume;
+    cbs.report_client_request = report_client_request;
+    cbs.passwd = passwd;
+    cbs.check_register = check_register;
+    cbs.register_client = register_client;
 
     raop_ = raop_init(&cbs);
     if (!raop_)
