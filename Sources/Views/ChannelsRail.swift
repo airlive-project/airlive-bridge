@@ -1,11 +1,13 @@
 // ChannelsRail.swift — LEFT zone: the channel list.
 //
 // Channels are CREATED, not auto-discovered (DESIGN.md): "+ Create channel"
-// opens a receiver slot the iPhone connects to.  Each row shows the renameable
-// name, a connection dot, a one-line spec read from the camera's last snapshot,
-// and a tally hint.  The selected row is signalled by the accent-blue leading
-// bar + a brighter fill (the Studio / Linear selection idiom — fill carries the
-// state, not a heavy border).
+// opens a receiver slot the iPhone connects to.  Each row is a card matching the
+// Outputs rail: a faint ORDINAL number (top-left) = the channel's position, the
+// live status + connection dot (top-right), and the renameable name field below.
+//
+// ORDER MATTERS: the row order is the channel order — it drives the multiview tile
+// layout AND the number-key shortcuts.  Drag a row (or use the ▲/▼ arrows on hover)
+// and the ordinals renumber top-to-bottom, so swapping 2↔3 makes the old 3 the new 2.
 
 import SwiftUI
 import AVFoundation   // capture-device enumeration for the "+ → HDMI / USB Capture" menu
@@ -30,45 +32,35 @@ struct ChannelsRail: View {
 
     // MARK: - Header
     //
-    // Studio's add-source idiom: the title carries a small inline `+` right
-    // beside it (no big full-width "create" button under the list, no rule under
-    // the header).  Pressing `+` opens a channel's receiver slot immediately.
+    // Title left, "+" in its semi-transparent box on the right (mirrors the Outputs
+    // rail).  No total count — the per-card ordinal carries the numbering now.
 
     private var header: some View {
         HStack(spacing: Spacing.sm) {
             Text("Channels")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
-            addButton
             Spacer()
-            Text("\(model.channels.count)")
-                .font(.system(size: 12, weight: .medium).monospacedDigit())
-                .foregroundColor(Theme.textFaint)
+            addButton
         }
         .padding(.horizontal, Spacing.lg)
         .padding(.top, Spacing.md)
         .padding(.bottom, Spacing.sm)
     }
 
-    /// Small inline `+` next to the title — the Studio add-source affordance.
-    /// `addChannel` builds the model object, brings the receiver slot + Bonjour
-    /// advert online, and applies the global auth so the iPhone can connect.
+    /// "+" (semi-transparent box, right edge — matches the Outputs "+") opens the
+    /// add-source menu.  `addChannel` builds the model object, brings the receiver
+    /// slot + Bonjour advert online, and applies the global auth so the phone connects.
     private var addButton: some View {
         Menu {
             // FLAT list — no nested submenu (it dismissed on hover).  Primary sources
             // first; the HDMI/USB capture devices sit at the bottom as extras.
-            Button {
-                model.addChannel()
-            } label: {
+            Button { model.addChannel() } label: {
                 Label("Airlive Camera", systemImage: "camera")
             }
-
-            Button {
-                model.addChannel(kind: .airplay)
-            } label: {
+            Button { model.addChannel(kind: .airplay) } label: {
                 Label("Screen Mirroring", systemImage: "rectangle.on.rectangle")
             }
-
             let devices = CaptureDevices.discover()
             if !devices.isEmpty {
                 Divider()
@@ -87,10 +79,18 @@ struct ChannelsRail: View {
                 .font(.system(size: 11, weight: .bold))
                 .foregroundColor(Theme.textPrimary)
                 .frame(width: 22, height: 22)
+                .background(
+                    RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+                        .fill(Theme.bgSelected.opacity(0.6))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+                        .stroke(Theme.stroke, lineWidth: 1)
+                )
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
-        .bridgeButton(corner: Radius.control)
+        .fixedSize()
         .help("Add source")
     }
 
@@ -101,23 +101,30 @@ struct ChannelsRail: View {
         if model.channels.isEmpty {
             emptyState
         } else {
-            // A List (not a LazyVStack) so rows DRAG-REORDER via `.onMove` — the
-            // multiview order follows the list.  Styled plain + clear rows so it
-            // keeps the custom rail look.
+            // A List so rows DRAG-REORDER via `.onMove` (the ▲/▼ arrows do the same
+            // by index).  The order is the channel order — multiview + shortcuts read it.
             List {
-                ForEach(model.channels) { channel in
+                ForEach(Array(model.channels.enumerated()), id: \.element.id) { pair in
+                    let idx = pair.offset
+                    let channel = pair.element
                     ChannelRow(
                         channel: channel,
+                        index: idx + 1,                              // 1-based ordinal = list position
                         selected: channel.id == model.selectedID,
                         isProgram: channel.id == model.effectiveProgramID,
                         programPublishing: model.programOutputs.contains { $0.isLive },
+                        isFirst: idx == 0,
+                        isLast: idx == model.channels.count - 1,
                         onSelect: { model.select(channel.id) },
                         onRemove: {
                             TallyStore.shared.clear(channel.id)
                             model.removeChannel(channel.id)
-                        }
+                        },
+                        onMoveUp:   { model.moveChannel(from: IndexSet(integer: idx), to: idx - 1) },
+                        onMoveDown: { model.moveChannel(from: IndexSet(integer: idx), to: idx + 2) }
                     )
-                    .listRowInsets(EdgeInsets(top: 3, leading: Spacing.md, bottom: 3, trailing: Spacing.md))
+                    .listRowInsets(EdgeInsets(top: Spacing.xs, leading: Spacing.md,
+                                              bottom: Spacing.xs, trailing: Spacing.md))
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
                 }
@@ -131,9 +138,9 @@ struct ChannelsRail: View {
     private var emptyState: some View {
         VStack(spacing: Spacing.sm) {
             Spacer()
-            // "iphone" (not "iphone.gen3") — gen-numbered variants are SF
-            // Symbols 5 / macOS 14; this app deploys to macOS 13, where the
-            // numbered symbol renders blank.  Plain "iphone" exists since macOS 11.
+            // "iphone" (not "iphone.gen3") — gen-numbered variants are SF Symbols 5 /
+            // macOS 14; this app deploys to macOS 13, where the numbered symbol renders
+            // blank.  Plain "iphone" exists since macOS 11.
             Image(systemName: "iphone")
                 .font(.system(size: 28))
                 .foregroundColor(Theme.textFaint)
@@ -151,56 +158,48 @@ struct ChannelsRail: View {
     }
 }
 
-// MARK: - One channel row
+// MARK: - One channel row (card: ordinal + status on top, name below)
 
-/// A single channel row.  Observes the channel so the connection dot, spec and
-/// tally hint stay live as snapshots arrive.  Double-click (or the pencil) puts
-/// the name into an inline editable field.
+/// A channel card mirroring the Outputs card.  Observes the channel so the status
+/// and connection dot stay live as snapshots arrive.  The name is an always-editable
+/// field (commit on Return / focus-loss); ▲/▼ (on hover) reorder by one.
 private struct ChannelRow: View {
     @ObservedObject var channel: BridgeChannel
-    @ObservedObject private var tally = TallyStore.shared
+    let index: Int               // 1-based position = the displayed ordinal
     let selected: Bool
     let isProgram: Bool          // this camera is the program source (on air)
     let programPublishing: Bool  // a program output is live
+    let isFirst: Bool
+    let isLast: Bool
     let onSelect: () -> Void
     let onRemove: () -> Void
+    let onMoveUp: () -> Void
+    let onMoveDown: () -> Void
 
-    @State private var editing = false
     @State private var draftName = ""
     @State private var hovering = false
     @State private var confirmingDelete = false
-    @FocusState private var nameFocused: Bool
 
     var body: some View {
-        HStack(spacing: Spacing.sm) {
-            VStack(alignment: .leading, spacing: Spacing.xs) {
-                nameLine
-                transferLine
+        Card(padding: Spacing.sm) {
+            VStack(alignment: .leading, spacing: Spacing.sm) {
+                topRow        // ordinal (left) · reorder arrows (hover) · status · dot
+                nameField     // full-width editable name
             }
-            Spacer(minLength: 0)
-            tallyHint
         }
-        .padding(.vertical, Spacing.sm)
-        .padding(.horizontal, Spacing.md)
-        .background(
-            RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
-                .fill(rowFill)
-        )
+        // Blue stroke when grabbed / selected, over the card's neutral border.
         .overlay(
-            RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
-                .stroke(selected ? Theme.stroke : Color.clear, lineWidth: 1)
+            RoundedRectangle(cornerRadius: Radius.panel, style: .continuous)
+                .stroke(selected ? Theme.accentBlue : Color.clear, lineWidth: 1.5)
         )
         .contentShape(Rectangle())
-        .onTapGesture(count: 2) { beginRename() }
         .onTapGesture { onSelect() }
         .onHover { hovering = $0 }
+        .onAppear { draftName = channel.name }
         .contextMenu {
-            Button("Rename") { beginRename() }
-            Divider()
             Button("Remove Channel", role: .destructive) { requestRemove() }
         }
-        // An active channel (ON AIR or receiving video) confirms before removal; an
-        // idle (Standby, unconnected) channel deletes straight away.
+        // Active channel (ON AIR / receiving) confirms before removal; idle goes straight.
         .confirmationDialog("Remove “\(channel.name)”?",
                             isPresented: $confirmingDelete, titleVisibility: .visible) {
             Button("Remove channel", role: .destructive) { onRemove() }
@@ -211,115 +210,96 @@ private struct ChannelRow: View {
         }
     }
 
-    private func requestRemove() {
-        if channel.isConnected || isProgram { confirmingDelete = true }
-        else { onRemove() }
-    }
+    // MARK: Top row
 
-    // MARK: Name (with inline rename)
-
-    private var nameLine: some View {
+    private var topRow: some View {
         HStack(spacing: Spacing.sm) {
+            ordinalBadge
+            Spacer(minLength: Spacing.xs)
+            if hovering { reorderArrows }
+            statusLine
             ConnectionDot(connected: channel.isConnected)
-            if editing {
-                TextField("", text: $draftName)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(Theme.textPrimary)
-                    .focused($nameFocused)
-                    .onSubmit { commitRename() }            // Enter commits
-                    .onExitCommand { cancelRename() }       // Esc cancels
-                    // Commit on focus loss too — clicking another row, the list,
-                    // or anywhere else ends the edit and saves, not only Enter.
-                    .onChange(of: nameFocused) { focused in
-                        if !focused && editing { commitRename() }
-                    }
-            } else {
-                Text(channel.name)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(Theme.textPrimary)
-                    .lineLimit(1)
-                if hovering {
-                    Button {
-                        beginRename()
-                    } label: {
-                        Image(systemName: "pencil")
-                            .font(.system(size: 10))
-                            .foregroundColor(Theme.textFaint)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
         }
     }
 
-    /// On-air status: this camera is the PROGRAM source (red), and whether the
-    /// program is actually publishing downstream (green "→ NDI").  Outputs are on
-    /// the program bus now, not per channel.
-    private var transferLine: some View {
+    /// Faint, semi-transparent position number (top-left) — renumbers on reorder.
+    private var ordinalBadge: some View {
+        Text("\(index)")
+            .font(.system(size: 11, weight: .bold).monospacedDigit())
+            .foregroundColor(Theme.textSecondary)
+            .frame(minWidth: 16)
+            .padding(.horizontal, Spacing.xs)
+            .padding(.vertical, 2)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Theme.bgSelected.opacity(0.6))
+            )
+    }
+
+    /// ▲/▼ reorder-by-one (shown on hover; the whole row also drag-reorders).
+    private var reorderArrows: some View {
+        HStack(spacing: 1) {
+            arrowButton("chevron.up",   enabled: !isFirst, action: onMoveUp)
+            arrowButton("chevron.down", enabled: !isLast,  action: onMoveDown)
+        }
+    }
+
+    private func arrowButton(_ system: String, enabled: Bool,
+                             action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: system)
+                .font(.system(size: 9, weight: .bold))
+                .foregroundColor(enabled ? Theme.textSecondary : Theme.textFaint.opacity(0.4))
+                .frame(width: 16, height: 16)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+    }
+
+    /// On-air status: PROGRAM source (red), publishing downstream (green "→ NDI"),
+    /// or Standby (faint).
+    private var statusLine: some View {
         let onAir = isProgram && programPublishing
         let color: Color = onAir ? Color(hex: 0x37CF83)
                                   : (isProgram ? Theme.accentRed : Theme.textFaint)
         let text = onAir ? "ON AIR → NDI" : (isProgram ? "ON AIR" : "Standby")
-        return HStack(spacing: Spacing.xs) {
-            Image(systemName: isProgram ? "dot.radiowaves.right" : "pause.circle")
-                .font(.system(size: 9))
-            Text(text).font(.system(size: 10, weight: .medium)).lineLimit(1)
-        }
-        .foregroundColor(color)
+        return Text(text)
+            .font(.system(size: 10, weight: .medium))
+            .lineLimit(1)
+            .foregroundColor(color)
     }
 
-    /// A tiny coloured square hinting the channel's tally state, derived from
-    /// the camera's reported cue if present.  (The authoritative tally lives in
-    /// the center pane buttons; this is an at-a-glance mirror.)
-    @ViewBuilder
-    private var tallyHint: some View {
-        switch channelTally {
-        case .program:
-            tallySquare(Theme.accentRed)
-        case .preview:
-            tallySquare(Theme.accentYellow)
-        case .off:
-            EmptyView()
-        }
-    }
+    // MARK: Name (always-editable, like the Outputs card)
 
-    private func tallySquare(_ color: Color) -> some View {
-        RoundedRectangle(cornerRadius: 3)
-            .fill(color)
-            .frame(width: 10, height: 10)
-    }
-
-    private var channelTally: TallyState {
-        // Read from the shared, observed store so the hint and the center-pane
-        // buttons (which write the same store) can never disagree.
-        tally.state(for: channel.id)
-    }
-
-    private var rowFill: Color {
-        if selected { return Theme.bgSelected }
-        return hovering ? Theme.bgHover : Color.clear
-    }
-
-    // MARK: Rename helpers
-
-    private func beginRename() {
-        draftName = channel.name
-        editing = true
-        onSelect()
-        DispatchQueue.main.async { nameFocused = true }
+    private var nameField: some View {
+        TextField("Channel name", text: $draftName)
+            .textFieldStyle(.plain)
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundColor(Theme.textPrimary)
+            .padding(.horizontal, Spacing.sm)
+            .frame(height: 28)
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+                    .fill(Theme.bgApp)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+                    .stroke(Theme.stroke, lineWidth: 1)
+            )
+            .onSubmit { commitRename() }
     }
 
     private func commitRename() {
-        // `editing = false` first so the `onChange(of: nameFocused)` blur-commit
-        // that fires as the field tears down sees `editing == false` and doesn't
-        // re-enter this (a harmless second `rename`, but cleaner to guard).
-        editing = false
-        channel.rename(draftName)
+        let trimmed = draftName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { draftName = channel.name; return }
+        channel.rename(trimmed)
     }
 
-    private func cancelRename() {
-        editing = false
+    private func requestRemove() {
+        if channel.isConnected || isProgram { confirmingDelete = true }
+        else { onRemove() }
     }
 }
 
@@ -327,7 +307,7 @@ private struct ChannelRow: View {
 
 /// A single button pinned to the bottom of the Channels rail.  Setting a password
 /// IS turning auth on (it gates every channel); no password = open.  No toggle,
-/// no explanatory blurb — just the button, which opens a small popover to enter /
+/// no explanatory blurb — just the button, which opens a small sheet to enter /
 /// remove the password.  ACCESS control, not encryption (HMAC challenge; the
 /// password is never sent).
 private struct SecurityFooter: View {
@@ -359,8 +339,6 @@ private struct SecurityFooter: View {
         .buttonStyle(.plain)
         .background(Theme.bgPanel)
         .overlay(Rectangle().frame(height: 1).foregroundColor(Theme.stroke), alignment: .top)
-        // A centered modal SHEET (not a corner popover that fought the input-source
-        // picker and clipped against the window edge).
         .sheet(isPresented: $showSheet) { sheet }
     }
 
