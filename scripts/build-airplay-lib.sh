@@ -19,8 +19,11 @@ command -v cmake >/dev/null || { echo "✗ cmake not found — brew install cmak
 
 # Stage a copy with the GStreamer app/renderers stripped (the airplay LIB needs no
 # GStreamer — only the uxplay app does).  Keeps the submodule pristine.
-STAGE="$ROOT/build/uxplay-src"
-BUILD="$ROOT/build/airplay-lib"
+# Staging under .build/ (gitignored) — NOT ./build, which collided with
+# `xcodebuild clean` ("Could not delete build because it was not created by the
+# build system").
+STAGE="$ROOT/.build/uxplay-src"
+BUILD="$ROOT/.build/airplay-lib"
 OUT="$ROOT/Vendor/airplay-lib"
 rm -rf "$STAGE" "$BUILD"; mkdir -p "$STAGE"
 cp -R "$UX/." "$STAGE/"

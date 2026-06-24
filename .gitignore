@@ -11,3 +11,5 @@ dist/
 
 # AirPlay lib build output (rebuild via scripts/build-airplay-lib.sh)
 Vendor/airplay-lib/
+# Third-party C static libs, macOS-13 source build (rebuild via scripts/build-deps.sh)
+Vendor/deps/

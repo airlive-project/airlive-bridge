@@ -64,15 +64,17 @@ targets:
         SWIFT_OBJC_BRIDGING_HEADER: Sources/AirliveBridge-Bridging-Header.h
         HEADER_SEARCH_PATHS:
           - $(SRCROOT)/Vendor/airplay-lib/include
-          - /opt/homebrew/opt/openssl@3/include
-          - /opt/homebrew/opt/libplist/include
+          # openssl + libplist headers, from our macOS-13 source build (scripts/build-deps.sh)
+          - $(SRCROOT)/Vendor/deps/include
         OTHER_LDFLAGS:
           - $(SRCROOT)/Vendor/airplay-lib/lib/libairplay.a
           - $(SRCROOT)/Vendor/airplay-lib/lib/libplayfair.a
           - $(SRCROOT)/Vendor/airplay-lib/lib/libdnssd.a
           - $(SRCROOT)/Vendor/airplay-lib/lib/libllhttp.a
-          - /opt/homebrew/opt/openssl@3/lib/libcrypto.a
-          - /opt/homebrew/opt/libplist/lib/libplist-2.0.a
+          # libcrypto + libplist rebuilt at min-macOS 13 (NOT Homebrew's host-OS build)
+          # so the link is warning-clean and the app runs on every supported macOS.
+          - $(SRCROOT)/Vendor/deps/lib/libcrypto.a
+          - $(SRCROOT)/Vendor/deps/lib/libplist-2.0.a
 
 schemes:
   AirliveBridge:
