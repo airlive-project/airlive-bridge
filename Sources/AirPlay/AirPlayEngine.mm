@@ -488,11 +488,15 @@ private:
 
     // 5) bind dnssd to raop and register both services.
     raop_set_dnssd(raop_, dnssd_);
-    if (dnssd_register_raop(dnssd_, port))
-      os_log_error(ap_log(), "dnssd_register_raop failed");
+    // Log the actual return: -1/-2 = bad hw_addr/name; otherwise an Apple dns_sd.h
+    // DNSServiceErrorType (e.g. -65555 = NoAuth/Local-Network denied).
+    int rcRaop = dnssd_register_raop(dnssd_, port);
+    if (rcRaop)
+      os_log_error(ap_log(), "dnssd_register_raop failed: %d", rcRaop);
     unsigned short airplayPort = port; // uxplay uses raop_port for both
-    if (dnssd_register_airplay(dnssd_, airplayPort))
-      os_log_error(ap_log(), "dnssd_register_airplay failed");
+    int rcAir = dnssd_register_airplay(dnssd_, airplayPort);
+    if (rcAir)
+      os_log_error(ap_log(), "dnssd_register_airplay failed: %d", rcAir);
 
     os_log(ap_log(), "AirPlay server up on port %d", (int)port);
     return 0;
