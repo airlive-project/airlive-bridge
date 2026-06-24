@@ -42,6 +42,11 @@ enum OutputKind: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Short tag for the compact output-card badge.  `displayName` can be long
+    /// ("OBS Airlive Bridge") and overflows the fixed badge slot — the long name
+    /// lives in the card's name field; the badge stays a tight code.
+    var badgeLabel: String { rawValue.uppercased() }   // ndi → "NDI", obs → "OBS", …
+
     /// SF Symbol for the kind badge / add menu.  All chosen names exist on
     /// macOS 13 (no SF5 / macOS-14-only glyphs, no gen-numbered variants) so they
     /// render on the deployment target — a blank badge would look broken.

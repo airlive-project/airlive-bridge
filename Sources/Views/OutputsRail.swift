@@ -114,6 +114,7 @@ struct OutputsRail: View {
         return HStack(spacing: Spacing.xs) {
             Image(systemName: "dot.radiowaves.left.and.right").font(.system(size: 10))
             Text("Program: \(name ?? "—")").font(.system(size: 11, weight: .medium))
+                .lineLimit(1).truncationMode(.tail)
             Spacer()
         }
         .foregroundColor(Theme.textFaint)
@@ -288,7 +289,7 @@ private struct OutputCard: View {
         return HStack(spacing: Spacing.xxs) {
             Image(systemName: output.kind.symbolName)
                 .font(.system(size: 10, weight: .semibold))
-            Text(output.kind.displayName.uppercased())
+            Text(output.kind.badgeLabel)              // short code, never the long name
                 .font(.system(size: 10, weight: .bold))
                 .tracking(0.8)
         }
@@ -347,7 +348,7 @@ private struct OutputCard: View {
             }
         ))
         .toggleStyle(.switch)
-        .tint(Theme.accentRed)
+        .tint(Theme.accentBlue)   // native blue switch (the live status is the red badge)
         .labelsHidden()
         .fixedSize()
     }
