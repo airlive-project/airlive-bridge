@@ -43,7 +43,7 @@ struct ChannelsRail: View {
             Spacer()
             addButton
         }
-        .padding(.horizontal, Spacing.sm)
+        .padding(.horizontal, Spacing.lg)
         .padding(.top, Spacing.md)
         .padding(.bottom, Spacing.sm)
     }
@@ -105,7 +105,7 @@ struct ChannelsRail: View {
             // card == gap between cards == Spacing.sm, side margins == Spacing.lg, same
             // as the header.  Reorder via the ▲/▼ arrows (order drives multiview + shortcuts).
             ScrollView {
-                VStack(spacing: 0) {
+                VStack(spacing: Spacing.sm) {
                     ForEach(Array(model.channels.enumerated()), id: \.element.id) { pair in
                         let idx = pair.offset
                         let channel = pair.element
@@ -126,8 +126,8 @@ struct ChannelsRail: View {
                         )
                     }
                 }
-                .padding(.horizontal, Spacing.sm)
-                .padding(.bottom, Spacing.sm)
+                .padding(.horizontal, Spacing.lg)
+                .padding(.bottom, Spacing.lg)
             }
         }
     }
@@ -176,7 +176,7 @@ private struct ChannelRow: View {
     @State private var confirmingDelete = false
 
     var body: some View {
-        Card(corner: 0, padding: Spacing.sm) {
+        Card(padding: Spacing.sm) {
             VStack(alignment: .leading, spacing: Spacing.sm) {
                 topRow        // source kind · signal status · delete
                 bottomRow     // ordinal · arrows · name
@@ -226,20 +226,21 @@ private struct ChannelRow: View {
         }
     }
 
-    /// Position number that doubles as a TALLY light: red on PROGRAM (on air), green
-    /// on PREVIEW (staged), neutral otherwise.  Renumbers on reorder.
+    /// Position number that doubles as a subtle TALLY hint: the DIGIT tints red on
+    /// PROGRAM (on air) / green on PREVIEW (staged); the box stays a quiet dark chip so
+    /// it stays auxiliary and doesn't grab attention.  Renumbers on reorder.
     private var ordinalBadge: some View {
-        let fill: Color = isProgram ? Theme.accentRed
-                        : (isPreview ? Color(hex: 0x37CF83) : Theme.bgSelected.opacity(0.6))
-        let fg: Color = (isProgram || isPreview) ? .white : Theme.textSecondary
+        let digit: Color = isProgram ? Theme.accentRed
+                         : (isPreview ? Color(hex: 0x37CF83) : Theme.textSecondary)
         return Text("\(index)")
             .font(.system(size: 11, weight: .bold).monospacedDigit())
-            .foregroundColor(fg)
+            .foregroundColor(digit)
             .frame(minWidth: 18, alignment: .center)   // sized for "00" — every ordinal equal width
             .padding(.horizontal, Spacing.xs)
             .padding(.vertical, 2)
             .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous).fill(fill)
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Theme.bgSelected.opacity(0.6))   // always a dark chip
             )
     }
 
