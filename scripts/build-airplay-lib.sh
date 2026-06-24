@@ -26,8 +26,11 @@ rm -rf "$STAGE" "$BUILD"; mkdir -p "$STAGE"
 cp -R "$UX/." "$STAGE/"
 sed -i '' '/add_subdirectory( renderers )/,$d' "$STAGE/CMakeLists.txt"
 
-echo "▶︎ Configuring (lib only)…"
-cmake -S "$STAGE" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DNO_MARCH_NATIVE=ON >/dev/null
+echo "▶︎ Configuring (lib only, macOS 13 target)…"
+# Match the app's deployment target so the .a objects don't warn ("built for
+# newer macOS 26 than 13"). (Homebrew libcrypto/libplist stay at their own minos.)
+cmake -S "$STAGE" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DNO_MARCH_NATIVE=ON \
+      -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 >/dev/null
 
 echo "▶︎ Building airplay static lib…"
 cmake --build "$BUILD" --target airplay -j"$(sysctl -n hw.ncpu)" >/dev/null

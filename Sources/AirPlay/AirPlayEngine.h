@@ -27,6 +27,15 @@ NS_ASSUME_NONNULL_BEGIN
 /// Restart the AirPlay server advertised as this Apple-TV name.
 - (void)setAdvertiseName:(NSString *)name;
 
+/// Bonjour advertising data for the Swift NSNetService advertiser (AirPlayBonjour).
+/// Raw dns_sd registration is blocked on macOS 26 (-65555), so Swift advertises the
+/// RAOP/AirPlay services instead. Valid ONLY after `-start`; nil/0 before.
+- (nullable NSDictionary<NSString *, NSData *> *)raopTXTRecord;
+- (nullable NSDictionary<NSString *, NSData *> *)airplayTXTRecord;
+- (nullable NSString *)raopInstanceName;     // "HWADDR@name"
+- (nullable NSString *)airplayInstanceName;  // bare device name
+- (uint16_t)serverPort;                      // UxPlay httpd port (advertise this)
+
 @end
 
 NS_ASSUME_NONNULL_END

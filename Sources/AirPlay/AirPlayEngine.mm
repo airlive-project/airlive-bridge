@@ -486,17 +486,13 @@ private:
     raop_start_httpd(raop_, &port);
     raop_set_port(raop_, port);
 
-    // 5) bind dnssd to raop and register both services.
+    // 5) bind dnssd to raop. raop_set_dnssd() populates dnssd_->pk + the pre-built
+    //    TXT records that the AirPlay /info handshake reads at runtime.
     raop_set_dnssd(raop_, dnssd_);
-    // Log the actual return: -1/-2 = bad hw_addr/name; otherwise an Apple dns_sd.h
-    // DNSServiceErrorType (e.g. -65555 = NoAuth/Local-Network denied).
-    int rcRaop = dnssd_register_raop(dnssd_, port);
-    if (rcRaop)
-      os_log_error(ap_log(), "dnssd_register_raop failed: %d", rcRaop);
-    unsigned short airplayPort = port; // uxplay uses raop_port for both
-    int rcAir = dnssd_register_airplay(dnssd_, airplayPort);
-    if (rcAir)
-      os_log_error(ap_log(), "dnssd_register_airplay failed: %d", rcAir);
+    // NOTE: advertising is NOT done via dnssd_register_* — the raw DNSServiceRegister
+    // C API returns -65555 (NoAuth) on macOS 26. Swift advertises _raop._tcp /
+    // _airplay._tcp via NSNetService (AirPlayBonjour), which inherits the app's
+    // Local Network grant (same path as _airlive._tcp). The getters below feed it.
 
     os_log(ap_log(), "AirPlay server up on port %d", (int)port);
     return 0;
@@ -511,13 +507,65 @@ private:
     }
     if (dnssd_)
     {
-      dnssd_unregister_raop(dnssd_);
-      dnssd_unregister_airplay(dnssd_);
+      // No dnssd_unregister_* — we never registered via dns_sd (NSNetService does
+      // the advertising; the Swift side stops it). Just free the object.
       dnssd_destroy(dnssd_);
       dnssd_ = nullptr;
     }
   }
 
+public:
+  // --- Advertising data for the Swift NSNetService advertiser. Valid only AFTER
+  //     startServerLocked (raop_set_dnssd populated dnssd_->pk + the TXT records). ---
+
+  static NSDictionary<NSString *, NSData *> *parseDnsTxt(const char *txt, int len)
+  {
+    NSMutableDictionary<NSString *, NSData *> *d = [NSMutableDictionary dictionary];
+    int i = 0;
+    while (i < len)
+    {
+      int n = (unsigned char)txt[i++];          // DNS-TXT: [len][key=value]
+      if (n == 0 || i + n > len) break;
+      const char *e = txt + i;
+      int eq = -1;
+      for (int j = 0; j < n; j++) { if (e[j] == '=') { eq = j; break; } }
+      if (eq >= 0)
+      {
+        NSString *k = [[NSString alloc] initWithBytes:e length:eq encoding:NSUTF8StringEncoding];
+        if (k) d[k] = [NSData dataWithBytes:e + eq + 1 length:n - eq - 1];
+      }
+      i += n;
+    }
+    return d;
+  }
+
+  NSDictionary<NSString *, NSData *> *raopTxt()
+  {
+    if (!dnssd_) return nil;
+    int len = 0; const char *t = dnssd_get_raop_txt(dnssd_, &len);
+    return (t && len > 0) ? parseDnsTxt(t, len) : nil;
+  }
+  NSDictionary<NSString *, NSData *> *airplayTxt()
+  {
+    if (!dnssd_) return nil;
+    int len = 0; const char *t = dnssd_get_airplay_txt(dnssd_, &len);
+    return (t && len > 0) ? parseDnsTxt(t, len) : nil;
+  }
+  NSString *raopInstance()
+  {
+    if (!dnssd_) return nil;
+    int len = 0; const char *hw = dnssd_get_hw_addr(dnssd_, &len);   // "HWADDR@name"
+    NSMutableString *mac = [NSMutableString string];
+    for (int i = 0; i < len; i++) [mac appendFormat:@"%02X", (unsigned char)hw[i]];
+    return [NSString stringWithFormat:@"%@@%s", mac, dnssd_->name ?: ""];
+  }
+  NSString *airplayInstance()
+  {
+    return (dnssd_ && dnssd_->name) ? [NSString stringWithUTF8String:dnssd_->name] : nil;
+  }
+  uint16_t port() { return raop_ ? raop_get_port(raop_) : 0; }
+
+private:
   // ---- state ----
   std::string serverName_;
   raop_t *raop_ = nullptr;
@@ -596,5 +644,12 @@ private:
 {
   _impl->setAdvertiseName(std::string(name.UTF8String ?: "Airlive"));
 }
+
+// --- advertising data for AirPlayBonjour (NSNetService); valid after -start ---
+- (NSDictionary<NSString *, NSData *> *)raopTXTRecord { return _impl->raopTxt(); }
+- (NSDictionary<NSString *, NSData *> *)airplayTXTRecord { return _impl->airplayTxt(); }
+- (NSString *)raopInstanceName { return _impl->raopInstance(); }
+- (NSString *)airplayInstanceName { return _impl->airplayInstance(); }
+- (uint16_t)serverPort { return _impl->port(); }
 
 @end

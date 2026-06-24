@@ -16,6 +16,9 @@ import CoreVideo
 final class AirPlayReceiver: ChannelReceiver {
     private weak var channel: BridgeChannel?
     private let engine: AirPlayEngine
+    /// Advertises the RAOP/AirPlay services via NSNetService (the dns_sd path the
+    /// engine would use is blocked on macOS 26 with -65555).
+    private let bonjour = AirPlayBonjour()
 
     init(channel: BridgeChannel, name: String) {
         self.channel = channel
@@ -31,9 +34,26 @@ final class AirPlayReceiver: ChannelReceiver {
         }
     }
 
-    func start() { engine.start() }
+    func start() {
+        engine.start()      // synchronous: server is up + TXT records built on return
+        publishCurrent()
+    }
+
+    /// Pull the engine's live TXT/instance/port and advertise via NSNetService.
+    private func publishCurrent() {
+        guard let rTXT = engine.raopTXTRecord(), let aTXT = engine.airplayTXTRecord(),
+              let rInst = engine.raopInstanceName(), let aInst = engine.airplayInstanceName(),
+              engine.serverPort() != 0 else {
+            print("[AirPlayReceiver] ❌ server not up (nil TXT/port) — skip advertise")
+            return
+        }
+        bonjour.publish(port: Int(engine.serverPort()),
+                        raopInstance: rInst, raopTXT: rTXT,
+                        airplayInstance: aInst, airplayTXT: aTXT)
+    }
 
     func stop() {
+        bonjour.stop()
         engine.stop()
         channel?.publishFrame(nil)
         let clear = { [weak self] in self?.channel?.isConnected = false; self?.channel?.latestFrame = nil }
@@ -43,7 +63,12 @@ final class AirPlayReceiver: ChannelReceiver {
     // AirPlay is one-way video — no Bonjour-`src`/back-channel, so these are no-ops
     // except `rename`, which re-advertises the Apple-TV name.
     func send(_ msg: ControlMessage) {}
-    func rename(_ newName: String) { engine.setAdvertiseName(newName) }
+    func rename(_ newName: String) {
+        bonjour.stop()
+        engine.setAdvertiseName(newName)   // restarts the server async (new name)
+        // Re-advertise once the restarted server's records are ready.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.publishCurrent() }
+    }
     func updateOrder(_ index: Int) {}
     func updateDelay(_ preset: LatencyPreset) {}
     func updateAuth(require: Bool, password: String, disconnectNow: Bool) {}
