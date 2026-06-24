@@ -72,12 +72,33 @@ final class BridgeChannel: ObservableObject, Identifiable {
     /// plain Int read off-main by mirrors (atomic-enough, same trade-off as Studio).
     var outputRotation: Int = 0
 
+    /// On-screen aspect (width/height) derived from the LIVE buffer's real pixel
+    /// dimensions: AirPlay reports a portrait iPhone screen, Airlive a landscape
+    /// frame.  Preview panes bind to this so the image fits instead of floating in
+    /// a fixed 16:9 box.  Updated only when it actually changes (never per frame).
+    @Published var displayAspect: Double = 16.0 / 9.0
+    private var _lastAspect: Double = 16.0 / 9.0
+
     /// Receiver entry point: store the latest frame and notify mirrors.  Called on
     /// the receiver's present thread (OFF main) so a busy main thread can never
     /// freeze the live preview.  Pass nil to blank every mirror ("no signal").
     func publishFrame(_ buffer: CVPixelBuffer?) {
         pixelBufferLock.lock(); _latestPixelBuffer = buffer; pixelBufferLock.unlock()
+        if let buffer { updateDisplayAspect(buffer) }
         NotificationCenter.default.post(name: Self.newFrameNotification, object: self)
+    }
+
+    /// Recompute the display aspect from the buffer's real dims.  A 90/270 rotation
+    /// hint (Airlive Option-B vertical: landscape buffer shown upright) swaps W/H.
+    /// Off-main; publishes on main only on a real change to avoid per-frame hops.
+    private func updateDisplayAspect(_ buffer: CVPixelBuffer) {
+        let w = Double(CVPixelBufferGetWidth(buffer))
+        let h = Double(CVPixelBufferGetHeight(buffer))
+        guard w > 0, h > 0 else { return }
+        let aspect = (outputRotation % 180 != 0) ? h / w : w / h
+        if abs(aspect - _lastAspect) < 0.001 { return }
+        _lastAspect = aspect
+        DispatchQueue.main.async { [weak self] in self?.displayAspect = aspect }
     }
 
     /// The camera's last-reported state (ISO, lens, fps, …).  Drives the remote

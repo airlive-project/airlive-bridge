@@ -85,13 +85,6 @@ private struct ChannelDetail: View {
 
     // MARK: Preview
 
-    /// The camera reports a clockwise rotation hint (Option B vertical stream);
-    /// 90/270 means the operator is shooting portrait, so the preview goes 9:16.
-    private var isPortrait: Bool {
-        let r = channel.remote?.outputRotation ?? 0
-        return r == 90 || r == 270
-    }
-
     private var previewSection: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
             HStack {
@@ -132,10 +125,11 @@ private struct ChannelDetail: View {
             }
             tallyBadge
         }
-        // Adapt to the camera's orientation: a vertical (Option B) stream reports
-        // a 90/270 rotation, so the pane itself becomes 9:16 and the portrait
-        // frame fills it instead of letterboxing inside a wide 16:9 box.
-        .aspectRatio(isPortrait ? 9.0 / 16.0 : 16.0 / 9.0, contentMode: .fit)
+        // Adapt to the live source's real shape: AirPlay sends a portrait iPhone
+        // screen, Airlive a landscape frame (and an Option-B vertical stream reports
+        // a 90/270 hint).  `displayAspect` follows the buffer dims so the pane fits
+        // the image instead of floating it inside a fixed 16:9 box.
+        .aspectRatio(CGFloat(channel.displayAspect), contentMode: .fit)
         .frame(maxWidth: .infinity)
         .background(Color.black)
         .clipShape(RoundedRectangle(cornerRadius: Radius.panel, style: .continuous))
