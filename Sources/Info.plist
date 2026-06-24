@@ -26,6 +26,8 @@
 	<array>
 		<string>_airlive._tcp</string>
 		<string>_ndi._tcp</string>
+		<string>_airplay._tcp</string>
+		<string>_raop._tcp</string>
 	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>Airlive Bridge captures video from connected HDMI / USB capture devices.</string>

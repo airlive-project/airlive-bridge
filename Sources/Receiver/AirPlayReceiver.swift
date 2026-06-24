@@ -1,0 +1,50 @@
+// AirPlayReceiver.swift — a channel fed by AirPlay Screen Mirroring.
+//
+// Wraps the ObjC++ `AirPlayEngine` (the vendored UxPlay AirPlay/RAOP + FairPlay
+// stack + VideoToolbox decode) and adapts it to the `ChannelReceiver` seam: each
+// AirPlay channel advertises as a named Apple TV (the channel name) that any iPhone
+// can pick in Screen Mirroring — no app needed.  Decoded frames flow into the SAME
+// publishFrame / mirror / program path as every other source.
+//
+// Video-only: AirPlay has no back-channel to the phone, so control/tally are no-ops
+// (that's the Airlive app's job).  `onVideoFrame` fires on the engine's decoder
+// thread; the captured `CVPixelBuffer` is retained by ARC for the main hop.
+
+import Foundation
+import CoreVideo
+
+final class AirPlayReceiver: ChannelReceiver {
+    private weak var channel: BridgeChannel?
+    private let engine: AirPlayEngine
+
+    init(channel: BridgeChannel, name: String) {
+        self.channel = channel
+        self.engine = AirPlayEngine(name: name)
+        engine.onVideoFrame = { [weak self] pixelBuffer, ptsNs in
+            guard let self, let channel = self.channel else { return }
+            channel.publishFrame(pixelBuffer)        // off-decoder-thread mirror (zero-copy)
+            DispatchQueue.main.async {
+                if !channel.isConnected { channel.isConnected = true }
+                channel.onProgramFrame?(pixelBuffer, ptsNs)   // program bus (NDI)
+                if channel.latestFrame == nil { channel.latestFrame = pixelBuffer }
+            }
+        }
+    }
+
+    func start() { engine.start() }
+
+    func stop() {
+        engine.stop()
+        channel?.publishFrame(nil)
+        let clear = { [weak self] in self?.channel?.isConnected = false; self?.channel?.latestFrame = nil }
+        if Thread.isMainThread { clear() } else { DispatchQueue.main.async(execute: clear) }
+    }
+
+    // AirPlay is one-way video — no Bonjour-`src`/back-channel, so these are no-ops
+    // except `rename`, which re-advertises the Apple-TV name.
+    func send(_ msg: ControlMessage) {}
+    func rename(_ newName: String) { engine.setAdvertiseName(newName) }
+    func updateOrder(_ index: Int) {}
+    func updateDelay(_ preset: LatencyPreset) {}
+    func updateAuth(require: Bool, password: String, disconnectNow: Bool) {}
+}

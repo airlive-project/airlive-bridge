@@ -27,6 +27,14 @@ targets:
         NSBonjourServices:
           - _airlive._tcp
           - _ndi._tcp
+          # AirPlay Screen Mirroring receiver advertises as an Apple TV.
+          - _airplay._tcp
+          - _raop._tcp
+    # System frameworks for the AirPlay receiver's VideoToolbox decode path.
+    dependencies:
+      - sdk: VideoToolbox.framework
+      - sdk: CoreMedia.framework
+      - sdk: CoreVideo.framework
     settings:
       base:
         PRODUCT_NAME: Airlive Bridge
@@ -39,6 +47,21 @@ targets:
         # for unsigned debug builds, which pass CODE_SIGNING_ALLOWED=NO):
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_ENTITLEMENTS: AirliveBridge.entitlements
+        # --- AirPlay receiver (Sources/AirPlay + vendored UxPlay static libs) ---
+        # Build the libs first: scripts/build-airplay-lib.sh (brew cmake openssl@3 libplist).
+        CLANG_CXX_LANGUAGE_STANDARD: "gnu++20"
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/AirliveBridge-Bridging-Header.h
+        HEADER_SEARCH_PATHS:
+          - $(SRCROOT)/Vendor/airplay-lib/include
+          - /opt/homebrew/opt/openssl@3/include
+          - /opt/homebrew/opt/libplist/include
+        OTHER_LDFLAGS:
+          - $(SRCROOT)/Vendor/airplay-lib/lib/libairplay.a
+          - $(SRCROOT)/Vendor/airplay-lib/lib/libplayfair.a
+          - $(SRCROOT)/Vendor/airplay-lib/lib/libdnssd.a
+          - $(SRCROOT)/Vendor/airplay-lib/lib/libllhttp.a
+          - /opt/homebrew/opt/openssl@3/lib/libcrypto.a
+          - /opt/homebrew/opt/libplist/lib/libplist-2.0.a
 
 # Dependencies added per phase, not up front:
 #   - HaishinKit (RTMP/SRT output) — phase 3

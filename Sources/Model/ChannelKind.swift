@@ -46,8 +46,7 @@ enum ChannelKind: String, CaseIterable, Identifiable {
         }
     }
 
-    /// AirPlay's receiver backend (UxPlay) isn't wired yet — gate it off so the menu
-    /// shows the option but can't create a non-functional channel.  HDMI/USB capture
-    /// is plain AVFoundation — implemented.
-    var isImplemented: Bool { self != .airplay }
+    /// All source kinds are implemented: airlive (ARLV), capture (AVFoundation UVC),
+    /// airplay (vendored UxPlay receiver).
+    var isImplemented: Bool { true }
 }

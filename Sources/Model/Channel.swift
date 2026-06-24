@@ -144,7 +144,9 @@ final class BridgeChannel: ObservableObject, Identifiable {
             switch kind {
             case .capture:
                 receiver = CaptureDeviceReceiver(channel: self, deviceID: captureDeviceID)
-            case .airlive, .airplay:   // .airplay UI-gated until its backend lands
+            case .airplay:
+                receiver = AirPlayReceiver(channel: self, name: name)   // advertises as this Apple-TV name
+            case .airlive:
                 receiver = BridgeChannelReceiver(channel: self, order: order)
             }
         }

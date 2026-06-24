@@ -63,10 +63,11 @@ struct ChannelsRail: View {
                 Label("Airlive Camera", systemImage: "camera")
             }
 
-            Button {} label: {
-                Label("Screen Mirroring — soon", systemImage: "rectangle.on.rectangle")
+            Button {
+                model.addChannel(kind: .airplay)
+            } label: {
+                Label("Screen Mirroring", systemImage: "rectangle.on.rectangle")
             }
-            .disabled(true)
 
             let devices = CaptureDevices.discover()
             if !devices.isEmpty {
