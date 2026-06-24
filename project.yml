@@ -74,6 +74,16 @@ targets:
           - /opt/homebrew/opt/openssl@3/lib/libcrypto.a
           - /opt/homebrew/opt/libplist/lib/libplist-2.0.a
 
+schemes:
+  AirliveBridge:
+    build:
+      targets:
+        AirliveBridge: all
+    run:
+      config: Debug
+    archive:
+      config: Release
+
 # Dependencies added per phase, not up front:
 #   - HaishinKit (RTMP/SRT output) — phase 3
 #   - NDI SDK (xcframework / system lib) — phase 2
