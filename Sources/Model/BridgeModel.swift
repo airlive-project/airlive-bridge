@@ -110,11 +110,12 @@ final class BridgeModel: ObservableObject {
         }
     }
 
-    /// Add an EXTRA program output (from "+").  Starts immediately; the tap is rewired.
+    /// Add an EXTRA program output (from "+").  Created OFF — a fresh output must never
+    /// auto-publish; the operator flips the toggle when ready.  The program tap is still
+    /// wired here so toggling it on later starts streaming immediately.
     func addProgramOutput(_ output: VideoOutput) {
         configureOutput(output)
         programOutputs.append(output)
-        output.start()
         routeProgram()
     }
     func removeProgramOutput(_ output: VideoOutput) {
