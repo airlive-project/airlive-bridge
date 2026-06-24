@@ -274,6 +274,13 @@ final class BridgeModel: ObservableObject {
         pushChannelOrder()
     }
 
+    /// Reorder the program outputs (drag-reorder in the Outputs rail).  Order is
+    /// purely cosmetic — it doesn't change which channel is on program — so a plain
+    /// @Published move (which re-renders the list) is all that's needed.
+    func moveProgramOutput(from source: IndexSet, to destination: Int) {
+        programOutputs.move(fromOffsets: source, toOffset: destination)
+    }
+
     /// Publish each channel's position (Bonjour TXT `ord`) so the iPhone lists
     /// channels in the operator's Bridge order — names stay free to rename.
     private func pushChannelOrder() {

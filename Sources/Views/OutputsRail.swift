@@ -24,6 +24,9 @@ import AppKit   // NSPasteboard — copy the RTSP URL
 
 struct OutputsRail: View {
     @ObservedObject var model: BridgeModel
+    /// Which card is highlighted (blue stroke).  Pure UI selection — outputs aren't
+    /// "selected" for any behaviour, it's just a grab/focus affordance.
+    @State private var selectedOutputID: UUID?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -92,16 +95,24 @@ struct OutputsRail: View {
         if model.programOutputs.isEmpty {
             chooser
         } else {
-            ScrollView {
-                VStack(spacing: Spacing.md) {
-                    ForEach(model.programOutputs, id: \.id) { output in
-                        OutputCard(model: model, output: output)
-                    }
+            // A List (not a ScrollView) so cards DRAG-REORDER via `.onMove` — grab a
+            // card and the rest shift to make room, then it drops in. Same idiom as
+            // the channel list. Plain + clear rows keep the custom rail look.
+            List {
+                ForEach(model.programOutputs, id: \.id) { output in
+                    OutputCard(model: model,
+                               output: output,
+                               selected: output.id == selectedOutputID,
+                               onSelect: { selectedOutputID = output.id })
+                        .listRowInsets(EdgeInsets(top: Spacing.xs, leading: Spacing.lg,
+                                                  bottom: Spacing.xs, trailing: Spacing.lg))
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
                 }
-                .padding(.horizontal, Spacing.lg)
-                .padding(.top, Spacing.sm)
-                .padding(.bottom, Spacing.lg)
+                .onMove { from, to in model.moveProgramOutput(from: from, to: to) }
             }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
         }
     }
 
@@ -227,6 +238,8 @@ private struct SoonPill: View {
 private struct OutputCard: View {
     @ObservedObject var model: BridgeModel
     let output: VideoOutput
+    let selected: Bool
+    let onSelect: () -> Void
 
     @State private var draftLabel: String = ""
     @State private var draftConfig: String = ""
@@ -242,6 +255,15 @@ private struct OutputCard: View {
                 secondRow     // SRT destination / RTSP URL — only where it carries info
             }
         }
+        // Blue stroke when this card is grabbed / selected (over the card's own
+        // neutral border).  The whole card is the select target; the inner controls
+        // (name field, toggle, trash) still take their own taps first.
+        .overlay(
+            RoundedRectangle(cornerRadius: Radius.panel, style: .continuous)
+                .stroke(selected ? Theme.accentBlue : Color.clear, lineWidth: 1.5)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture { onSelect() }
         .onAppear { draftLabel = output.label; draftConfig = output.config }
         // Removing a LIVE output cuts the stream — confirm first (an idle one deletes
         // straight away).
