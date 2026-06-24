@@ -43,7 +43,7 @@ struct ChannelsRail: View {
             Spacer()
             addButton
         }
-        .padding(.horizontal, Spacing.lg)
+        .padding(.horizontal, Spacing.sm)
         .padding(.top, Spacing.md)
         .padding(.bottom, Spacing.sm)
     }
@@ -105,7 +105,7 @@ struct ChannelsRail: View {
             // card == gap between cards == Spacing.sm, side margins == Spacing.lg, same
             // as the header.  Reorder via the ▲/▼ arrows (order drives multiview + shortcuts).
             ScrollView {
-                VStack(spacing: Spacing.sm) {
+                VStack(spacing: 0) {
                     ForEach(Array(model.channels.enumerated()), id: \.element.id) { pair in
                         let idx = pair.offset
                         let channel = pair.element
@@ -113,6 +113,7 @@ struct ChannelsRail: View {
                             channel: channel,
                             index: idx + 1,                          // 1-based ordinal = list position
                             isProgram: channel.id == model.effectiveProgramID,
+                            isPreview: channel.id == model.previewID,
                             isFirst: idx == 0,
                             isLast: idx == model.channels.count - 1,
                             onSelect: { model.select(channel.id) },
@@ -125,8 +126,8 @@ struct ChannelsRail: View {
                         )
                     }
                 }
-                .padding(.horizontal, Spacing.lg)
-                .padding(.bottom, Spacing.lg)
+                .padding(.horizontal, Spacing.sm)
+                .padding(.bottom, Spacing.sm)
             }
         }
     }
@@ -162,7 +163,8 @@ struct ChannelsRail: View {
 private struct ChannelRow: View {
     @ObservedObject var channel: BridgeChannel
     let index: Int               // 1-based position = the displayed ordinal
-    let isProgram: Bool          // kept only for the delete-confirm wording
+    let isProgram: Bool          // on air → red tally number (+ delete-confirm wording)
+    let isPreview: Bool          // staged → green tally number
     let isFirst: Bool
     let isLast: Bool
     let onSelect: () -> Void
@@ -174,7 +176,7 @@ private struct ChannelRow: View {
     @State private var confirmingDelete = false
 
     var body: some View {
-        Card(padding: Spacing.sm) {
+        Card(corner: 0, padding: Spacing.sm) {
             VStack(alignment: .leading, spacing: Spacing.sm) {
                 topRow        // source kind · signal status · delete
                 bottomRow     // ordinal · arrows · name
@@ -224,17 +226,20 @@ private struct ChannelRow: View {
         }
     }
 
-    /// Faint, semi-transparent position number (top-left) — renumbers on reorder.
+    /// Position number that doubles as a TALLY light: red on PROGRAM (on air), green
+    /// on PREVIEW (staged), neutral otherwise.  Renumbers on reorder.
     private var ordinalBadge: some View {
-        Text("\(index)")
+        let fill: Color = isProgram ? Theme.accentRed
+                        : (isPreview ? Color(hex: 0x37CF83) : Theme.bgSelected.opacity(0.6))
+        let fg: Color = (isProgram || isPreview) ? .white : Theme.textSecondary
+        return Text("\(index)")
             .font(.system(size: 11, weight: .bold).monospacedDigit())
-            .foregroundColor(Theme.textSecondary)
+            .foregroundColor(fg)
             .frame(minWidth: 18, alignment: .center)   // sized for "00" — every ordinal equal width
             .padding(.horizontal, Spacing.xs)
             .padding(.vertical, 2)
             .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(Theme.bgSelected.opacity(0.6))
+                RoundedRectangle(cornerRadius: 5, style: .continuous).fill(fill)
             )
     }
 

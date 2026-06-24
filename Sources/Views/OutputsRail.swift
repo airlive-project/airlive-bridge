@@ -82,7 +82,7 @@ struct OutputsRail: View {
             .fixedSize()
             .help("Add a program output")
         }
-        .padding(.horizontal, Spacing.lg)
+        .padding(.horizontal, Spacing.sm)
         .padding(.top, Spacing.md)
         .padding(.bottom, Spacing.sm)
     }
@@ -96,7 +96,7 @@ struct OutputsRail: View {
             // first card == the gap between cards == Spacing.sm, and the side margins ==
             // Spacing.lg, matching the header.  Reorder is via the ▲/▼ arrows.
             ScrollView {
-                VStack(spacing: Spacing.sm) {
+                VStack(spacing: 0) {
                     ForEach(Array(model.programOutputs.enumerated()), id: \.element.id) { pair in
                         let idx = pair.offset
                         let output = pair.element
@@ -108,8 +108,8 @@ struct OutputsRail: View {
                                    onMoveDown: { model.moveProgramOutput(from: IndexSet(integer: idx), to: idx + 2) })
                     }
                 }
-                .padding(.horizontal, Spacing.lg)
-                .padding(.bottom, Spacing.lg)
+                .padding(.horizontal, Spacing.sm)
+                .padding(.bottom, Spacing.sm)
             }
         }
     }
@@ -128,7 +128,7 @@ struct OutputsRail: View {
                     }
                 }
             }
-            .padding(.horizontal, Spacing.lg)
+            .padding(.horizontal, Spacing.sm)
             .padding(.top, Spacing.sm)
             .padding(.bottom, Spacing.lg)
         }
@@ -248,7 +248,7 @@ private struct OutputCard: View {
 
     var body: some View {
         _ = refresh // re-evaluate after a start/stop/rename bump
-        return Card(padding: Spacing.sm) {
+        return Card(corner: 0, padding: Spacing.sm) {
             VStack(alignment: .leading, spacing: Spacing.sm) {
                 controlRow    // badge · arrows · on/off
                 nameRow       // name field + delete (right of it)
