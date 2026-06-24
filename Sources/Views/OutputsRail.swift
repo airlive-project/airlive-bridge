@@ -252,8 +252,9 @@ private struct OutputCard: View {
         _ = refresh // re-evaluate after a start/stop/rename bump
         return Card(padding: Spacing.sm) {
             VStack(alignment: .leading, spacing: Spacing.sm) {
-                topRow        // badge · name · trash · on-off — one line
-                secondRow     // only SRT (destination) / RTSP (URL) add a line
+                controlRow    // badge (left) · delete + on/off (right)
+                nameField     // full-width source name
+                secondRow     // SRT destination / RTSP URL — only where it carries info
             }
         }
         .onAppear { draftLabel = output.label; draftConfig = output.config }
@@ -268,11 +269,13 @@ private struct OutputCard: View {
         }
     }
 
-    // ONE line: live-aware kind badge · inline name · trash · on/off switch.
-    private var topRow: some View {
+    // TOP line: kind badge on the left, controls (delete + on/off) on the right.
+    // The name moved to its own full-width row below — inline it was cramped (a wide
+    // badge like "OBS AIRLIVE BRIDGE" squeezed the field out).
+    private var controlRow: some View {
         HStack(spacing: Spacing.sm) {
             kindBadge
-            nameField
+            Spacer(minLength: Spacing.sm)
             trashButton
             onOffToggle
         }
