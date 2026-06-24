@@ -47,4 +47,10 @@ final class AirPlayReceiver: ChannelReceiver {
     func updateOrder(_ index: Int) {}
     func updateDelay(_ preset: LatencyPreset) {}
     func updateAuth(require: Bool, password: String, disconnectNow: Bool) {}
+
+    // Safety net: if this receiver is ever released without an explicit stop()
+    // (removeChannel does call stop(), but a future path might not), tear the engine
+    // down so its httpd / Bonjour / decoder threads don't outlive us and keep
+    // advertising a zombie Apple TV.
+    deinit { engine.stop() }
 }

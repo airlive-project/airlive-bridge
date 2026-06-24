@@ -81,24 +81,6 @@ struct VideoPacket
 #define LOCAL 1
 #define OCTETS 6
 
-std::string random_mac()
-{
-  char str[3];
-  int octet = rand() % 64;
-  octet = (octet << 1) + LOCAL;
-  octet = (octet << 1) + MULTICAST;
-  snprintf(str, 3, "%02x", octet);
-  std::string mac_address(str);
-  for (int i = 1; i < OCTETS; i++)
-  {
-    mac_address = mac_address + ":";
-    octet = rand() % 256;
-    snprintf(str, 3, "%02x", octet);
-    mac_address = mac_address + str;
-  }
-  return mac_address;
-}
-
 // Per-channel device id: derive a stable, unique, locally-administered unicast MAC
 // from the channel name. Each AirPlay channel MUST have a distinct MAC or the iPhone
 // dedupes them (the system MAC is shared across channels → only one Apple TV shows up).
@@ -118,42 +100,6 @@ std::string mac_from_name(const std::string &name)
     mac += str;
     if (i < OCTETS - 1) mac += ":";
   }
-  return mac;
-}
-
-std::string find_mac()
-{
-  std::string mac;
-  struct ifaddrs *ifap = nullptr;
-  if (getifaddrs(&ifap) != 0)
-    return mac;
-  for (struct ifaddrs *p = ifap; p != nullptr; p = p->ifa_next)
-  {
-    if (p->ifa_addr == nullptr || p->ifa_addr->sa_family != AF_LINK)
-      continue;
-    unsigned char *ptr = (unsigned char *)LLADDR((struct sockaddr_dl *)p->ifa_addr);
-    int non_null = 0;
-    unsigned char octet[6];
-    for (int i = 0; i < 6; i++)
-    {
-      octet[i] = ptr[i];
-      if (octet[i] != 0)
-        non_null++;
-    }
-    if (non_null)
-    {
-      char str[3];
-      for (int i = 0; i < 6; i++)
-      {
-        snprintf(str, sizeof(str), "%02x", octet[i]);
-        mac += str;
-        if (i < 5)
-          mac += ":";
-      }
-      break;
-    }
-  }
-  freeifaddrs(ifap);
   return mac;
 }
 
