@@ -85,6 +85,12 @@ private struct ChannelDetail: View {
 
     // MARK: Preview
 
+    /// Hard ceiling on the preview viewport height.  The detail stack lives in a
+    /// vertical ScrollView, which offers UNBOUNDED height — without this cap a tall
+    /// (portrait) or oddly-shaped source makes `height = width / aspect` balloon and
+    /// pushes the layout off-screen.  Width still fills; the video aspect-fits inside.
+    private let maxPreviewHeight: CGFloat = 460
+
     private var previewSection: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
             HStack {
@@ -125,12 +131,12 @@ private struct ChannelDetail: View {
             }
             tallyBadge
         }
-        // Adapt to the live source's real shape: AirPlay sends a portrait iPhone
-        // screen, Airlive a landscape frame (and an Option-B vertical stream reports
-        // a 90/270 hint).  `displayAspect` follows the buffer dims so the pane fits
-        // the image instead of floating it inside a fixed 16:9 box.
+        // Keep the live source's real shape (AirPlay portrait / Airlive landscape /
+        // Option-B 9:16) but BOUND it: fill the width, cap the height at
+        // `maxPreviewHeight` so the viewport can never overflow the scrolling stack.
+        // `.fit` letterboxes within that box — never stretched, never off-screen.
         .aspectRatio(CGFloat(channel.displayAspect), contentMode: .fit)
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: maxPreviewHeight)
         .background(Color.black)
         .clipShape(RoundedRectangle(cornerRadius: Radius.panel, style: .continuous))
         .overlay(
