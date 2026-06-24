@@ -68,6 +68,19 @@ them) · all 4 orientations · NDI + OBS simultaneously, with and without passwo
 
 ## Backlog (post-MVP)
 
+- **Fixed-delay playout for AirPlay channels (multicam genlock).** Today the AirPlay
+  path is "show ASAP" (bounded-queue drop-oldest): low but **variable** latency that
+  floats with network jitter — fine solo, but AirPlay cams drift against ARLV cams in a
+  multicam mix. Add the SAME playout scheme the ARLV channel already uses
+  (`BridgeChannelReceiver`): stamp each decoded AirPlay frame with a deadline
+  (`arrival + bufferSeconds`), hold in a **capped, locked** ring, release on the Mac
+  clock; re-anchor on under/overrun. Expose `LatencyPreset` (Off / Low / Normal) in the
+  AirPlay channel UI like ARLV so all sources share one fixed offset. Additive, isolated
+  stage (doesn't touch the UxPlay/decode core) → low risk; worst case is extra latency,
+  not a crash. Caveat: AirPlay's inherent ~150–250 ms mirror latency is a floor — fixed
+  delay sits *on top* to pin jitter, not reduce the floor. Build after the skeleton is
+  in place; on-device verify before calling done.
+
 - **Multiview + program routing (switcher-lite).** Show all channels in a
   multiview; choose what goes to air; route a *selected* camera to a *selected*
   output seamlessly — don't blindly publish every signal, pick which camera goes
