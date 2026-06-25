@@ -70,7 +70,7 @@ struct MultiviewGrid: View {
                 ForEach(lensLadder(preview), id: \.self) { label in
                     Button { preview.send(.setLens(label)) } label: {
                         Text(label)
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(.system(size: 11, weight: .medium))
                             .frame(height: 26)
                             .padding(.horizontal, Spacing.sm)
                     }
@@ -96,10 +96,9 @@ struct MultiviewGrid: View {
     private var cutButton: some View {
         Button { model.take() } label: {
             Text("CUT  (Space)")
-                .font(.system(size: 13, weight: .bold))
-                .foregroundColor(.white)
-                .frame(height: 30)
-                .padding(.horizontal, Spacing.xl)
+                .font(.system(size: 11, weight: .medium))
+                .frame(height: 26)
+                .padding(.horizontal, Spacing.sm)
         }
         .bridgeButton()
         .disabled(model.previewChannel() == nil)
