@@ -231,34 +231,38 @@ private struct ChannelRow: View {
     /// it stays auxiliary and doesn't grab attention.  Renumbers on reorder.
     private var ordinalBadge: some View {
         let digit: Color = isProgram ? Theme.accentRed
-                         : (isPreview ? Color(hex: 0x37CF83) : Theme.textSecondary)
+                         : (isPreview ? Theme.previewGreen : Theme.textSecondary)
         return Text("\(index)")
-            .font(.system(size: 11, weight: .bold).monospacedDigit())
+            .font(.system(size: 12, weight: .bold).monospacedDigit())
             .foregroundColor(digit)
-            .frame(minWidth: 18, alignment: .center)   // sized for "00" — every ordinal equal width
-            .padding(.horizontal, Spacing.xs)
-            .padding(.vertical, 2)
+            .frame(minWidth: ControlMetrics.pillHeight, alignment: .center)   // ≥ square, fits "00"
+            .frame(height: ControlMetrics.pillHeight)                         // same height as every chip
             .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(Theme.bgSelected.opacity(0.6))   // always a dark chip
+                RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+                    .fill(Theme.bgSelected.opacity(0.6))                      // quiet dark chip
             )
     }
 
-    /// ▲/▼ reorder-by-one (shown on hover; the whole row also drag-reorders).
+    /// ▲/▼ reorder-by-one — one chip the same height as the number / name / trash.
     private var reorderArrows: some View {
-        HStack(spacing: 1) {
+        HStack(spacing: 0) {
             arrowButton("chevron.up",   enabled: !isFirst, action: onMoveUp)
             arrowButton("chevron.down", enabled: !isLast,  action: onMoveDown)
         }
+        .frame(height: ControlMetrics.pillHeight)
+        .background(
+            RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+                .fill(Theme.bgSelected.opacity(0.6))
+        )
     }
 
     private func arrowButton(_ system: String, enabled: Bool,
                              action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: system)
-                .font(.system(size: 9, weight: .bold))
+                .font(.system(size: 10, weight: .bold))
                 .foregroundColor(enabled ? Theme.textSecondary : Theme.textFaint.opacity(0.4))
-                .frame(width: 16, height: 16)
+                .frame(width: 22, height: ControlMetrics.pillHeight)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -271,9 +275,9 @@ private struct ChannelRow: View {
     private var statusLine: some View {
         let connected = channel.isConnected
         return Text(connected ? "Connected" : "Disconnected")
-            .font(.system(size: 10, weight: .medium))
+            .font(.system(size: 11, weight: .medium))
             .lineLimit(1)
-            .foregroundColor(connected ? Color(hex: 0x37CF83) : Theme.textFaint)
+            .foregroundColor(connected ? Theme.previewGreen : Theme.textFaint)
     }
 
     // MARK: Name (always-editable, like the Outputs card)
@@ -284,14 +288,14 @@ private struct ChannelRow: View {
             .font(.system(size: 13, weight: .semibold))
             .foregroundColor(Theme.textPrimary)
             .padding(.horizontal, Spacing.sm)
-            .frame(height: 28)
+            .frame(height: ControlMetrics.pillHeight)
             .frame(maxWidth: .infinity)
             .background(
-                RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
                     .fill(Theme.bgApp)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+                RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
                     .stroke(Theme.stroke, lineWidth: 1)
             )
             .onSubmit { commitRename() }
@@ -302,9 +306,9 @@ private struct ChannelRow: View {
             Image(systemName: "trash")
                 .font(.system(size: 12))
                 .foregroundColor(Theme.textFaint)
-                .frame(width: 32, height: 28)
+                .frame(width: 36, height: ControlMetrics.pillHeight)
                 .background(
-                    RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+                    RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
                         .fill(Theme.bgSelected.opacity(0.6))
                 )
                 .contentShape(Rectangle())
