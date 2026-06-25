@@ -26,16 +26,14 @@ struct MultiviewGrid: View {
         ScrollView {
             VStack(spacing: Spacing.md) {
                 topBar
-                // True 1px grid (vMix-style): the tiles sit on a stroke-coloured backing
-                // with a 1px GAP between them, so every seam is exactly ONE 1px line —
-                // never doubled (no two borders stacking), never missing (no z-order
-                // cover-up).  Tally tiles (PVW green / PGM red / staged) draw their accent
-                // border at the tile edge; neutral tiles have none (the gap separates them).
-                VStack(spacing: 1) {
+                // Tiles touch (no gaps).  ONLY the active tiles are framed — PVW green,
+                // PGM red, staged/on-air thumbs — so there's no neutral grey doubling and
+                // no gutters.  An accent edge meeting a neighbour shows that single accent
+                // line (the neighbour draws nothing); PVW|PGM meeting shows green|red.
+                VStack(spacing: 0) {
                     bigRow
                     thumbnails
                 }
-                .background(Theme.stroke)
                 cameraControl
             }
             .padding(Spacing.lg)
@@ -141,7 +139,7 @@ struct MultiviewGrid: View {
     // Studio colours: PREVIEW = broadcast green, PROGRAM = broadcast red.
 
     private var bigRow: some View {
-        HStack(spacing: 1) {   // 1px gap = the grid line between PVW and PGM
+        HStack(spacing: 0) {   // panes touch; green PVW edge meets red PGM edge
             BigPane(title: "PREVIEW", accent: Theme.previewGreen, channel: model.previewChannel())
             BigPane(title: "PROGRAM", accent: Theme.accentRed, channel: model.programChannel())
         }
@@ -163,8 +161,8 @@ struct MultiviewGrid: View {
     private var thumbnails: some View {
         let count = model.channels.count
         let capacity = max(1, (count + 3) / 4) * 4   // whole rows of 4
-        let columns = Array(repeating: GridItem(.flexible(), spacing: 1), count: 4)
-        return LazyVGrid(columns: columns, spacing: 1) {
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 0), count: 4)
+        return LazyVGrid(columns: columns, spacing: 0) {
             ForEach(0 ..< capacity, id: \.self) { index in
                 if index < count {
                     let channel = model.channels[index]
@@ -329,23 +327,22 @@ struct MultiviewWall: View {
     private var program: BridgeChannel? { model.channels.first { $0.id == model.programID } }
 
     var body: some View {
-        VStack(spacing: 1) {
-            HStack(spacing: 1) {
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
                 BigPane(title: "PREVIEW", accent: Theme.previewGreen, channel: preview)
                 BigPane(title: "PROGRAM", accent: Theme.accentRed, channel: program)
             }
             thumbnails
         }
-        .background(Theme.stroke)              // 1px grid lines show through the gaps
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black)               // window backing behind the grid
+        .background(Color.black)
     }
 
     private var thumbnails: some View {
         let count = model.channels.count
         let capacity = max(1, (count + 3) / 4) * 4
-        let columns = Array(repeating: GridItem(.flexible(), spacing: 1), count: 4)
-        return LazyVGrid(columns: columns, spacing: 1) {
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 0), count: 4)
+        return LazyVGrid(columns: columns, spacing: 0) {
             ForEach(0 ..< capacity, id: \.self) { index in
                 if index < count {
                     let channel = model.channels[index]
