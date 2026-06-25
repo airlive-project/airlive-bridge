@@ -26,15 +26,13 @@ struct MultiviewGrid: View {
         ScrollView {
             VStack(spacing: Spacing.md) {
                 topBar
-                // TRUE 1px grid: cells are opaque black on a stroke-coloured backdrop,
-                // separated by 1px gaps — every seam is exactly 1px (no doubled inset
-                // borders).  Accent (PVW/PGM/tally) borders are drawn ON the cells.
-                VStack(spacing: 1) {
+                // Simple 1px borders per cell (Studio-style), cells touching.  The accent
+                // (green PVW / red PGM / tally) border IS the cell boundary — it reaches
+                // the edge, no inset grid line eating it.
+                VStack(spacing: 0) {
                     bigRow
                     thumbnails
                 }
-                .background(Theme.stroke)
-                .overlay(Rectangle().strokeBorder(Theme.stroke, lineWidth: 1))   // outer 1px frame
                 cameraControl
             }
             .padding(Spacing.lg)
@@ -162,8 +160,8 @@ struct MultiviewGrid: View {
     private var thumbnails: some View {
         let count = model.channels.count
         let capacity = max(1, (count + 3) / 4) * 4   // whole rows of 4
-        let columns = Array(repeating: GridItem(.flexible(), spacing: 1), count: 4)
-        return LazyVGrid(columns: columns, spacing: 1) {
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 0), count: 4)
+        return LazyVGrid(columns: columns, spacing: 0) {
             ForEach(0 ..< capacity, id: \.self) { index in
                 if index < count {
                     let channel = model.channels[index]
@@ -179,11 +177,11 @@ struct MultiviewGrid: View {
         }
     }
 
-    // Empty slot — black; the 1px grid gap is its separator (no own border).
     private var emptyThumb: some View {
         Rectangle()
             .fill(Color.black)
             .aspectRatio(16.0 / 9.0, contentMode: .fit)
+            .overlay(Rectangle().strokeBorder(Theme.stroke, lineWidth: 1))
             .overlay(
                 Image(systemName: "plus").font(.system(size: 13))
                     .foregroundColor(Theme.textFaint.opacity(0.3))
@@ -296,22 +294,19 @@ private struct ThumbCell: View {
             .aspectRatio(16.0 / 9.0, contentMode: .fit)
             .background(Color.black)
             .clipped()
-            // Neutral cells have NO border — the 1px grid gap is their separator.  Only
-            // tally cells draw a 1px accent (green = staged, red = on air) on top.
-            .overlay(accentBorder)
+            // 1px border per cell: green = staged, red = on air, neutral grey otherwise.
+            // The accent border IS the cell boundary (reaches the edge).
+            .overlay(Rectangle().strokeBorder(borderColor, lineWidth: 1))
             .contentShape(Rectangle())
             .onTapGesture(count: 2) { onTake() }
             .onTapGesture { onStage() }
             .help(isProgram ? "On air" : "Click to stage in Preview · double-click to cut to Program")
     }
 
-    @ViewBuilder
-    private var accentBorder: some View {
-        if isProgram {
-            Rectangle().strokeBorder(Theme.accentRed, lineWidth: 1)
-        } else if isPreview {
-            Rectangle().strokeBorder(Theme.previewGreen, lineWidth: 1)
-        }
+    private var borderColor: Color {
+        if isProgram { return Theme.accentRed }
+        if isPreview { return Theme.previewGreen }
+        return Theme.stroke
     }
 }
 
@@ -328,22 +323,22 @@ struct MultiviewWall: View {
     private var program: BridgeChannel? { model.channels.first { $0.id == model.programID } }
 
     var body: some View {
-        VStack(spacing: 1) {
+        VStack(spacing: 0) {
             HStack(spacing: 0) {
                 BigPane(title: "PREVIEW", accent: Theme.previewGreen, channel: preview)
                 BigPane(title: "PROGRAM", accent: Theme.accentRed, channel: program)
             }
             thumbnails
         }
-        .background(Theme.stroke)   // 1px gaps reveal this = the grid lines
+        .background(Color.black)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var thumbnails: some View {
         let count = model.channels.count
         let capacity = max(1, (count + 3) / 4) * 4
-        let columns = Array(repeating: GridItem(.flexible(), spacing: 1), count: 4)
-        return LazyVGrid(columns: columns, spacing: 1) {
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 0), count: 4)
+        return LazyVGrid(columns: columns, spacing: 0) {
             ForEach(0 ..< capacity, id: \.self) { index in
                 if index < count {
                     let channel = model.channels[index]
@@ -354,6 +349,7 @@ struct MultiviewWall: View {
                               onTake: { model.stage(channel.id); model.take() })
                 } else {
                     Rectangle().fill(Color.black).aspectRatio(16.0 / 9.0, contentMode: .fit)
+                        .overlay(Rectangle().strokeBorder(Theme.stroke, lineWidth: 1))
                 }
             }
         }
