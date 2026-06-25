@@ -26,14 +26,15 @@ struct MultiviewGrid: View {
         ScrollView {
             VStack(spacing: Spacing.md) {
                 topBar
-                // Tiles touch (no gaps), every tile carries a 1px border so the grid is
-                // always visible: neutral = subtle grey, tally = green (PVW/staged) / red
-                // (PGM/on-air).  The accent border IS the cell boundary so it reaches the
-                // edge; PVW|PGM shows green meeting red, as on any broadcast multiview.
+                // One unified grid: every tile shares the `multiviewTile` rule (1px neutral
+                // seam, 2px accent when selected), so seams are single 1px lines and the
+                // selected PVW/PGM/thumbs read as crisp 2px green/red.  The container frame
+                // closes the outer bottom/right edge.
                 VStack(spacing: 0) {
                     bigRow
                     thumbnails
                 }
+                .overlay(Rectangle().strokeBorder(Theme.stroke, lineWidth: 1))
                 cameraControl
             }
             .padding(Spacing.lg)
@@ -182,11 +183,31 @@ struct MultiviewGrid: View {
         Rectangle()
             .fill(Color.black)
             .aspectRatio(16.0 / 9.0, contentMode: .fit)
-            .overlay(Rectangle().strokeBorder(Theme.stroke, lineWidth: 1))
+            .multiviewTile(accent: nil)
             .overlay(
                 Image(systemName: "plus").font(.system(size: 13))
                     .foregroundColor(Theme.textFaint.opacity(0.3))
             )
+    }
+}
+
+// MARK: - Unified multiview cell border
+//
+// ONE rule for every tile (big panes, thumbnails, empties) so the whole grid behaves as
+// a single object instead of separate blocks whose edges double at the seams:
+//   • a 1px NEUTRAL line on the TOP and LEADING edges only — so two touching tiles SHARE
+//     one line (each internal seam is drawn exactly once, by the tile below / to the
+//     right).  Never 2px, never missing.
+//   • a SELECTED tile adds a 2px accent frame on top (green = preview/staged, red =
+//     program/on-air), which covers the neutral line on its edges.
+// The grid container draws the outer bottom/right frame the per-tile top/leading edges
+// don't reach.
+private extension View {
+    func multiviewTile(accent: Color?) -> some View {
+        self
+            .overlay(alignment: .top)     { Theme.stroke.frame(height: 1) }
+            .overlay(alignment: .leading) { Theme.stroke.frame(width: 1) }
+            .overlay { if let accent { Rectangle().strokeBorder(accent, lineWidth: 2) } }
     }
 }
 
@@ -213,8 +234,8 @@ private struct BigPane: View {
         .frame(maxWidth: .infinity)
         .background(Color.black)
         .clipped()
-        // strokeBorder draws INSIDE the cell so touching tiles never double up.
-        .overlay(Rectangle().strokeBorder(accent, lineWidth: 1))
+        // Always selected (PVW green / PGM red) → 2px accent via the shared tile rule.
+        .multiviewTile(accent: accent)
         // White label (the coloured border already signals preview/program).
         .overlay(alignment: .bottom) { bottomChip(title) }
     }
@@ -295,19 +316,18 @@ private struct ThumbCell: View {
             .aspectRatio(16.0 / 9.0, contentMode: .fit)
             .background(Color.black)
             .clipped()
-            // 1px border per cell: green = staged, red = on air, neutral grey otherwise —
-            // so every tile is separated.  The accent border IS the cell boundary.
-            .overlay(Rectangle().strokeBorder(borderColor, lineWidth: 1))
+            // Shared tile rule: 1px neutral seam, +2px accent when staged (green) / on air (red).
+            .multiviewTile(accent: tileAccent)
             .contentShape(Rectangle())
             .onTapGesture(count: 2) { onTake() }
             .onTapGesture { onStage() }
             .help(isProgram ? "On air" : "Click to stage in Preview · double-click to cut to Program")
     }
 
-    private var borderColor: Color {
+    private var tileAccent: Color? {
         if isProgram { return Theme.accentRed }
         if isPreview { return Theme.previewGreen }
-        return Theme.stroke
+        return nil
     }
 }
 
@@ -331,6 +351,7 @@ struct MultiviewWall: View {
             }
             thumbnails
         }
+        .overlay(Rectangle().strokeBorder(Theme.stroke, lineWidth: 1))   // outer frame
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black)
     }
@@ -350,7 +371,7 @@ struct MultiviewWall: View {
                               onTake: { model.stage(channel.id); model.take() })
                 } else {
                     Rectangle().fill(Color.black).aspectRatio(16.0 / 9.0, contentMode: .fit)
-                        .overlay(Rectangle().strokeBorder(Theme.stroke, lineWidth: 1))
+                        .multiviewTile(accent: nil)
                 }
             }
         }
