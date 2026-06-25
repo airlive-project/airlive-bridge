@@ -120,30 +120,33 @@ private struct ChannelDetail: View {
     }
 
     private var previewPane: some View {
-        ZStack {
-            if channel.previewEnabled {
-                MirrorVideoView(channel: channel)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                if channel.latestFrame == nil {
-                    noSignalOverlay
+        // Video in an OVERLAY over a sized black Rectangle — same robust pattern as the
+        // multiview LivePane (Studio's VideoRegion).  The overlay inherits the Rectangle's
+        // size so the hosted layer always fills; a bare ZStack would collapse to the
+        // NSView's tiny intrinsic size.
+        Rectangle()
+            .fill(Color.black)
+            .overlay {
+                ZStack {
+                    if channel.previewEnabled {
+                        MirrorVideoView(channel: channel)
+                        if channel.latestFrame == nil { noSignalOverlay }
+                    } else {
+                        hiddenPlaceholder
+                    }
+                    tallyBadge
                 }
-            } else {
-                hiddenPlaceholder
             }
-            tallyBadge
-        }
-        // Keep the live source's real shape (AirPlay portrait / Airlive landscape /
-        // Option-B 9:16) but BOUND it: fill the width, cap the height at
-        // `maxPreviewHeight` so the viewport can never overflow the scrolling stack.
-        // `.fit` letterboxes within that box — never stretched, never off-screen.
-        .aspectRatio(CGFloat(channel.displayAspect), contentMode: .fit)
-        .frame(maxWidth: .infinity, maxHeight: maxPreviewHeight)
-        .background(Color.black)
-        .clipShape(RoundedRectangle(cornerRadius: Radius.panel, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: Radius.panel, style: .continuous)
-                .stroke(tallyBorderColor, lineWidth: tallyBorderWidth)
-        )
+            // Keep the live source's real shape (AirPlay portrait / Airlive landscape /
+            // Option-B 9:16) but BOUND it: fill the width, cap the height at
+            // `maxPreviewHeight` so the viewport can never overflow the scrolling stack.
+            .aspectRatio(CGFloat(channel.displayAspect), contentMode: .fit)
+            .frame(maxWidth: .infinity, maxHeight: maxPreviewHeight)
+            .clipShape(RoundedRectangle(cornerRadius: Radius.panel, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: Radius.panel, style: .continuous)
+                    .stroke(tallyBorderColor, lineWidth: tallyBorderWidth)
+            )
     }
 
     private var noSignalOverlay: some View {
