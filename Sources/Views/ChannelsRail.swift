@@ -274,10 +274,10 @@ private struct ChannelRow: View {
     /// air is read from the center preview, not from this list.
     private var statusLine: some View {
         let connected = channel.isConnected
-        return Text(connected ? "Connected" : "Disconnected")
-            .font(.system(size: 11, weight: .medium))
-            .lineLimit(1)
+        return Image(systemName: connected ? "wifi" : "wifi.slash")
+            .font(.system(size: 13, weight: .medium))
             .foregroundColor(connected ? Theme.previewGreen : Theme.textFaint)
+            .help(connected ? "Connected" : "Disconnected")
     }
 
     // MARK: Name (always-editable, like the Outputs card)
