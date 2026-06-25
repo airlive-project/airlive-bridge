@@ -269,19 +269,24 @@ private struct LivePane: View {
     var showName: Bool = true
 
     var body: some View {
-        ZStack {
-            if channel.previewEnabled {
-                // MUST fill the tile — without this the representable collapses to its
-                // tiny intrinsic size and the video sticks to the top-left.  The layer is
-                // resizeAspect, so the frame fits inside at its own aspect (letterboxed).
-                MirrorVideoView(channel: channel)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                if channel.latestFrame == nil { offline }
-            } else {
-                offline
+        // Video lives in an OVERLAY over a SIZED black Rectangle — the proven Studio
+        // pattern (VideoRegion.swift).  The overlay inherits the Rectangle's full tile
+        // size, so the hosted video layer fills the tile.  A bare ZStack whose only child
+        // is the flexible video NSView collapses to that NSView's tiny intrinsic size,
+        // which is what stuck the picture in a small corner rectangle.
+        Rectangle()
+            .fill(Color.black)
+            .overlay {
+                ZStack {
+                    if channel.previewEnabled {
+                        MirrorVideoView(channel: channel)
+                        if channel.latestFrame == nil { offline }
+                    } else {
+                        offline
+                    }
+                }
             }
-        }
-        .overlay(alignment: .bottom) {
+            .overlay(alignment: .bottom) {
             if showName {
                 HStack(spacing: Spacing.xs) {
                     ConnectionDot(connected: channel.isConnected)
