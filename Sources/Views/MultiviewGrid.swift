@@ -26,13 +26,16 @@ struct MultiviewGrid: View {
         ScrollView {
             VStack(spacing: Spacing.md) {
                 topBar
-                // Simple 1px borders per cell (Studio-style), cells touching.  The accent
-                // (green PVW / red PGM / tally) border IS the cell boundary — it reaches
-                // the edge, no inset grid line eating it.
-                VStack(spacing: -1) {   // overlap by 1px so touching cell borders merge into a single 1px line
+                // True 1px grid (vMix-style): the tiles sit on a stroke-coloured backing
+                // with a 1px GAP between them, so every seam is exactly ONE 1px line —
+                // never doubled (no two borders stacking), never missing (no z-order
+                // cover-up).  Tally tiles (PVW green / PGM red / staged) draw their accent
+                // border at the tile edge; neutral tiles have none (the gap separates them).
+                VStack(spacing: 1) {
                     bigRow
                     thumbnails
                 }
+                .background(Theme.stroke)
                 cameraControl
             }
             .padding(Spacing.lg)
@@ -138,7 +141,7 @@ struct MultiviewGrid: View {
     // Studio colours: PREVIEW = broadcast green, PROGRAM = broadcast red.
 
     private var bigRow: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 1) {   // 1px gap = the grid line between PVW and PGM
             BigPane(title: "PREVIEW", accent: Theme.previewGreen, channel: model.previewChannel())
             BigPane(title: "PROGRAM", accent: Theme.accentRed, channel: model.programChannel())
         }
@@ -160,8 +163,8 @@ struct MultiviewGrid: View {
     private var thumbnails: some View {
         let count = model.channels.count
         let capacity = max(1, (count + 3) / 4) * 4   // whole rows of 4
-        let columns = Array(repeating: GridItem(.flexible(), spacing: 0), count: 4)
-        return LazyVGrid(columns: columns, spacing: 0) {
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 1), count: 4)
+        return LazyVGrid(columns: columns, spacing: 1) {
             ForEach(0 ..< capacity, id: \.self) { index in
                 if index < count {
                     let channel = model.channels[index]
@@ -181,7 +184,6 @@ struct MultiviewGrid: View {
         Rectangle()
             .fill(Color.black)
             .aspectRatio(16.0 / 9.0, contentMode: .fit)
-            .overlay(Rectangle().strokeBorder(Theme.stroke, lineWidth: 1))
             .overlay(
                 Image(systemName: "plus").font(.system(size: 13))
                     .foregroundColor(Theme.textFaint.opacity(0.3))
@@ -294,9 +296,13 @@ private struct ThumbCell: View {
             .aspectRatio(16.0 / 9.0, contentMode: .fit)
             .background(Color.black)
             .clipped()
-            // 1px border per cell: green = staged, red = on air, neutral grey otherwise.
-            // The accent border IS the cell boundary (reaches the edge).
-            .overlay(Rectangle().strokeBorder(borderColor, lineWidth: 1))
+            // Only tally tiles get a border (green = staged, red = on air); neutral tiles
+            // rely on the 1px grid gap.  The accent reaches the tile edge, no doubling.
+            .overlay {
+                if isProgram || isPreview {
+                    Rectangle().strokeBorder(borderColor, lineWidth: 1)
+                }
+            }
             .contentShape(Rectangle())
             .onTapGesture(count: 2) { onTake() }
             .onTapGesture { onStage() }
@@ -323,22 +329,23 @@ struct MultiviewWall: View {
     private var program: BridgeChannel? { model.channels.first { $0.id == model.programID } }
 
     var body: some View {
-        VStack(spacing: -1) {   // overlap by 1px so touching cell borders merge into a single 1px line
-            HStack(spacing: -1) {   // PVW|PGM borders merge to one 1px line
+        VStack(spacing: 1) {
+            HStack(spacing: 1) {
                 BigPane(title: "PREVIEW", accent: Theme.previewGreen, channel: preview)
                 BigPane(title: "PROGRAM", accent: Theme.accentRed, channel: program)
             }
             thumbnails
         }
-        .background(Color.black)
+        .background(Theme.stroke)              // 1px grid lines show through the gaps
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black)               // window backing behind the grid
     }
 
     private var thumbnails: some View {
         let count = model.channels.count
         let capacity = max(1, (count + 3) / 4) * 4
-        let columns = Array(repeating: GridItem(.flexible(), spacing: 0), count: 4)
-        return LazyVGrid(columns: columns, spacing: 0) {
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 1), count: 4)
+        return LazyVGrid(columns: columns, spacing: 1) {
             ForEach(0 ..< capacity, id: \.self) { index in
                 if index < count {
                     let channel = model.channels[index]
@@ -349,7 +356,6 @@ struct MultiviewWall: View {
                               onTake: { model.stage(channel.id); model.take() })
                 } else {
                     Rectangle().fill(Color.black).aspectRatio(16.0 / 9.0, contentMode: .fit)
-                        .overlay(Rectangle().strokeBorder(Theme.stroke, lineWidth: 1))
                 }
             }
         }
