@@ -245,6 +245,8 @@ private struct OutputCard: View {
     @State private var draftConfig: String = ""
     @State private var refresh = 0
     @State private var confirmingDelete = false
+    @State private var editingName = false
+    @FocusState private var nameFocused: Bool
 
     var body: some View {
         _ = refresh // re-evaluate after a start/stop/rename bump
@@ -338,23 +340,45 @@ private struct OutputCard: View {
 
     /// Inline, flexible source-name field (the real NDI source name; a display label
     /// for the others). Takes the row's slack width between the badge and the trash.
+    // Read-only label in a field-styled box; double-click to edit, Return or focus-loss
+    // commits — never auto-focused / stuck (the bug the always-editable field had).
+    @ViewBuilder
     private var nameField: some View {
-        TextField(output.kind.displayName, text: $draftLabel)
-            .textFieldStyle(.plain)
-            .font(.system(size: 13, weight: .medium))
-            .foregroundColor(Theme.textPrimary)
-            .padding(.horizontal, Spacing.sm)
-            .frame(height: ControlMetrics.pillHeight)
-            .frame(maxWidth: .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                    .fill(Theme.bgApp)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                    .stroke(Theme.stroke, lineWidth: 1)
-            )
-            .onSubmit { commitLabel() }
+        Group {
+            if editingName {
+                TextField(output.kind.displayName, text: $draftLabel)
+                    .textFieldStyle(.plain)
+                    .focused($nameFocused)
+                    .onSubmit { commitLabel() }
+                    .onExitCommand { editingName = false }
+                    .onChange(of: nameFocused) { focused in if !focused && editingName { commitLabel() } }
+            } else {
+                Text(output.label.isEmpty ? output.kind.displayName : output.label)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture(count: 2) { beginEditName() }
+            }
+        }
+        .font(.system(size: 13, weight: .medium))
+        .foregroundColor(Theme.textPrimary)
+        .padding(.horizontal, Spacing.sm)
+        .frame(height: ControlMetrics.pillHeight)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+                .fill(Theme.bgApp)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+                .stroke(editingName ? Theme.accentBlue : Theme.stroke, lineWidth: 1)
+        )
+    }
+
+    private func beginEditName() {
+        draftLabel = output.label
+        editingName = true
+        DispatchQueue.main.async { nameFocused = true }
     }
 
     private var trashButton: some View {
@@ -457,10 +481,9 @@ private struct OutputCard: View {
     }
 
     private func commitLabel() {
+        editingName = false
         let trimmed = draftLabel.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { draftLabel = output.label; return }
-        output.label = trimmed
-        refresh += 1
+        if !trimmed.isEmpty { output.label = trimmed; refresh += 1 }
     }
 }
 

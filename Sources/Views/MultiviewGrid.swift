@@ -29,7 +29,7 @@ struct MultiviewGrid: View {
                 // Simple 1px borders per cell (Studio-style), cells touching.  The accent
                 // (green PVW / red PGM / tally) border IS the cell boundary — it reaches
                 // the edge, no inset grid line eating it.
-                VStack(spacing: 0) {
+                VStack(spacing: -1) {   // overlap by 1px so touching cell borders merge into a single 1px line
                     bigRow
                     thumbnails
                 }
@@ -323,8 +323,8 @@ struct MultiviewWall: View {
     private var program: BridgeChannel? { model.channels.first { $0.id == model.programID } }
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 0) {
+        VStack(spacing: -1) {   // overlap by 1px so touching cell borders merge into a single 1px line
+            HStack(spacing: -1) {   // PVW|PGM borders merge to one 1px line
                 BigPane(title: "PREVIEW", accent: Theme.previewGreen, channel: preview)
                 BigPane(title: "PROGRAM", accent: Theme.accentRed, channel: program)
             }

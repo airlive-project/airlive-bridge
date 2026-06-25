@@ -173,7 +173,9 @@ private struct ChannelRow: View {
     let onMoveDown: () -> Void
 
     @State private var draftName = ""
+    @State private var editing = false
     @State private var confirmingDelete = false
+    @FocusState private var nameFocused: Bool
 
     var body: some View {
         Card(padding: Spacing.sm) {
@@ -186,8 +188,9 @@ private struct ChannelRow: View {
         // real function).  Click still drives the Solo preview, exactly as before.
         .contentShape(Rectangle())
         .onTapGesture { onSelect() }
-        .onAppear { draftName = channel.name }
         .contextMenu {
+            Button("Rename") { beginRename() }
+            Divider()
             Button("Remove Channel", role: .destructive) { requestRemove() }
         }
         // Active channel (ON AIR / receiving) confirms before removal; idle goes straight.
@@ -282,23 +285,47 @@ private struct ChannelRow: View {
 
     // MARK: Name (always-editable, like the Outputs card)
 
+    // Name shows as a read-only label IN a field-styled box.  Double-click (or the
+    // context-menu Rename) enters edit; Return or losing focus (click another row /
+    // empty space) commits and exits — so it never gets stuck focused on launch.
+    @ViewBuilder
     private var nameField: some View {
-        TextField("Channel name", text: $draftName)
-            .textFieldStyle(.plain)
-            .font(.system(size: 13, weight: .semibold))
-            .foregroundColor(Theme.textPrimary)
-            .padding(.horizontal, Spacing.sm)
-            .frame(height: ControlMetrics.pillHeight)
-            .frame(maxWidth: .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                    .fill(Theme.bgApp)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                    .stroke(Theme.stroke, lineWidth: 1)
-            )
-            .onSubmit { commitRename() }
+        Group {
+            if editing {
+                TextField("Channel name", text: $draftName)
+                    .textFieldStyle(.plain)
+                    .focused($nameFocused)
+                    .onSubmit { commitRename() }
+                    .onExitCommand { cancelRename() }
+                    .onChange(of: nameFocused) { focused in if !focused && editing { commitRename() } }
+            } else {
+                Text(channel.name.isEmpty ? "Channel" : channel.name)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture(count: 2) { beginRename() }
+            }
+        }
+        .font(.system(size: 13, weight: .semibold))
+        .foregroundColor(Theme.textPrimary)
+        .padding(.horizontal, Spacing.sm)
+        .frame(height: ControlMetrics.pillHeight)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+                .fill(Theme.bgApp)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+                .stroke(editing ? Theme.accentBlue : Theme.stroke, lineWidth: 1)
+        )
+    }
+
+    private func beginRename() {
+        draftName = channel.name
+        editing = true
+        onSelect()
+        DispatchQueue.main.async { nameFocused = true }
     }
 
     private var trashButton: some View {
@@ -318,10 +345,12 @@ private struct ChannelRow: View {
     }
 
     private func commitRename() {
+        editing = false
         let trimmed = draftName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { draftName = channel.name; return }
-        channel.rename(trimmed)
+        if !trimmed.isEmpty { channel.rename(trimmed) }
     }
+
+    private func cancelRename() { editing = false }
 
     private func requestRemove() {
         if channel.isConnected || isProgram { confirmingDelete = true }
@@ -348,7 +377,7 @@ private struct SecurityFooter: View {
                     .font(.system(size: 12))
                     .foregroundColor(model.hasPassword ? Theme.accentBlue : Theme.textFaint)
                     .frame(width: 16)
-                Text(model.hasPassword ? "Password set" : "Set password")
+                Text(model.hasPassword ? "Airlive password set" : "Set Airlive password")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(Theme.textSecondary)
                 Spacer()
@@ -373,7 +402,7 @@ private struct SecurityFooter: View {
             Text(model.hasPassword ? "Change password" : "Set password")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
-            Text("One password for every channel. Cameras must enter it to connect.")
+            Text("Protects your Airlive Camera channels — the iPhone enters it to connect. Screen Mirroring and HDMI / USB sources aren’t gated by it.")
                 .font(.system(size: 11)).foregroundColor(Theme.textFaint)
                 .fixedSize(horizontal: false, vertical: true)
             SecureField("Password", text: $draft)
