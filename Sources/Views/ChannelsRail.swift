@@ -15,6 +15,11 @@ import AVFoundation   // capture-device enumeration for the "+ → HDMI / USB Ca
 struct ChannelsRail: View {
     @ObservedObject var model: BridgeModel
 
+    /// Which channel is being renamed — the ONE source of truth.  Set on double-click,
+    /// cleared by anything else (another row, Return/Esc, a click on empty rail). The
+    /// field is just shown/hidden by this; there's no fragile focus-loss commit.
+    @State private var renamingID: UUID?
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -28,6 +33,9 @@ struct ChannelsRail: View {
         // with the OutputsRail edge + the mode-bar / footer dividers).
         .overlay(Rectangle().frame(width: 1).foregroundColor(Theme.stroke),
                  alignment: .trailing)
+        // Click anywhere that isn't a row or control → leave any in-progress rename.
+        .contentShape(Rectangle())
+        .onTapGesture { renamingID = nil }
     }
 
     // MARK: - Header
@@ -116,7 +124,10 @@ struct ChannelsRail: View {
                             isPreview: channel.id == model.previewID,
                             isFirst: idx == 0,
                             isLast: idx == model.channels.count - 1,
-                            onSelect: { model.select(channel.id) },
+                            onSelect: { model.select(channel.id); renamingID = nil },
+                            isRenaming: channel.id == renamingID,
+                            onBeginRename: { model.select(channel.id); renamingID = channel.id },
+                            onEndRename: { renamingID = nil },
                             onRemove: {
                                 TallyStore.shared.clear(channel.id)
                                 model.removeChannel(channel.id)
@@ -168,12 +179,14 @@ private struct ChannelRow: View {
     let isFirst: Bool
     let isLast: Bool
     let onSelect: () -> Void
+    let isRenaming: Bool         // driven by the rail's single renamingID
+    let onBeginRename: () -> Void
+    let onEndRename: () -> Void
     let onRemove: () -> Void
     let onMoveUp: () -> Void
     let onMoveDown: () -> Void
 
     @State private var draftName = ""
-    @State private var editing = false
     @State private var confirmingDelete = false
     @FocusState private var nameFocused: Bool
 
@@ -188,8 +201,19 @@ private struct ChannelRow: View {
         // real function).  Click still drives the Solo preview, exactly as before.
         .contentShape(Rectangle())
         .onTapGesture { onSelect() }
+        // Rename is shown/hidden purely by `isRenaming` (the rail owns it).  Entering →
+        // seed the draft + focus; leaving (set by the rail, for ANY reason) → commit.
+        .onChange(of: isRenaming) { now in
+            if now {
+                draftName = channel.name
+                DispatchQueue.main.async { nameFocused = true }
+            } else {
+                let trimmed = draftName.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { channel.rename(trimmed) }
+            }
+        }
         .contextMenu {
-            Button("Rename") { beginRename() }
+            Button("Rename") { onBeginRename() }
             Divider()
             Button("Remove Channel", role: .destructive) { requestRemove() }
         }
@@ -283,27 +307,26 @@ private struct ChannelRow: View {
             .help(connected ? "Connected" : "Disconnected")
     }
 
-    // MARK: Name (always-editable, like the Outputs card)
+    // MARK: Name
 
-    // Name shows as a read-only label IN a field-styled box.  Double-click (or the
-    // context-menu Rename) enters edit; Return or losing focus (click another row /
-    // empty space) commits and exits — so it never gets stuck focused on launch.
+    // Resting: a read-only label in a field-styled box (double-click to rename).  While
+    // renaming: a focused TextField.  Return / Esc end it; so does a click anywhere else
+    // (the rail clears renamingID).  Never auto-focuses on launch — it starts as a label.
     @ViewBuilder
     private var nameField: some View {
         Group {
-            if editing {
+            if isRenaming {
                 TextField("Channel name", text: $draftName)
                     .textFieldStyle(.plain)
                     .focused($nameFocused)
-                    .onSubmit { commitRename() }
-                    .onExitCommand { cancelRename() }
-                    .onChange(of: nameFocused) { focused in if !focused && editing { commitRename() } }
+                    .onSubmit { onEndRename() }
+                    .onExitCommand { draftName = channel.name; onEndRename() }   // Esc cancels
             } else {
                 Text(channel.name.isEmpty ? "Channel" : channel.name)
                     .lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
-                    .onTapGesture(count: 2) { beginRename() }
+                    .onTapGesture(count: 2) { onBeginRename() }
             }
         }
         .font(.system(size: 13, weight: .semibold))
@@ -317,15 +340,8 @@ private struct ChannelRow: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                .stroke(editing ? Theme.accentBlue : Theme.stroke, lineWidth: 1)
+                .stroke(isRenaming ? Theme.accentBlue : Theme.stroke, lineWidth: 1)
         )
-    }
-
-    private func beginRename() {
-        draftName = channel.name
-        editing = true
-        onSelect()
-        DispatchQueue.main.async { nameFocused = true }
     }
 
     private var trashButton: some View {
@@ -343,14 +359,6 @@ private struct ChannelRow: View {
         .buttonStyle(.plain)
         .help("Remove channel")
     }
-
-    private func commitRename() {
-        editing = false
-        let trimmed = draftName.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty { channel.rename(trimmed) }
-    }
-
-    private func cancelRename() { editing = false }
 
     private func requestRemove() {
         if channel.isConnected || isProgram { confirmingDelete = true }

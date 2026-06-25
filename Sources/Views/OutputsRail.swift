@@ -25,6 +25,10 @@ import AppKit   // NSPasteboard — copy the RTSP URL
 struct OutputsRail: View {
     @ObservedObject var model: BridgeModel
 
+    /// Which output's name is being renamed — the ONE source of truth (mirrors the
+    /// Channels rail).  Cleared by any click that isn't that field, so it's never stuck.
+    @State private var renamingID: UUID?
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -36,6 +40,9 @@ struct OutputsRail: View {
         // ChannelsRail edge + the mode-bar / footer dividers).
         .overlay(Rectangle().frame(width: 1).foregroundColor(Theme.stroke),
                  alignment: .leading)
+        // Click anywhere that isn't a field/control → leave any in-progress rename.
+        .contentShape(Rectangle())
+        .onTapGesture { renamingID = nil }
     }
 
     // "Outputs" + inline "+".  These are the PROGRAM's outputs — whatever is on
@@ -104,6 +111,9 @@ struct OutputsRail: View {
                                    output: output,
                                    isFirst: idx == 0,
                                    isLast: idx == model.programOutputs.count - 1,
+                                   isRenaming: output.id == renamingID,
+                                   onBeginRename: { renamingID = output.id },
+                                   onEndRename: { renamingID = nil },
                                    onMoveUp:   { model.moveProgramOutput(from: IndexSet(integer: idx), to: idx - 1) },
                                    onMoveDown: { model.moveProgramOutput(from: IndexSet(integer: idx), to: idx + 2) })
                     }
@@ -238,6 +248,9 @@ private struct OutputCard: View {
     let output: VideoOutput
     let isFirst: Bool
     let isLast: Bool
+    let isRenaming: Bool         // driven by the rail's single renamingID
+    let onBeginRename: () -> Void
+    let onEndRename: () -> Void
     let onMoveUp: () -> Void
     let onMoveDown: () -> Void
 
@@ -245,7 +258,6 @@ private struct OutputCard: View {
     @State private var draftConfig: String = ""
     @State private var refresh = 0
     @State private var confirmingDelete = false
-    @State private var editingName = false
     @FocusState private var nameFocused: Bool
 
     var body: some View {
@@ -258,6 +270,17 @@ private struct OutputCard: View {
             }
         }
         .onAppear { draftLabel = output.label; draftConfig = output.config }
+        // Rename shown/hidden purely by `isRenaming` (the rail owns it).  Entering →
+        // seed draft + focus; leaving (set by the rail, any reason) → commit.
+        .onChange(of: isRenaming) { now in
+            if now {
+                draftLabel = output.label
+                DispatchQueue.main.async { nameFocused = true }
+            } else {
+                let trimmed = draftLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { output.label = trimmed; refresh += 1 }
+            }
+        }
         // Removing a LIVE output cuts the stream — confirm first (an idle one deletes
         // straight away).
         .confirmationDialog("Remove “\(output.label)” while it’s live?",
@@ -340,24 +363,24 @@ private struct OutputCard: View {
 
     /// Inline, flexible source-name field (the real NDI source name; a display label
     /// for the others). Takes the row's slack width between the badge and the trash.
-    // Read-only label in a field-styled box; double-click to edit, Return or focus-loss
-    // commits — never auto-focused / stuck (the bug the always-editable field had).
+    // Resting: a read-only label in a field-styled box (double-click to rename).  While
+    // renaming: a focused TextField.  Return / Esc end it; so does a click anywhere else
+    // (the rail clears renamingID).  Never auto-focuses on launch — it starts as a label.
     @ViewBuilder
     private var nameField: some View {
         Group {
-            if editingName {
+            if isRenaming {
                 TextField(output.kind.displayName, text: $draftLabel)
                     .textFieldStyle(.plain)
                     .focused($nameFocused)
-                    .onSubmit { commitLabel() }
-                    .onExitCommand { editingName = false }
-                    .onChange(of: nameFocused) { focused in if !focused && editingName { commitLabel() } }
+                    .onSubmit { onEndRename() }
+                    .onExitCommand { draftLabel = output.label; onEndRename() }   // Esc cancels
             } else {
                 Text(output.label.isEmpty ? output.kind.displayName : output.label)
                     .lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
-                    .onTapGesture(count: 2) { beginEditName() }
+                    .onTapGesture(count: 2) { onBeginRename() }
             }
         }
         .font(.system(size: 13, weight: .medium))
@@ -371,14 +394,8 @@ private struct OutputCard: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                .stroke(editingName ? Theme.accentBlue : Theme.stroke, lineWidth: 1)
+                .stroke(isRenaming ? Theme.accentBlue : Theme.stroke, lineWidth: 1)
         )
-    }
-
-    private func beginEditName() {
-        draftLabel = output.label
-        editingName = true
-        DispatchQueue.main.async { nameFocused = true }
     }
 
     private var trashButton: some View {
@@ -478,12 +495,6 @@ private struct OutputCard: View {
     private func requestDelete() {
         if output.isLive { confirmingDelete = true }
         else { model.removeProgramOutput(output) }
-    }
-
-    private func commitLabel() {
-        editingName = false
-        let trimmed = draftLabel.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty { output.label = trimmed; refresh += 1 }
     }
 }
 
