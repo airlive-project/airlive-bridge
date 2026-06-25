@@ -26,10 +26,10 @@ struct MultiviewGrid: View {
         ScrollView {
             VStack(spacing: Spacing.md) {
                 topBar
-                // Tiles touch (no gaps).  ONLY the active tiles are framed — PVW green,
-                // PGM red, staged/on-air thumbs — so there's no neutral grey doubling and
-                // no gutters.  An accent edge meeting a neighbour shows that single accent
-                // line (the neighbour draws nothing); PVW|PGM meeting shows green|red.
+                // Tiles touch (no gaps), every tile carries a 1px border so the grid is
+                // always visible: neutral = subtle grey, tally = green (PVW/staged) / red
+                // (PGM/on-air).  The accent border IS the cell boundary so it reaches the
+                // edge; PVW|PGM shows green meeting red, as on any broadcast multiview.
                 VStack(spacing: 0) {
                     bigRow
                     thumbnails
@@ -182,6 +182,7 @@ struct MultiviewGrid: View {
         Rectangle()
             .fill(Color.black)
             .aspectRatio(16.0 / 9.0, contentMode: .fit)
+            .overlay(Rectangle().strokeBorder(Theme.stroke, lineWidth: 1))
             .overlay(
                 Image(systemName: "plus").font(.system(size: 13))
                     .foregroundColor(Theme.textFaint.opacity(0.3))
@@ -294,13 +295,9 @@ private struct ThumbCell: View {
             .aspectRatio(16.0 / 9.0, contentMode: .fit)
             .background(Color.black)
             .clipped()
-            // Only tally tiles get a border (green = staged, red = on air); neutral tiles
-            // rely on the 1px grid gap.  The accent reaches the tile edge, no doubling.
-            .overlay {
-                if isProgram || isPreview {
-                    Rectangle().strokeBorder(borderColor, lineWidth: 1)
-                }
-            }
+            // 1px border per cell: green = staged, red = on air, neutral grey otherwise —
+            // so every tile is separated.  The accent border IS the cell boundary.
+            .overlay(Rectangle().strokeBorder(borderColor, lineWidth: 1))
             .contentShape(Rectangle())
             .onTapGesture(count: 2) { onTake() }
             .onTapGesture { onStage() }
@@ -353,6 +350,7 @@ struct MultiviewWall: View {
                               onTake: { model.stage(channel.id); model.take() })
                 } else {
                     Rectangle().fill(Color.black).aspectRatio(16.0 / 9.0, contentMode: .fit)
+                        .overlay(Rectangle().strokeBorder(Theme.stroke, lineWidth: 1))
                 }
             }
         }
