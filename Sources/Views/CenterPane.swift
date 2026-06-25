@@ -123,6 +123,7 @@ private struct ChannelDetail: View {
         ZStack {
             if channel.previewEnabled {
                 MirrorVideoView(channel: channel)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 if channel.latestFrame == nil {
                     noSignalOverlay
                 }

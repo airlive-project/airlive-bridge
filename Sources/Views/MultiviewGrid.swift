@@ -271,7 +271,11 @@ private struct LivePane: View {
     var body: some View {
         ZStack {
             if channel.previewEnabled {
+                // MUST fill the tile — without this the representable collapses to its
+                // tiny intrinsic size and the video sticks to the top-left.  The layer is
+                // resizeAspect, so the frame fits inside at its own aspect (letterboxed).
                 MirrorVideoView(channel: channel)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 if channel.latestFrame == nil { offline }
             } else {
                 offline
