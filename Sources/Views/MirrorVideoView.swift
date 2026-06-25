@@ -50,7 +50,10 @@ struct MirrorVideoView: NSViewRepresentable {
 
         override init(frame frameRect: NSRect) {
             super.init(frame: frameRect)
-            contentLayer.contentsGravity = .resizeAspect
+            // FILL (cover) — like Figma "Fill": scale to cover the whole tile, preserving
+            // aspect, cropping the overflow.  Never a letterboxed strip in a corner.
+            contentLayer.contentsGravity = .resizeAspectFill
+            contentLayer.masksToBounds = true   // crop what spills past the tile
             contentLayer.backgroundColor = NSColor.black.cgColor
             // Layer-HOSTING: set `layer` BEFORE `wantsLayer` → the layer is OURS,
             // safe to mutate off-main (an AppKit-managed layer must be main-only).
@@ -104,34 +107,44 @@ struct MirrorVideoView: NSViewRepresentable {
             CATransaction.commit()
         }
 
-        /// Size, center and rotate our layer for the current rotation.
+        // layout() alone doesn't reliably fire when SwiftUI changes the representable's
+        // size, which left the hosted layer stuck at its first (tiny) size in a corner —
+        // the "signal in the top-right corner" bug.  Re-apply geometry on EVERY resize.
+        override func setFrameSize(_ newSize: NSSize) {
+            super.setFrameSize(newSize)
+            viewSize = newSize
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            applyGeometry()
+            CATransaction.commit()
+        }
+
+        /// Size, center and rotate our layer to FILL the tile (cover).
         ///
-        /// CRITICAL: never set `contentLayer.frame` while a rotation transform is
-        /// applied — `.frame` is undefined under a non-identity transform and was
-        /// the bug that sent rotated streams (90 / 180 / 270) to a black/garbled
-        /// tile.  We set `bounds` + `position` + `transform` instead.
+        /// The layer always maps onto the full tile, and `resizeAspectFill` then scales the
+        /// frame to cover it (cropping overflow) — so the picture fills every window no
+        /// matter its aspect.  For a portrait rotation (90 / 270) the pre-rotation bounds
+        /// are the tile size with width/height SWAPPED, so after the rotation the layer
+        /// still maps onto the full tile and cover-fills it.
         ///
-        /// Option B vertical stream: the iPhone sends LANDSCAPE (16:9) pixels + a
-        /// clockwise rotation hint.  For a portrait hint (90 / 270) we make the
-        /// pre-rotation layer a 16:9 rect whose long edge maps to the tile HEIGHT,
-        /// so after rotation it presents as **9:16, fit by height, centred**
-        /// (letterboxed left/right) — never stretched.  A hosting (y-up) layer
-        /// rotates CCW for a positive angle, so we negate to get the clockwise
-        /// rotation the phone's upright preview expects.
+        /// CRITICAL: never set `.bounds` while a non-identity transform is applied
+        /// (`.bounds`/`.frame` are undefined under a transform).  Reset to identity first.
+        /// A hosting (y-up) layer rotates CCW for a positive angle, so negate to get the
+        /// clockwise rotation the phone's upright preview expects.
         private func applyGeometry() {
             let size = viewSize
             guard size.width > 0, size.height > 0 else { return }
             let rot = ((currentRotation % 360) + 360) % 360
-            let isPortrait = (rot == 90 || rot == 270)
-
-            let layerSize: CGSize = isPortrait
-                ? CGSize(width: size.height, height: size.height * 9.0 / 16.0)  // → 9:16 by height
-                : size                                                          // landscape fills tile
-            contentLayer.bounds = CGRect(origin: .zero, size: layerSize)
             contentLayer.position = CGPoint(x: size.width / 2, y: size.height / 2)
-            contentLayer.transform = (rot == 0)
-                ? CATransform3DIdentity
-                : CATransform3DMakeRotation(-CGFloat(rot) * .pi / 180, 0, 0, 1)
+            contentLayer.transform = CATransform3DIdentity
+            let isPortrait = (rot == 90 || rot == 270)
+            contentLayer.bounds = CGRect(
+                origin: .zero,
+                size: isPortrait ? CGSize(width: size.height, height: size.width) : size
+            )
+            if rot != 0 {
+                contentLayer.transform = CATransform3DMakeRotation(-CGFloat(rot) * .pi / 180, 0, 0, 1)
+            }
         }
 
         // A hosting layer's contentsScale is NOT auto-synced by AppKit, so a tile
