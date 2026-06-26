@@ -74,8 +74,10 @@ final class ShortcutCenter: ObservableObject {
         guard enabled else { return }
         // In-app (plain keys) is always available — no permission needed.
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            self?.handleLocal(event)
-            return event   // never suppress
+            // Return nil to SWALLOW the key when we fired a shortcut — otherwise the
+            // unhandled key falls through the responder chain and AppKit plays the system
+            // "funk" beep (an empty keypress).  Non-matching keys pass through unchanged.
+            (self?.handleLocal(event) ?? false) ? nil : event
         }
         // Global (chord) layers on top when opted in + permitted.
         if global && hasPermission { monitor.ensureRunning() }
@@ -86,15 +88,21 @@ final class ShortcutCenter: ObservableObject {
     /// In-app: match the BASE chord (key + optional ⇧/⌘).  A ⌃ or ⌥ press is the
     /// global activator — leave it to the global engine.  Ignored while typing or
     /// while the recorder is capturing.
-    private func handleLocal(_ event: NSEvent) {
-        guard enabled, !isRecording, !isTyping() else { return }
+    /// Returns true when a shortcut MATCHED and fired — the monitor then swallows the key
+    /// so it doesn't beep.  False (key passes through) while typing/recording, for the
+    /// ⌃/⌥ global activator, or when nothing matches.
+    @discardableResult
+    private func handleLocal(_ event: NSEvent) -> Bool {
+        guard enabled, !isRecording, !isTyping() else { return false }
         let mods = event.modifierFlags
-        if mods.contains(.control) || mods.contains(.option) { return }   // global chord
+        if mods.contains(.control) || mods.contains(.option) { return false }   // global chord
         if let action = bindings.action(forKeyCode: event.keyCode,
                                         shift: mods.contains(.shift),
                                         command: mods.contains(.command)) {
             fire(action)
+            return true
         }
+        return false
     }
 
     /// Global: require the ⌃⌥ activator, then match the base chord's ⇧/⌘ on top.
