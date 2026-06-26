@@ -15,11 +15,6 @@ import AVFoundation   // capture-device enumeration for the "+ → HDMI / USB Ca
 struct ChannelsRail: View {
     @ObservedObject var model: BridgeModel
 
-    /// Which channel is being renamed — the ONE source of truth.  Set on double-click,
-    /// cleared by anything else (another row, Return/Esc, a click on empty rail). The
-    /// field is just shown/hidden by this; there's no fragile focus-loss commit.
-    @State private var renamingID: UUID?
-
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -33,9 +28,9 @@ struct ChannelsRail: View {
         // with the OutputsRail edge + the mode-bar / footer dividers).
         .overlay(Rectangle().frame(width: 1).foregroundColor(Theme.stroke),
                  alignment: .trailing)
-        // Click anywhere that isn't a row or control → leave any in-progress rename.
+        // Click anywhere that isn't a row or control → leave any in-progress inline edit.
         .contentShape(Rectangle())
-        .onTapGesture { renamingID = nil }
+        .onTapGesture { resignInlineEditing() }
     }
 
     // MARK: - Header
@@ -124,10 +119,7 @@ struct ChannelsRail: View {
                             isPreview: channel.id == model.previewID,
                             isFirst: idx == 0,
                             isLast: idx == model.channels.count - 1,
-                            onSelect: { model.select(channel.id); renamingID = nil },
-                            isRenaming: channel.id == renamingID,
-                            onBeginRename: { model.select(channel.id); renamingID = channel.id },
-                            onEndRename: { renamingID = nil },
+                            onSelect: { model.select(channel.id); resignInlineEditing() },
                             onRemove: {
                                 TallyStore.shared.clear(channel.id)
                                 model.removeChannel(channel.id)
@@ -179,16 +171,11 @@ private struct ChannelRow: View {
     let isFirst: Bool
     let isLast: Bool
     let onSelect: () -> Void
-    let isRenaming: Bool         // driven by the rail's single renamingID
-    let onBeginRename: () -> Void
-    let onEndRename: () -> Void
     let onRemove: () -> Void
     let onMoveUp: () -> Void
     let onMoveDown: () -> Void
 
-    @State private var draftName = ""
     @State private var confirmingDelete = false
-    @FocusState private var nameFocused: Bool
 
     var body: some View {
         Card(padding: Spacing.sm) {
@@ -197,24 +184,10 @@ private struct ChannelRow: View {
                 bottomRow     // ordinal · arrows · name
             }
         }
-        // No selection outline for now (operator: remove the sticky blue until it has a
-        // real function).  Click still drives the Solo preview, exactly as before.
+        // Click the row (anywhere but the name field) drives the Solo preview.
         .contentShape(Rectangle())
         .onTapGesture { onSelect() }
-        // Rename is shown/hidden purely by `isRenaming` (the rail owns it).  Entering →
-        // seed the draft + focus; leaving (set by the rail, for ANY reason) → commit.
-        .onChange(of: isRenaming) { now in
-            if now {
-                draftName = channel.name
-                DispatchQueue.main.async { nameFocused = true }
-            } else {
-                let trimmed = draftName.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty { channel.rename(trimmed) }
-            }
-        }
         .contextMenu {
-            Button("Rename") { onBeginRename() }
-            Divider()
             Button("Remove Channel", role: .destructive) { requestRemove() }
         }
         // Active channel (ON AIR / receiving) confirms before removal; idle goes straight.
@@ -307,41 +280,11 @@ private struct ChannelRow: View {
             .help(connected ? "Connected" : "Disconnected")
     }
 
-    // MARK: Name
-
-    // Resting: a read-only label in a field-styled box (double-click to rename).  While
-    // renaming: a focused TextField.  Return / Esc end it; so does a click anywhere else
-    // (the rail clears renamingID).  Never auto-focuses on launch — it starts as a label.
-    @ViewBuilder
+    // MARK: Name — the shared inline-editable element (single click to rename).
     private var nameField: some View {
-        Group {
-            if isRenaming {
-                TextField("Channel name", text: $draftName)
-                    .textFieldStyle(.plain)
-                    .focused($nameFocused)
-                    .onSubmit { onEndRename() }
-                    .onExitCommand { draftName = channel.name; onEndRename() }   // Esc cancels
-            } else {
-                Text(channel.name.isEmpty ? "Channel" : channel.name)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                    .onTapGesture(count: 2) { onBeginRename() }
-            }
-        }
-        .font(.system(size: 13, weight: .semibold))
-        .foregroundColor(Theme.textPrimary)
-        .padding(.horizontal, Spacing.sm)
-        .frame(height: ControlMetrics.pillHeight)
-        .frame(maxWidth: .infinity)
-        .background(
-            RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                .fill(Theme.bgApp)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                .stroke(isRenaming ? Theme.accentBlue : Theme.stroke, lineWidth: 1)
-        )
+        InlineEditable(placeholder: "Channel",
+                       value: channel.name,
+                       font: .system(size: 13, weight: .semibold)) { channel.rename($0) }
     }
 
     private var trashButton: some View {

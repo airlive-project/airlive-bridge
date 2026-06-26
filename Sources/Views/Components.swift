@@ -37,6 +37,81 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import SwiftUI
+import AppKit   // NSApp — resign first responder so inline edits always exit
+
+// MARK: - Inline editable text (THE one renameable / editable field)
+
+/// One design-system element for every editable value (channel name, output name, stream
+/// URL) so they all behave identically:
+///   • resting state is a LABEL in a field-styled box → nothing auto-grabs focus on launch;
+///   • a SINGLE click turns it into a focused field (blue stroke);
+///   • it commits on Return OR when focus leaves — clicking another field, or the empty
+///     rail (the rails call `resignInlineEditing()` on an empty click / row select) — so it
+///     can NEVER get stuck focused with no way out;
+///   • Esc cancels.
+/// The component keeps its own edit draft and hands back the trimmed string via `onCommit`.
+/// `allowEmpty` lets config fields clear; names reject empty (keep the old value).
+struct InlineEditable: View {
+    let placeholder: String
+    let value: String
+    var font: Font = .system(size: 13, weight: .medium)
+    var allowEmpty: Bool = false
+    let onCommit: (String) -> Void
+
+    @State private var editing = false
+    @State private var draft = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        Group {
+            if editing {
+                TextField(placeholder, text: $draft)
+                    .textFieldStyle(.plain)
+                    .focused($focused)
+                    .foregroundColor(Theme.textPrimary)
+                    .onSubmit { commit() }
+                    .onExitCommand { editing = false }              // Esc cancels
+                    .onChange(of: focused) { if !$0 { commit() } }  // focus loss commits
+            } else {
+                Text(value.isEmpty ? placeholder : value)
+                    .foregroundColor(value.isEmpty ? Theme.textFaint : Theme.textPrimary)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture { begin() }                       // single click → edit
+            }
+        }
+        .font(font)
+        .padding(.horizontal, Spacing.sm)
+        .frame(height: ControlMetrics.pillHeight)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+                .fill(Theme.bgApp)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+                .stroke(editing ? Theme.accentBlue : Theme.stroke, lineWidth: 1)
+        )
+    }
+
+    private func begin() {
+        draft = value
+        editing = true
+        DispatchQueue.main.async { focused = true }
+    }
+
+    private func commit() {
+        guard editing else { return }   // ignore the focus-loss that follows our own exit
+        editing = false
+        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if allowEmpty || !trimmed.isEmpty { onCommit(trimmed) }
+    }
+}
+
+/// Drop keyboard focus from any inline edit — the rails call this on an empty-area click
+/// or when selecting another row, so a field never stays stuck focused.
+func resignInlineEditing() { NSApp.keyWindow?.makeFirstResponder(nil) }
 
 // MARK: - Card (rounded panel container)
 

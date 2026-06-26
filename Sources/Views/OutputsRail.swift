@@ -25,10 +25,6 @@ import AppKit   // NSPasteboard — copy the RTSP URL
 struct OutputsRail: View {
     @ObservedObject var model: BridgeModel
 
-    /// Which output's name is being renamed — the ONE source of truth (mirrors the
-    /// Channels rail).  Cleared by any click that isn't that field, so it's never stuck.
-    @State private var renamingID: UUID?
-
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -40,9 +36,10 @@ struct OutputsRail: View {
         // ChannelsRail edge + the mode-bar / footer dividers).
         .overlay(Rectangle().frame(width: 1).foregroundColor(Theme.stroke),
                  alignment: .leading)
-        // Click anywhere that isn't a field/control → leave any in-progress rename.
+        // Click anywhere that isn't a field/control → leave any in-progress inline edit
+        // (name or SRT destination), so nothing can get stuck focused.
         .contentShape(Rectangle())
-        .onTapGesture { renamingID = nil }
+        .onTapGesture { resignInlineEditing() }
     }
 
     // "Outputs" + inline "+".  These are the PROGRAM's outputs — whatever is on
@@ -50,9 +47,10 @@ struct OutputsRail: View {
     // channel.
     private var header: some View {
         HStack(spacing: Spacing.sm) {
-            // Title reflects the current mode so it's clear what the program (and
-            // thus these outputs) is fed from: the solo channel vs the multiview CUT.
-            Text(model.mode == .multiview ? "Multiview outputs" : "Solo outputs")
+            // Solo = plain "Outputs" (they publish the selected channel).  Multiview = these
+            // publish the PROGRAM bus (the CUT result), so "Program Outputs" — plural, there
+            // can be several (NDI + OBS + RTSP + SRT…).
+            Text(model.mode == .multiview ? "Program Outputs" : "Outputs")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
             Spacer()
@@ -111,9 +109,6 @@ struct OutputsRail: View {
                                    output: output,
                                    isFirst: idx == 0,
                                    isLast: idx == model.programOutputs.count - 1,
-                                   isRenaming: output.id == renamingID,
-                                   onBeginRename: { renamingID = output.id },
-                                   onEndRename: { renamingID = nil },
                                    onMoveUp:   { model.moveProgramOutput(from: IndexSet(integer: idx), to: idx - 1) },
                                    onMoveDown: { model.moveProgramOutput(from: IndexSet(integer: idx), to: idx + 2) })
                     }
@@ -248,17 +243,11 @@ private struct OutputCard: View {
     let output: VideoOutput
     let isFirst: Bool
     let isLast: Bool
-    let isRenaming: Bool         // driven by the rail's single renamingID
-    let onBeginRename: () -> Void
-    let onEndRename: () -> Void
     let onMoveUp: () -> Void
     let onMoveDown: () -> Void
 
-    @State private var draftLabel: String = ""
-    @State private var draftConfig: String = ""
     @State private var refresh = 0
     @State private var confirmingDelete = false
-    @FocusState private var nameFocused: Bool
 
     var body: some View {
         _ = refresh // re-evaluate after a start/stop/rename bump
@@ -267,18 +256,6 @@ private struct OutputCard: View {
                 controlRow    // badge · arrows · on/off
                 nameRow       // name field + delete (right of it)
                 secondRow     // SRT destination / RTSP URL — only where it carries info
-            }
-        }
-        .onAppear { draftLabel = output.label; draftConfig = output.config }
-        // Rename shown/hidden purely by `isRenaming` (the rail owns it).  Entering →
-        // seed draft + focus; leaving (set by the rail, any reason) → commit.
-        .onChange(of: isRenaming) { now in
-            if now {
-                draftLabel = output.label
-                DispatchQueue.main.async { nameFocused = true }
-            } else {
-                let trimmed = draftLabel.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty { output.label = trimmed; refresh += 1 }
             }
         }
         // Removing a LIVE output cuts the stream — confirm first (an idle one deletes
@@ -361,41 +338,11 @@ private struct OutputCard: View {
         .fixedSize(horizontal: true, vertical: false)
     }
 
-    /// Inline, flexible source-name field (the real NDI source name; a display label
-    /// for the others). Takes the row's slack width between the badge and the trash.
-    // Resting: a read-only label in a field-styled box (double-click to rename).  While
-    // renaming: a focused TextField.  Return / Esc end it; so does a click anywhere else
-    // (the rail clears renamingID).  Never auto-focuses on launch — it starts as a label.
-    @ViewBuilder
+    /// Source-name field (the real NDI source name; a display label for the others) — the
+    /// shared inline-editable element: single click to rename, commits on blur/Return.
     private var nameField: some View {
-        Group {
-            if isRenaming {
-                TextField(output.kind.displayName, text: $draftLabel)
-                    .textFieldStyle(.plain)
-                    .focused($nameFocused)
-                    .onSubmit { onEndRename() }
-                    .onExitCommand { draftLabel = output.label; onEndRename() }   // Esc cancels
-            } else {
-                Text(output.label.isEmpty ? output.kind.displayName : output.label)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                    .onTapGesture(count: 2) { onBeginRename() }
-            }
-        }
-        .font(.system(size: 13, weight: .medium))
-        .foregroundColor(Theme.textPrimary)
-        .padding(.horizontal, Spacing.sm)
-        .frame(height: ControlMetrics.pillHeight)
-        .frame(maxWidth: .infinity)
-        .background(
-            RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                .fill(Theme.bgApp)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                .stroke(isRenaming ? Theme.accentBlue : Theme.stroke, lineWidth: 1)
-        )
+        InlineEditable(placeholder: output.kind.displayName,
+                       value: output.label) { output.label = $0; refresh += 1 }
     }
 
     private var trashButton: some View {
@@ -444,22 +391,12 @@ private struct OutputCard: View {
         }
     }
 
+    /// SRT destination — the shared inline-editable element (monospaced; may be cleared).
     private var srtDestinationField: some View {
-        TextField(output.kind.configFieldExample, text: $draftConfig)
-            .textFieldStyle(.plain)
-            .font(.system(size: 11).monospaced())
-            .foregroundColor(Theme.textSecondary)
-            .padding(.horizontal, Spacing.sm)
-            .frame(height: ControlMetrics.pillHeight)
-            .background(
-                RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                    .fill(Theme.bgApp)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                    .stroke(Theme.stroke, lineWidth: 1)
-            )
-            .onSubmit { output.config = draftConfig.trimmingCharacters(in: .whitespaces); refresh += 1 }
+        InlineEditable(placeholder: output.kind.configFieldExample,
+                       value: output.config,
+                       font: .system(size: 11).monospaced(),
+                       allowEmpty: true) { output.config = $0; refresh += 1 }
     }
 
     /// The actual address a client connects to: rtsp://<this-mac>:<port>/program.
