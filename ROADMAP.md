@@ -68,18 +68,54 @@ them) · all 4 orientations · NDI + OBS simultaneously, with and without passwo
 
 ## Backlog (post-MVP)
 
-- **Fixed-delay playout for AirPlay channels (multicam genlock).** Today the AirPlay
-  path is "show ASAP" (bounded-queue drop-oldest): low but **variable** latency that
-  floats with network jitter — fine solo, but AirPlay cams drift against ARLV cams in a
-  multicam mix. Add the SAME playout scheme the ARLV channel already uses
-  (`BridgeChannelReceiver`): stamp each decoded AirPlay frame with a deadline
-  (`arrival + bufferSeconds`), hold in a **capped, locked** ring, release on the Mac
-  clock; re-anchor on under/overrun. Expose `LatencyPreset` (Off / Low / Normal) in the
-  AirPlay channel UI like ARLV so all sources share one fixed offset. Additive, isolated
-  stage (doesn't touch the UxPlay/decode core) → low risk; worst case is extra latency,
-  not a crash. Caveat: AirPlay's inherent ~150–250 ms mirror latency is a floor — fixed
-  delay sits *on top* to pin jitter, not reduce the floor. Build after the skeleton is
-  in place; on-device verify before calling done.
+- **AirPlay ↔ control manual bind (delivery-mode "killer combo").** Delivery mode is
+  SHIPPED (Video+Control / Control-only toggle, videoActive-keyed "CONTROL ONLY"
+  placeholder, operator gates, deviceName label — see docs/DELIVERY-MODE-DESIGN.md). What
+  remains is the convenience that MERGES two transports into one tile: when an Airlive
+  channel is Control-only (`videoActive==false`) AND the operator has manually bound it to
+  an AirPlay (Screen Mirroring) tile from the same phone, composite the AirPlay video into
+  that channel's tile instead of the "CONTROL ONLY" placeholder — so one tile shows AirPlay
+  video + Airlive control/tally (one encode on the phone, full control). Bind is MANUAL
+  (operator taps "this AirPlay tile = this control link"; deviceName makes it obvious;
+  optional auto-match if the iPhone system name equals the operator name). Needs a
+  `linkedControlChannelID` on the AirPlay channel + a bind affordance in ChannelsRail + the
+  tile/program routing to pull the linked AirPlay video. Until then the combo still works as
+  TWO separate tiles. (David to send UI mockup, like the latency feature.)
+
+- **Profiles (save / load a whole setup).** A "Profiles" menu (already stubbed in the menu
+  bar: New Profile… / Open Profile…) that serialises the entire configuration — channels
+  (kind, name, order, capture-device id), program outputs (kind, label, config, order) and
+  the password flag — to a `.airliveprofile` JSON file via NSSavePanel, restored via
+  NSOpenPanel (clear + re-add channels/outputs from the snapshot). Needs `BridgeModel`
+  snapshot/apply methods + Codable config structs (live channels/receivers are rebuilt on
+  load, not the connections). Wire the two existing (disabled) menu items to it. Nice
+  follow-ons: a recent-profiles list and "reopen last on launch".
+
+- **Per-source latency in milliseconds (manual multicam sync).** A precise numeric
+  latency field (in ms) on EVERY source, set by the operator. This is a PROFESSIONAL
+  tool — expose the exact number, not consumer crutches (no "±1 frame" nudges, no vague
+  presets). The Mac can only ADD delay (buffer decoded frames), never reduce below a
+  source's own floor — so you sync by raising every fast source UP to the slowest. Example:
+  AirPlay arrives ~120 ms, the Airlive app ~230 ms → dial AirPlay +110 so both play out at
+  230 ms, in sync. Pure receiver-side (extra decoded frames held in a per-channel ring):
+  ZERO iPhone cost, no thermal impact.
+  - Mechanism: the ARLV channel already has a playout buffer + an Output-delay row
+    (`LatencyPreset`). Two pieces to build: (1) **KEEP the existing ARLV presets as-is** and
+    ADD a separate manual **ms field** ALONGSIDE them — it's an *additional* fine offset, not
+    a replacement (presets stay for quick coarse choice; the ms field is the precise extra);
+    (2) extend the SAME deadline-ring playout to AirPlay channels (today "show ASAP", no
+    buffer) so AirPlay can be delayed too. Additive, isolated, low risk (worst case = extra
+    latency, not a crash).
+  - **Auto-align is NOT exact and is deferred.** We can't know absolute capture→Mac latency
+    (phone and Mac clocks aren't synced — the skew is baked into `timestamp_us`; AirPlay's
+    RTP/NTP is cross-protocol). True auto needs either an event calibration (clap/flash
+    detected in every feed) or NTP-stamped capture time from the app (frozen wire / app
+    team). So manual is the shipping design; optional later: a "clap-sync" that's only
+    approximate.
+  - **UI: David will send a mockup** — implement the placement/layout from that, don't
+    invent it. (The ms field sits next to, not instead of, the ARLV preset row.)
+  - Caveat: AirPlay's inherent ~150–250 ms mirror latency is a floor; the ms field adds
+    ON TOP, it can't go below the floor.
 
 - **Multiview Full-Screen / Detach (clean wall).** The multiview top bar has two
   buttons: Full-Screen (today: native window full-screen) and Detach (opens the

@@ -75,10 +75,10 @@ struct MultiviewGrid: View {
                             .padding(.horizontal, Spacing.sm)
                     }
                     .bridgeButton(selected: preview.remote?.lens == label)
-                    .disabled(!preview.isConnected)
+                    .disabled(!preview.isConnected || !preview.remoteControlAllowed)
                 }
             }
-            .opacity(preview.isConnected ? 1 : 0.4)
+            .opacity((preview.isConnected && preview.remoteControlAllowed) ? 1 : 0.4)
         } else {
             Text("Stage a camera to pick its lens")
                 .font(.system(size: 11)).foregroundColor(Theme.textFaint)
@@ -94,23 +94,32 @@ struct MultiviewGrid: View {
     /// works globally — no per-button shortcut, to avoid a double cut).  Moved to the
     /// top-center; the old full-width bar under the panes is gone.
     private var cutButton: some View {
-        Button { model.take() } label: {
+        // Can only cut a source that actually has video — a Control-only (videoActive=false)
+        // preview would dead-air the program outputs, so the button (and take()) refuse it.
+        let canCut = model.previewChannel()?.videoActive ?? false
+        return Button { model.take() } label: {
             Text("CUT  (Space)")
                 .font(.system(size: 11, weight: .medium))
                 .frame(height: 26)
                 .padding(.horizontal, Spacing.sm)
         }
         .bridgeButton()
-        .disabled(model.previewChannel() == nil)
-        .opacity(model.previewChannel() == nil ? 0.5 : 1)
-        .help("Cut the Preview camera to Program (Space)")
+        .disabled(!canCut)
+        .opacity(canCut ? 1 : 0.5)
+        .help(canCut ? "Cut the Preview camera to Program (Space)"
+                     : "Preview has no video (Control-only or none) — can't cut to air")
     }
 
     /// Full-Screen the window.  ROADMAP: a CLEAN multiview-only full-screen (hide the
     /// rails + controls, just the PVW/PGM + wall).  For now it's the native window
     /// full-screen so the button is live.
     private var fullScreenButton: some View {
-        Button { NSApp.keyWindow?.toggleFullScreen(nil) } label: {
+        // Clean MULTICAM fullscreen, NOT the whole app: open the wall window (just the
+        // PVW/PGM + thumbnail grid) and flip THAT to fullscreen.
+        Button {
+            model.wallFullscreenRequested = true
+            openWindow(id: MultiviewWall.windowID)
+        } label: {
             HStack(spacing: Spacing.xs) {
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
                 Text("Full-Screen").font(.system(size: 11, weight: .medium))
@@ -119,7 +128,7 @@ struct MultiviewGrid: View {
             .padding(.horizontal, Spacing.sm)
         }
         .bridgeButton()
-        .help("Full-screen this window")
+        .help("Full-screen the multiview (clean wall)")
     }
 
     /// Detach: pop the multiview into its own window (drag to a second screen).
@@ -151,9 +160,10 @@ struct MultiviewGrid: View {
     @ViewBuilder
     private var cameraControl: some View {
         if let preview = model.previewChannel() {
-            CameraControlPanel(channel: preview)
-                .disabled(!preview.isConnected)
-                .opacity(preview.isConnected ? 1.0 : 0.4)
+            // Lens lives in the quick-row above the panes here — hide the panel's LENS card.
+            CameraControlPanel(channel: preview, showLens: false)
+                .disabled(!preview.isConnected || !preview.remoteControlAllowed)
+                .opacity((preview.isConnected && preview.remoteControlAllowed) ? 1.0 : 0.4)
         }
     }
 
@@ -278,7 +288,12 @@ private struct LivePane: View {
             .fill(Color.black)
             .overlay {
                 ZStack {
-                    if channel.previewEnabled {
+                    // ⚠️ Key off the camera-CONFIRMED videoActive, never a requested mode.
+                    // Control-only (encoder off) → labelled placeholder, NOT a frozen frame
+                    // / disconnect.  videoActive is true for AirPlay/capture (nil remote).
+                    if !channel.videoActive {
+                        controlOnly
+                    } else if channel.previewEnabled {
                         MirrorVideoView(channel: channel)
                         if channel.latestFrame == nil { offline }
                     } else {
@@ -306,6 +321,16 @@ private struct LivePane: View {
                 .font(.system(size: 18)).foregroundColor(Theme.textFaint)
             Text(channel.isConnected ? "Waiting for video" : "No camera")
                 .font(.system(size: 10)).foregroundColor(Theme.textFaint)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Camera confirmed Control-only (encoder off): no Airlive video on this link.
+    private var controlOnly: some View {
+        VStack(spacing: Spacing.xs) {
+            Image(systemName: "video.slash").font(.system(size: 18)).foregroundColor(Theme.textFaint)
+            Text("CONTROL ONLY").font(.system(size: 10, weight: .semibold)).foregroundColor(Theme.textFaint)
+            Text("no Airlive video").font(.system(size: 9)).foregroundColor(Theme.textFaint.opacity(0.7))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -348,11 +373,46 @@ private struct ThumbCell: View {
 struct MultiviewWall: View {
     static let windowID = "multiview-wall"
     @ObservedObject var model: BridgeModel
+    @State private var win: NSWindow?
+    @State private var alwaysOnTop = false
 
     private var preview: BridgeChannel? { model.channels.first { $0.id == model.previewID } }
     private var program: BridgeChannel? { model.channels.first { $0.id == model.programID } }
 
     var body: some View {
+        // The grid fills the window edge-to-edge (no outer .fit letterbox → no side bars).
+        // Each tile keeps 16:9 via its own aspectRatio, and the window is LOCKED to the
+        // grid's aspect (configurator) so filling never stretches the tiles.  In fullscreen
+        // the per-tile ratios keep everything 16:9, letterboxed on the screen.
+        grid
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.black)
+            .background(WallWindowConfigurator(aspect: gridAspect, model: model) { w in
+                if win !== w { win = w }
+            })
+            // OBS-style projector menu on right-click.
+            .contextMenu { wallMenu }
+    }
+
+    /// Right-click menu on the detached wall, mirroring OBS's windowed-projector menu.
+    @ViewBuilder
+    private var wallMenu: some View {
+        Button("Fullscreen") { win?.toggleFullScreen(nil) }
+        Button("Fit Window to Content") {
+            guard let win else { return }
+            let w = win.contentLayoutRect.width            // snap height back to the grid aspect
+            win.setContentSize(NSSize(width: w, height: (w / gridAspect).rounded()))
+        }
+        Divider()
+        Toggle("Always On Top", isOn: Binding(
+            get: { alwaysOnTop },
+            set: { on in alwaysOnTop = on; win?.level = on ? .floating : .normal }
+        ))
+        Divider()
+        Button("Close") { win?.close() }
+    }
+
+    private var grid: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
                 BigPane(title: "PREVIEW", accent: Theme.previewGreen, channel: preview)
@@ -361,8 +421,14 @@ struct MultiviewWall: View {
             thumbnails
         }
         .overlay(Rectangle().strokeBorder(Theme.stroke, lineWidth: 1))   // outer frame
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black)
+    }
+
+    /// Natural width:height of the wall grid for the current channel count, so the window
+    /// and the `.fit` keep every tile at 16:9.  bigRow = two 16:9 panes side by side; each
+    /// thumbnail row is half a pane tall → W:H = 64 : 9·(2 + rows).
+    private var gridAspect: CGFloat {
+        let rows = CGFloat(max(1, (model.channels.count + 3) / 4))
+        return 64.0 / (9.0 * (2.0 + rows))
     }
 
     private var thumbnails: some View {
@@ -385,4 +451,47 @@ struct MultiviewWall: View {
             }
         }
     }
+}
+
+// MARK: - Wall window configurator
+//
+// Reaches the wall's NSWindow to: (1) LOCK it to the grid's aspect so tiles never stretch
+// and there are no letterbox bars when windowed, (2) size it to that aspect on first show
+// (Detach opens "under the multiview", not a fixed default), and (3) flip it to fullscreen
+// once when the operator hit "Full-Screen" — a CLEAN multicam fullscreen, not the app.
+private struct WallWindowConfigurator: NSViewRepresentable {
+    let aspect: CGFloat
+    @ObservedObject var model: BridgeModel
+    var onWindow: (NSWindow) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        DispatchQueue.main.async { apply(v.window, context.coordinator) }
+        return v
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { apply(nsView.window, context.coordinator) }
+    }
+
+    private func apply(_ window: NSWindow?, _ coord: Coordinator) {
+        guard let window else { return }
+        onWindow(window)
+        window.contentAspectRatio = NSSize(width: aspect, height: 1)
+        if !coord.sized {
+            coord.sized = true
+            window.title = "Multiview"
+            let w: CGFloat = 1280
+            window.setContentSize(NSSize(width: w, height: (w / aspect).rounded()))
+            window.center()
+        }
+        if model.wallFullscreenRequested {
+            model.wallFullscreenRequested = false
+            if !window.styleMask.contains(.fullScreen) { window.toggleFullScreen(nil) }
+        }
+    }
+
+    final class Coordinator { var sized = false }
 }

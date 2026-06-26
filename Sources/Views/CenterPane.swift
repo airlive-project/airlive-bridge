@@ -67,13 +67,19 @@ private struct ChannelDetail: View {
             VStack(alignment: .leading, spacing: Spacing.md) {
                 previewSection
                 tallyRow
-                delayRow
+                // Output-delay now lives inside CameraControlPanel (so it shows in Multiview
+                // too), alongside Delivery.
                 // Camera control commands the iPhone — pointless (and a source of
                 // stale-state bugs) with no camera attached.  Dim + disable it
                 // until connected; it lights up the moment the phone joins.
                 CameraControlPanel(channel: channel)
-                    .disabled(!channel.isConnected)
-                    .opacity(channel.isConnected ? 1.0 : 0.4)
+                    .disabled(!channel.isConnected || !channel.remoteControlAllowed)
+                    .opacity((channel.isConnected && channel.remoteControlAllowed) ? 1.0 : 0.4)
+                // Disclosure, never silent: the operator revoked remote control on the
+                // phone, so the camera drops our commands — say so instead of a dead panel.
+                if channel.isConnected && !channel.remoteControlAllowed {
+                    remoteControlDisabledNote
+                }
             }
             // Tight top padding; generous-but-compact around the rest.  The
             // ScrollView lets the stack grow past the window without overflow.
@@ -94,7 +100,15 @@ private struct ChannelDetail: View {
     private var previewSection: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
             HStack {
-                SectionLabel(text: channel.name)
+                VStack(alignment: .leading, spacing: 1) {
+                    SectionLabel(text: channel.name)
+                    // Camera-side operator name (Settings → Live), when reported.
+                    if !channel.cameraDeviceName.isEmpty {
+                        Text(channel.cameraDeviceName)
+                            .font(.system(size: 10))
+                            .foregroundColor(Theme.textFaint)
+                    }
+                }
                 Spacer()
                 hidePreviewToggle
             }
@@ -128,7 +142,10 @@ private struct ChannelDetail: View {
             .fill(Color.black)
             .overlay {
                 ZStack {
-                    if channel.previewEnabled {
+                    // ⚠️ Key off camera-CONFIRMED videoActive, never a requested mode.
+                    if !channel.videoActive {
+                        controlOnlyOverlay
+                    } else if channel.previewEnabled {
                         MirrorVideoView(channel: channel)
                         if channel.latestFrame == nil { noSignalOverlay }
                     } else {
@@ -177,6 +194,38 @@ private struct ChannelDetail: View {
         .background(Theme.bgPanel)
     }
 
+    /// Camera confirmed Control-only (encoder off): no Airlive video on this link —
+    /// not a frozen frame, not a disconnect.  Video, if any, arrives via AirPlay.
+    private var controlOnlyOverlay: some View {
+        VStack(spacing: Spacing.sm) {
+            Image(systemName: "video.slash")
+                .font(.system(size: 26))
+                .foregroundColor(Theme.textFaint)
+            Text("CONTROL ONLY — no Airlive video")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(Theme.textSecondary)
+            Text("Encoder off; remote control + tally only.")
+                .font(.system(size: 10))
+                .foregroundColor(Theme.textFaint)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Shown under the (greyed) control panel when the phone operator has revoked
+    /// remote control — so a dropped command reads as "blocked", never "broken".
+    private var remoteControlDisabledNote: some View {
+        Card {
+            HStack(spacing: Spacing.sm) {
+                Image(systemName: "lock.fill").foregroundColor(Theme.textFaint)
+                Text("Operator disabled remote control on this camera.")
+                    .font(.system(size: 12))
+                    .foregroundColor(Theme.textFaint)
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
     // MARK: Tally badge / border
 
     private var currentTally: TallyState { tally.state(for: channel.id) }
@@ -218,20 +267,25 @@ private struct ChannelDetail: View {
 
     // MARK: Tally (equal-width segmented bar)
 
+    // Hidden when the phone operator turned their tally light OFF — the camera ignores
+    // cues, so don't offer a control that does nothing (disclosure, like the W1 invariant).
+    @ViewBuilder
     private var tallyRow: some View {
-        Card {
-            VStack(alignment: .leading, spacing: Spacing.sm) {
-                SectionLabel(text: "Tally")
-                SegmentedBar(
-                    selection: Binding(
-                        get: { currentTally },
-                        set: { setTally($0) }
-                    ),
-                    options: TallyState.allCases,
-                    label: { $0.label },
-                    // Program red, Preview yellow, Off neutral blue.
-                    accent: { $0 == .off ? Theme.accentBlue : $0.accent }
-                )
+        if channel.tallyAllowed {
+            Card {
+                VStack(alignment: .leading, spacing: Spacing.sm) {
+                    SectionLabel(text: "Tally")
+                    SegmentedBar(
+                        selection: Binding(
+                            get: { currentTally },
+                            set: { setTally($0) }
+                        ),
+                        options: TallyState.allCases,
+                        label: { $0.label },
+                        // Program red, Preview yellow, Off neutral blue.
+                        accent: { $0 == .off ? Theme.accentBlue : $0.accent }
+                    )
+                }
             }
         }
     }
@@ -240,37 +294,6 @@ private struct ChannelDetail: View {
     private func setTally(_ state: TallyState) {
         tally.set(state, for: channel.id)
         channel.send(.setCue(state.rawValue))
-    }
-
-    // MARK: Output delay (equal-width segmented bar)
-
-    private var delayRow: some View {
-        Card {
-            VStack(alignment: .leading, spacing: Spacing.sm) {
-                SectionLabel(text: "Output delay (ms)")
-                SegmentedBar(
-                    selection: Binding(
-                        get: { channel.delay },
-                        set: { channel.delay = $0 }
-                    ),
-                    options: LatencyPreset.allCases,
-                    // The +ms value is the point of this control — show it next to
-                    // the name on each segment (the unit rides in the section label).
-                    label: { delayShortLabel($0) }
-                )
-            }
-        }
-    }
-
-    /// Compact, segment-friendly label for a latency preset (the full label is
-    /// long; equal segments need a tight string).
-    private func delayShortLabel(_ preset: LatencyPreset) -> String {
-        switch preset {
-        case .lowest: return "Lowest +0"
-        case .normal: return "Normal +120"
-        case .smooth: return "Smooth +200"
-        case .safe:   return "Safe +400"
-        }
     }
 }
 

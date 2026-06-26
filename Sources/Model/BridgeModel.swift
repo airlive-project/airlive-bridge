@@ -13,7 +13,7 @@ import CoreVideo
 /// for output — we never publish solo feeds AND the multiview program at once
 /// (Phase 2 wires the senders to this).
 enum AppMode: String, CaseIterable, Identifiable {
-    case solo, multiview
+    case multiview, solo          // order = the toolbar switch order (Multiview first)
     var id: String { rawValue }
     var label: String { self == .solo ? "Solo" : "Multiview" }
 }
@@ -30,21 +30,71 @@ final class BridgeModel: ObservableObject {
     @Published var selectedID: UUID? { didSet { if mode == .solo { routeProgram() } } }
 
     /// Solo (one camera) vs Multiview (the switcher).
-    @Published var mode: AppMode = .solo { didSet { routeProgram() } }
+    @Published var mode: AppMode = .multiview {   // default to the switcher view
+        didSet { routeProgram(); if mode == .multiview { syncMultiviewTally() } }
+    }
 
     /// Multiview switcher buses: the camera staged in PREVIEW and the camera live
     /// on PROGRAM.  `programID` set by CUT in Multiview; in Solo the program
     /// source is the selected camera (see `effectiveProgramID`).
-    @Published var previewID: UUID?
-    @Published var programID: UUID? { didSet { routeProgram() } }
+    @Published var previewID: UUID? { didSet { syncTallyIfNeeded() } }
+    @Published var programID: UUID? {
+        didSet { routeProgram(); syncTallyIfNeeded() }
+    }
+
+    /// Set while `take()` swaps both buses so the two didSets don't EACH broadcast tally —
+    /// otherwise the outgoing camera flashes red→off→green.  We broadcast ONCE after the
+    /// swap (Studio's cutTransition discipline).
+    private var suppressTallySync = false
+    private func syncTallyIfNeeded() {
+        guard mode == .multiview, !suppressTallySync else { return }
+        syncMultiviewTally()
+    }
+
+    /// In Multiview, tally auto-follows the buses like a real switcher: the PROGRAM camera
+    /// gets a red cue, the staged PREVIEW camera green, everyone else off — pushed to the
+    /// iPhones (`setCue`) AND mirrored in `TallyStore` so the rail/preview show it.  Only
+    /// fires on a real change, so it's event-driven (one packet per cut/stage, never per
+    /// frame).  Solo keeps its manual Tally row untouched.
+    private func syncMultiviewTally() {
+        for ch in channels {
+            let state: TallyState = ch.id == programID ? .program
+                                  : (ch.id == previewID ? .preview : .off)
+            guard TallyStore.shared.state(for: ch.id) != state else { continue }
+            TallyStore.shared.set(state, for: ch.id)
+            // Skip cameras whose operator turned tally OFF — the camera ignores the cue,
+            // so don't spend a packet (and don't pretend it's lit).
+            if ch.tallyAllowed { ch.send(.setCue(state.rawValue)) }
+        }
+    }
+
+    /// One-shot request to take the detached Multiview Wall window fullscreen (set by
+    /// the "Full-Screen" button, consumed by the wall once its NSWindow exists).  Detach
+    /// opens the same clean wall WINDOWED; Full-Screen opens it and flips it fullscreen.
+    @Published var wallFullscreenRequested = false
 
     func previewChannel() -> BridgeChannel? { channels.first { $0.id == previewID } }
     func programChannel() -> BridgeChannel? { channels.first { $0.id == effectiveProgramID } }
 
     /// Load a camera into Preview (stage it).
     func stage(_ id: UUID) { previewID = id }
-    /// Cut: the staged Preview camera goes live to Program.
-    func take() { if let p = previewID { programID = p } }
+    /// Cut: the staged Preview camera goes live to Program.  REFUSES a Control-only source
+    /// (videoActive=false): airing a channel with no video would silently dead-air the
+    /// program outputs (NDI/RTSP/SRT/OBS) with no picture.  Covers the CUT button, the
+    /// Space shortcut, and double-click hot-cut (all route through here).
+    func take() {
+        guard let p = previewID,
+              channels.first(where: { $0.id == p })?.videoActive ?? false else { return }
+        // Flip-flop like Studio's cutTransition: Preview → Program, and the OUTGOING
+        // Program drops back into Preview (so you can cut straight back).  Suppress the
+        // per-didSet tally so the swap emits ONE cue per camera, no red→off→green flash.
+        let outgoing = programID
+        suppressTallySync = true
+        programID = p
+        previewID = outgoing
+        suppressTallySync = false
+        if mode == .multiview { syncMultiviewTally() }
+    }
 
     // MARK: - Shortcut actions
 
@@ -56,7 +106,13 @@ final class BridgeModel: ObservableObject {
     func programSelect(_ index: Int) {
         guard index >= 0, index < channels.count else { return }
         let id = channels[index].id
-        if mode == .multiview { programID = id } else { select(id) }
+        if mode == .multiview {
+            // Don't hot-cut a Control-only (no-video) source straight to air.
+            guard channels[index].videoActive else { return }
+            programID = id
+        } else {
+            select(id)
+        }
     }
 
     /// ⇧+digit N (0-based): set the FOCUSED camera's lens to its Nth available
@@ -161,6 +217,9 @@ final class BridgeModel: ObservableObject {
     private func requestKeyframeForProgram(force: Bool = false) {
         let obsReceiving = programOutputs.contains { ($0 as? AirliveRelayOutput)?.isConnected == true }
         guard obsReceiving else { return }
+        // A Control-only program source has its encoder off — a keyframe poke is pointless
+        // (and a wasted control packet to the phone).
+        guard channels.first(where: { $0.id == effectiveProgramID })?.videoActive ?? false else { return }
         let pid = effectiveProgramID
         guard force || pid != lastKeyframeProgramID else { return }   // real source change only
         lastKeyframeProgramID = pid

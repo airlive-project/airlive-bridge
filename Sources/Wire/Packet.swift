@@ -164,13 +164,35 @@ public struct StateSnapshot: Codable, Equatable, Sendable {
     /// `DecodingError.keyNotFound` and its whole control message fails to decode.
     public var outputRotation: Int = 0
 
+    // ── Delivery mode + operator gates (additive, STORED defaults — see
+    //    docs/DELIVERY-MODE-DESIGN.md).  A camera that omits these keys decodes the
+    //    SAFE LEGACY assumption: video on, control + tally allowed.  STORED defaults
+    //    (not just init defaults) are REQUIRED so an old sender's missing key doesn't
+    //    throw keyNotFound — same rule as `outputRotation` above. ──────────────────
+    /// Is the camera CURRENTLY encoding + sending its own Airlive video on this link?
+    /// `false` = Control-only (encoder OFF; video, if any, arrives out-of-band via
+    /// AirPlay).  ⚠️ The UI MUST key its video tile off THIS field, never off the mode
+    /// it requested — the camera is the source of truth (protocol invariant W1).
+    public var videoActive: Bool = true
+    /// Operator-set camera name (Settings → Live); the human label Bridge shows for this
+    /// control link and binds an AirPlay tile to.  `""` → Bridge falls back to deviceModel.
+    public var deviceName: String = ""
+    /// Operator's "Remote control: on/off" gate.  `false` = the camera drops ALL remote
+    /// set-commands; Bridge greys its control panel and shows why (never sends into a void).
+    public var remoteControlAllowed: Bool = true
+    /// Operator's "Tally light: on/off" gate.  `false` = the camera ignores tally; Bridge
+    /// greys / hides its tally affordance.
+    public var tallyEnabled: Bool = true
+
     public init(iso: Float, shutterDenom: Float, wbKelvin: Float, tint: Float,
                 lens: String?, zoom: Float, focusAuto: Bool, focusPosition: Float,
                 fps: Int, exposureAuto: Bool, whiteBalanceAuto: Bool,
                 resolution: String, colorSpace: String,
                 lutName: String?, lutEnabled: Bool, isoCompensation: Bool,
                 availableLenses: [String], deviceModel: String,
-                outputRotation: Int = 0) {
+                outputRotation: Int = 0,
+                videoActive: Bool = true, deviceName: String = "",
+                remoteControlAllowed: Bool = true, tallyEnabled: Bool = true) {
         self.iso = iso
         self.shutterDenom = shutterDenom
         self.wbKelvin = wbKelvin
@@ -190,7 +212,26 @@ public struct StateSnapshot: Codable, Equatable, Sendable {
         self.availableLenses = availableLenses
         self.deviceModel = deviceModel
         self.outputRotation = outputRotation
+        self.videoActive = videoActive
+        self.deviceName = deviceName
+        self.remoteControlAllowed = remoteControlAllowed
+        self.tallyEnabled = tallyEnabled
     }
+
+    /// The human label for this control link: the operator-set `deviceName`, falling
+    /// back to the device model when the operator hasn't named it.
+    public var displayName: String {
+        let n = deviceName.trimmingCharacters(in: .whitespaces)
+        return n.isEmpty ? deviceModel : n
+    }
+}
+
+/// Canonical delivery-mode strings carried by `setDeliveryMode` and reflected by
+/// `StateSnapshot.videoActive`.  Matches the camera contract (docs/DELIVERY-MODE-DESIGN.md).
+public enum DeliveryMode: String, Sendable, CaseIterable, Identifiable {
+    case videoAndControl
+    case controlOnly
+    public var id: String { rawValue }
 }
 
 /// One control message — either a full `state` broadcast (iPhone → Mac)
@@ -288,6 +329,18 @@ public struct ControlMessage: Codable {
     /// Bridge can ship this before the camera handler exists.
     public static func forceKeyframe() -> ControlMessage {
         ControlMessage(type: "forceKeyframe")
+    }
+    /// Request the camera's delivery mode: `"videoAndControl"` (default — sends its own
+    /// H.264 proxy) or `"controlOnly"` (encoder OFF; control + tally only, video via
+    /// AirPlay).  Rides `stringValue`, exactly like `setLens`.  ⚠️ The request is NOT the
+    /// truth: the camera APPLIES it then re-broadcasts the actual state in
+    /// `StateSnapshot.videoActive` — always key the UI off `videoActive`.  Forward-safe:
+    /// an old camera hits `default: break` and keeps streaming.
+    public static func setDeliveryMode(_ mode: String) -> ControlMessage {
+        ControlMessage(type: "setDeliveryMode", stringValue: mode)
+    }
+    public static func setDeliveryMode(_ mode: DeliveryMode) -> ControlMessage {
+        setDeliveryMode(mode.rawValue)
     }
 
     // MARK: Encode / decode helpers — wrap JSON in an AirlivePacket payload

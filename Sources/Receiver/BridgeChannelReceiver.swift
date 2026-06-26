@@ -1052,6 +1052,10 @@ final class BridgeChannelReceiver: ChannelReceiver {
             guard let self, let channel = self.channel else { return }
             channel.latestFrame = nil
             channel.publishFrame(nil)   // blank every mirror to black
+            // Drop the last camera snapshot too (called ONLY on disconnect): otherwise a
+            // Control-only channel keeps videoActive=false and the tile shows stale
+            // "CONTROL ONLY" instead of the offline state.  nil → videoActive defaults true.
+            channel.remote = nil
         }
     }
 

@@ -105,6 +105,21 @@ final class BridgeChannel: ObservableObject, Identifiable {
     /// control UI.  nil until the first `.control` snapshot arrives.
     @Published var remote: StateSnapshot?
 
+    // ── Delivery-mode / operator-gate accessors (read off `remote`; the camera is
+    //    the source of truth — see docs/DELIVERY-MODE-DESIGN.md).  A nil snapshot
+    //    (AirPlay / capture / pre-connect) reads the safe legacy default. ──────────
+    /// Is the camera CURRENTLY sending its own Airlive video?  The UI keys its video
+    /// tile off THIS, never off a requested mode (protocol invariant W1).  nil remote
+    /// (AirPlay / capture) → true: those sources always carry their own video.
+    var videoActive: Bool { remote?.videoActive ?? true }
+    /// Operator's "Remote control" gate (default on).  Off → camera drops set-commands.
+    var remoteControlAllowed: Bool { remote?.remoteControlAllowed ?? true }
+    /// Operator's "Tally light" gate (default on).  Off → camera ignores tally cues.
+    var tallyAllowed: Bool { remote?.tallyEnabled ?? true }
+    /// Camera-side operator name (Settings → Live), for display / AirPlay binding.
+    /// Empty unless an Airlive camera reported one.
+    var cameraDeviceName: String { remote?.deviceName ?? "" }
+
     /// Operator toggle to hide this channel's preview (saves the per-frame
     /// CALayer update when the operator isn't watching it).  The receiver
     /// consults it to gate preview repaints.

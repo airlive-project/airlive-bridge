@@ -28,6 +28,9 @@ import SwiftUI
 
 struct CameraControlPanel: View {
     @ObservedObject var channel: BridgeChannel
+    /// Hide the LENS card where a lens picker already sits above the panel (the multiview
+    /// quick-row) — avoids the duplicate.  Solo has no top row, so it keeps the card.
+    var showLens: Bool = true
 
     // Local slider state — seeded from `remote`, committed on drag-end.
     @State private var iso: Double = 400
@@ -83,11 +86,72 @@ struct CameraControlPanel: View {
 
     private var content: some View {
         VStack(alignment: .leading, spacing: Spacing.md) {
-            lensCard
+            if channel.kind == .airlive { deliveryCard }
+            delayCard
+            if showLens { lensCard }
             exposureCard
             whiteBalanceCard
             focusCard
             framingCard
+        }
+    }
+
+    // MARK: Output delay (jitter-buffer latency) — per channel, in BOTH modes
+
+    /// This channel's playout latency (jitter buffer).  A receiver-side Bridge setting, so
+    /// it lives with camera control and shows in Solo AND Multiview.  (A precise ms field is
+    /// roadmapped alongside these presets — see ROADMAP.md.)
+    private var delayCard: some View {
+        Card {
+            VStack(alignment: .leading, spacing: Spacing.sm) {
+                SectionLabel(text: "Output delay (ms)")
+                SegmentedBar(
+                    selection: Binding(
+                        get: { channel.delay },
+                        set: { channel.delay = $0 }
+                    ),
+                    options: LatencyPreset.allCases,
+                    label: { delayShortLabel($0) }
+                )
+            }
+        }
+    }
+
+    private func delayShortLabel(_ preset: LatencyPreset) -> String {
+        switch preset {
+        case .lowest: return "Lowest +0"
+        case .normal: return "Normal +120"
+        case .smooth: return "Smooth +200"
+        case .safe:   return "Safe +400"
+        }
+    }
+
+    // MARK: Delivery mode (Airlive only)
+
+    /// Request Video+Control vs Control-only.  The SELECTION reflects the camera's
+    /// CONFIRMED state (`videoActive`), NOT our request: we send `setDeliveryMode` and the
+    /// camera re-broadcasts the real `videoActive` in its next snapshot (the request is
+    /// never assumed true).  Disabled with the rest of the panel when the operator has
+    /// revoked remote control.
+    private var deliveryCard: some View {
+        Card {
+            VStack(alignment: .leading, spacing: Spacing.sm) {
+                SectionLabel(text: "Delivery")
+                SegmentedBar(
+                    selection: Binding(
+                        get: { channel.videoActive ? DeliveryMode.videoAndControl : .controlOnly },
+                        set: { channel.send(.setDeliveryMode($0)) }
+                    ),
+                    options: DeliveryMode.allCases,
+                    label: { $0 == .videoAndControl ? "Video + Control" : "Control only" }
+                )
+                Text(channel.videoActive
+                     ? "Sending its own Airlive video."
+                     : "Encoder off — control + tally only (video via AirPlay).")
+                    .font(.system(size: 10))
+                    .foregroundColor(Theme.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 

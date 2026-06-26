@@ -43,6 +43,15 @@ struct AirliveBridgeApp: App {
         // First-launch window size — matches the ideal content frame so the
         // operator never has to resize to see all three zones.
         .defaultSize(width: 1200, height: 760)
+        // Profiles menu — the entry point for saving/loading a whole setup (channels +
+        // outputs + names + order).  The save/load engine is a ROADMAP item (needs the
+        // model serialised); these are the menu hooks it will wire into, disabled until then.
+        .commands {
+            CommandMenu("Profiles") {
+                Button("New Profile…") {}.disabled(true)
+                Button("Open Profile…") {}.disabled(true)
+            }
+        }
 
         // Clean fullscreen multiview wall (second monitor) — opened from the
         // multiview's "Fullscreen Multicam" button.  Shares the same model.
