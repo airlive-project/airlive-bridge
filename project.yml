@@ -15,6 +15,10 @@ targets:
       path: Sources/Info.plist
       properties:
         CFBundleDisplayName: Airlive Bridge
+        # Points the Dock/Finder at the asset-catalog AppIcon.  MUST live here: xcodegen
+        # regenerates Sources/Info.plist from these properties, so a hand-edit to the plist
+        # is wiped on the next `xcodegen` — which is why the icon never stuck before.
+        CFBundleIconName: AppIcon
         LSMinimumSystemVersion: "13.0"
         # Local-network access is needed twice: to receive the iPhone stream
         # (_airlive._tcp) AND for NDI's mDNS discovery (_ndi._tcp) — without the
@@ -40,10 +44,13 @@ targets:
         PRODUCT_NAME: Airlive Bridge
         MARKETING_VERSION: "0.1.0"
         SWIFT_VERSION: "5.9"
-        # Apple Silicon only — the vendored UxPlay static libs are arm64 (built with
-        # -march=native). Without this, a Release build also targets x86_64 and the
-        # link fails ("Undefined symbols for architecture x86_64").
-        ARCHS: arm64
+        # Apple Silicon only — the vendored UxPlay/openssl/libplist static libs are arm64.
+        # A bare `ARCHS: arm64` gets DROPPED by xcodegen (never lands in the pbxproj), so an
+        # Xcode build with ONLY_ACTIVE_ARCH=NO also targets x86_64 and the link fails with
+        # "Undefined symbol _raop_* / _dnssd_*" (arm64 libs ignored for the x86_64 slice).
+        # EXCLUDED_ARCHS reliably lands and forces an arm64-only link in BOTH Debug & Release.
+        ARCHS: "arm64"
+        EXCLUDED_ARCHS: x86_64
         ONLY_ACTIVE_ARCH: "NO"
         # App icon (populate the .appiconset with scripts/make-icon.sh once the
         # logo PNG exists; an empty set just builds without an icon meanwhile).
