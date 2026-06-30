@@ -45,6 +45,11 @@ final class AirliveRelayOutput: VideoOutput {
     /// start decoding without waiting for us to have caught a keyframe.
     private var lastFormat: Data?
 
+    /// True between a program-source CUT and the new source's first format: drop samples until
+    /// the new SPS/PPS arrives, so OBS never gets the new camera's H.264 against the old format
+    /// (a ~300 ms decode gap / green-screen artefacts).  Cleared in `relayFormat` (#20).
+    private var awaitingFormat = false
+
     init(label: String) { self.label = label }
 
     func start() {
@@ -74,14 +79,29 @@ final class AirliveRelayOutput: VideoOutput {
         queue.async { [weak self] in
             guard let self else { return }
             self.lastFormat = payload
+            self.awaitingFormat = false   // new source's format is here — samples may flow (#20)
             self.write(type: .formatDescription, payload: payload, timestampMicros: 0)
         }
     }
 
     func relaySample(_ payload: Data, timestampMicros: Int64) {
         queue.async { [weak self] in
-            self?.write(type: .sample, payload: payload, timestampMicros: timestampMicros)
+            guard let self, !self.awaitingFormat else { return }   // drop samples until the new format (#20)
+            self.write(type: .sample, payload: payload, timestampMicros: timestampMicros)
         }
+    }
+
+    /// Forget the cached SPS/PPS so a future OBS (re)connect does NOT replay a stale format
+    /// header.  Called when the program switches to a source that emits no raw H.264 (AirPlay /
+    /// combined): otherwise OBS would get the previous camera's format + zero samples and stall.
+    func clearLastFormat() {
+        queue.async { [weak self] in self?.lastFormat = nil }
+    }
+
+    /// Gate samples until the next format arrives — called on a program-source CUT so the new
+    /// camera's H.264 isn't decoded against the previous camera's SPS/PPS (#20).
+    func awaitFormat() {
+        queue.async { [weak self] in self?.awaitingFormat = true }
     }
 
     // MARK: - Bonjour discovery + connection (queue-confined)

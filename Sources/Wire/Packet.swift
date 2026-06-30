@@ -128,6 +128,61 @@ public final class PacketParser {
 
 // MARK: - Control channel
 
+/// Device-read capability ranges/options for the connected iPhone.  MIRRORS the camera's
+/// `AirliveCore` definition byte-for-byte (same fields, same defaults) so the JSON decodes both
+/// ways.  All values come from `device.formats` / the active format on the camera — the single
+/// source of truth its own pickers use.  See docs/REMOTE-CONTROL-CAPABILITIES-HANDOFF.md.
+public struct DeviceCapabilities: Codable, Equatable, Sendable {
+    public var isoMin: Float = 25
+    public var isoMax: Float = 3200
+    public var shutterMinDenom: Float = 24
+    public var shutterMaxDenom: Float = 8000
+    public var wbTempMin: Float = 2000
+    public var wbTempMax: Float = 10000
+    public var wbTintMin: Float = -150
+    public var wbTintMax: Float = 150
+    /// fps options for the CURRENT (codec × colourSpace × resolution), e.g. [24, 25, 30, 50, 60].
+    public var supportedFps: [Int] = []
+    /// Resolutions THIS device supports for the current codec+colourSpace ("HD" / "4K").
+    public var resolutions: [String] = []
+    /// Codecs available in the current colour space ("H.264" / "HEVC" / "ProRes 422").
+    public var codecs: [String] = []
+
+    public init(isoMin: Float = 25, isoMax: Float = 3200,
+                shutterMinDenom: Float = 24, shutterMaxDenom: Float = 8000,
+                wbTempMin: Float = 2000, wbTempMax: Float = 10000,
+                wbTintMin: Float = -150, wbTintMax: Float = 150,
+                supportedFps: [Int] = [], resolutions: [String] = [],
+                codecs: [String] = []) {
+        self.isoMin = isoMin; self.isoMax = isoMax
+        self.shutterMinDenom = shutterMinDenom; self.shutterMaxDenom = shutterMaxDenom
+        self.wbTempMin = wbTempMin; self.wbTempMax = wbTempMax
+        self.wbTintMin = wbTintMin; self.wbTintMax = wbTintMax
+        self.supportedFps = supportedFps
+        self.resolutions = resolutions
+        self.codecs = codecs
+    }
+
+    // Custom decoder so a PARTIAL `capabilities` object (any subset of keys, from an older/newer
+    // sender) decodes to defaults instead of THROWING keyNotFound and dropping the whole state
+    // packet — Swift's synthesized Decodable uses `decode`, not `decodeIfPresent`.  Mirrors the
+    // camera's AirliveCore exactly (see docs/REMOTE-CONTROL-CAPABILITIES-HANDOFF.md).
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        isoMin          = try c.decodeIfPresent(Float.self, forKey: .isoMin) ?? 25
+        isoMax          = try c.decodeIfPresent(Float.self, forKey: .isoMax) ?? 3200
+        shutterMinDenom = try c.decodeIfPresent(Float.self, forKey: .shutterMinDenom) ?? 24
+        shutterMaxDenom = try c.decodeIfPresent(Float.self, forKey: .shutterMaxDenom) ?? 8000
+        wbTempMin       = try c.decodeIfPresent(Float.self, forKey: .wbTempMin) ?? 2000
+        wbTempMax       = try c.decodeIfPresent(Float.self, forKey: .wbTempMax) ?? 10000
+        wbTintMin       = try c.decodeIfPresent(Float.self, forKey: .wbTintMin) ?? -150
+        wbTintMax       = try c.decodeIfPresent(Float.self, forKey: .wbTintMax) ?? 150
+        supportedFps    = try c.decodeIfPresent([Int].self,    forKey: .supportedFps) ?? []
+        resolutions     = try c.decodeIfPresent([String].self, forKey: .resolutions) ?? []
+        codecs          = try c.decodeIfPresent([String].self, forKey: .codecs) ?? []
+    }
+}
+
 /// Full snapshot of the iPhone's camera state.  Sent from iPhone → Mac on
 /// connection-establish so the Studio UI mirrors the actual camera values
 /// instead of the Mac-side defaults.  Re-sent after every locally-
@@ -183,6 +238,11 @@ public struct StateSnapshot: Codable, Equatable, Sendable {
     /// Operator's "Tally light: on/off" gate.  `false` = the camera ignores tally; Bridge
     /// greys / hides its tally affordance.
     public var tallyEnabled: Bool = true
+    /// Device-read capability ranges/options (ISO/shutter/WB bounds + fps/resolution/codec
+    /// options) so the remote UI renders DEVICE-ACCURATE controls for THIS iPhone instead of
+    /// hardcoded per-model tables.  Additive: a STORED default keeps an OLD sender (no
+    /// `capabilities` key) decodable.  See docs/REMOTE-CONTROL-CAPABILITIES-HANDOFF.md.
+    public var capabilities: DeviceCapabilities = .init()
 
     public init(iso: Float, shutterDenom: Float, wbKelvin: Float, tint: Float,
                 lens: String?, zoom: Float, focusAuto: Bool, focusPosition: Float,
@@ -192,7 +252,8 @@ public struct StateSnapshot: Codable, Equatable, Sendable {
                 availableLenses: [String], deviceModel: String,
                 outputRotation: Int = 0,
                 videoActive: Bool = true, deviceName: String = "",
-                remoteControlAllowed: Bool = true, tallyEnabled: Bool = true) {
+                remoteControlAllowed: Bool = true, tallyEnabled: Bool = true,
+                capabilities: DeviceCapabilities = .init()) {
         self.iso = iso
         self.shutterDenom = shutterDenom
         self.wbKelvin = wbKelvin
@@ -216,6 +277,40 @@ public struct StateSnapshot: Codable, Equatable, Sendable {
         self.deviceName = deviceName
         self.remoteControlAllowed = remoteControlAllowed
         self.tallyEnabled = tallyEnabled
+        self.capabilities = capabilities
+    }
+
+    // Custom decoder — a STORED DEFAULT is NOT enough: Swift's synthesized Decodable calls
+    // `decode` (not `decodeIfPresent`) and THROWS keyNotFound on a missing additive key, dropping
+    // the WHOLE state packet from an older sender.  Core fields stay `decode` (present in every
+    // version); additive fields use `decodeIfPresent ?? default`.  Mirrors the camera's AirliveCore.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        iso              = try c.decode(Float.self, forKey: .iso)
+        shutterDenom     = try c.decode(Float.self, forKey: .shutterDenom)
+        wbKelvin         = try c.decode(Float.self, forKey: .wbKelvin)
+        tint             = try c.decode(Float.self, forKey: .tint)
+        lens             = try c.decodeIfPresent(String.self, forKey: .lens)
+        zoom             = try c.decode(Float.self, forKey: .zoom)
+        focusAuto        = try c.decode(Bool.self, forKey: .focusAuto)
+        focusPosition    = try c.decode(Float.self, forKey: .focusPosition)
+        fps              = try c.decode(Int.self, forKey: .fps)
+        exposureAuto     = try c.decode(Bool.self, forKey: .exposureAuto)
+        whiteBalanceAuto = try c.decode(Bool.self, forKey: .whiteBalanceAuto)
+        resolution       = try c.decode(String.self, forKey: .resolution)
+        colorSpace       = try c.decode(String.self, forKey: .colorSpace)
+        lutName          = try c.decodeIfPresent(String.self, forKey: .lutName)
+        lutEnabled       = try c.decode(Bool.self, forKey: .lutEnabled)
+        isoCompensation  = try c.decode(Bool.self, forKey: .isoCompensation)
+        availableLenses  = try c.decode([String].self, forKey: .availableLenses)
+        deviceModel      = try c.decode(String.self, forKey: .deviceModel)
+        // ── Additive (tolerate missing keys from older senders) ──
+        outputRotation       = try c.decodeIfPresent(Int.self,    forKey: .outputRotation) ?? 0
+        videoActive          = try c.decodeIfPresent(Bool.self,   forKey: .videoActive) ?? true
+        deviceName           = try c.decodeIfPresent(String.self, forKey: .deviceName) ?? ""
+        remoteControlAllowed = try c.decodeIfPresent(Bool.self,   forKey: .remoteControlAllowed) ?? true
+        tallyEnabled         = try c.decodeIfPresent(Bool.self,   forKey: .tallyEnabled) ?? true
+        capabilities         = try c.decodeIfPresent(DeviceCapabilities.self, forKey: .capabilities) ?? .init()
     }
 
     /// The human label for this control link: the operator-set `deviceName`, falling

@@ -131,6 +131,27 @@ public:
     frameCb_ = cb; // ObjC block; ARC retains on copy in the property setter
   }
 
+  using ConnectionLostCallback = void (^)();
+
+  void setConnectionLostCallback(ConnectionLostCallback cb)
+  {
+    std::lock_guard<std::mutex> lk(cbMutex_);
+    connLostCb_ = cb;
+  }
+
+  // Invoke the "connection lost" block (if any) OUTSIDE the lock — it hops to the Swift/main
+  // side, which must never run while we hold cbMutex_.  Fires on a UxPlay network thread.
+  void notifyConnectionLost()
+  {
+    ConnectionLostCallback cb;
+    {
+      std::lock_guard<std::mutex> lk(cbMutex_);
+      cb = connLostCb_;
+    }
+    if (cb)
+      cb();
+  }
+
   void start()
   {
     std::lock_guard<std::mutex> lk(serverMutex_);
@@ -211,9 +232,14 @@ public:
   static void conn_destroy(void *cls)
   {
     auto *self = static_cast<AirPlayEngineImpl *>(cls);
-    if (self->openConnections_ > 0)
-      self->openConnections_--;
+    // Single atomic fetch-decrement: exactly one thread observes prev==1 (it closed the LAST
+    // connection), so the "lost" callback fires exactly once even when two transports close
+    // concurrently on different UxPlay threads — and the counter can't underflow past 0 the way
+    // a separate `> 0` compare + `--` could.  (#12: mid-session disconnect detect.)
+    int prev = self->openConnections_.fetch_sub(1, std::memory_order_acq_rel);
     os_log(ap_log(), "conn_destroy — open connections: %d", self->openConnections_.load());
+    if (prev == 1)
+      self->notifyConnectionLost();
   }
 
   static void conn_reset(void *cls, int reason)
@@ -221,6 +247,7 @@ public:
     auto *self = static_cast<AirPlayEngineImpl *>(cls);
     os_log(ap_log(), "conn_reset — lost connection (reason %d)", reason);
     self->decoder_.flush();
+    self->notifyConnectionLost();   // #12 — connection lost; clear the channel's video state
     // MUST NOT raop_destroy here — this runs on a UxPlay thread. Defer.
     self->requestRestart();
   }
@@ -597,6 +624,7 @@ private:
 
   // Frame delivery.
   FrameCallback frameCb_ = nil;
+  ConnectionLostCallback connLostCb_ = nil;   // fired when the mirror session drops (#12)
   std::mutex cbMutex_;
 
   // Decoupled-decode queue. Size 8 caps worst-case added latency at ~265ms
@@ -646,6 +674,12 @@ private:
 {
   _onVideoFrame = [onVideoFrame copy];
   _impl->setFrameCallback(_onVideoFrame);
+}
+
+- (void)setOnConnectionLost:(void (^)(void))onConnectionLost
+{
+  _onConnectionLost = [onConnectionLost copy];
+  _impl->setConnectionLostCallback(_onConnectionLost);
 }
 
 - (void)start

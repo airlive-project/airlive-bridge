@@ -9,6 +9,7 @@
 // control | Outputs) all observe it from there.
 
 import SwiftUI
+import AppKit   // NSSavePanel / NSOpenPanel / NSAlert for profile load / save
 
 @main
 struct AirliveBridgeApp: App {
@@ -43,13 +44,15 @@ struct AirliveBridgeApp: App {
         // First-launch window size — matches the ideal content frame so the
         // operator never has to resize to see all three zones.
         .defaultSize(width: 1200, height: 760)
-        // Profiles menu — the entry point for saving/loading a whole setup (channels +
-        // outputs + names + order).  The save/load engine is a ROADMAP item (needs the
-        // model serialised); these are the menu hooks it will wire into, disabled until then.
+        // Profiles menu — save / load a whole setup (channels + outputs + names + order +
+        // delays + mode) to a portable `.airliveprofile`.  Live connections / running
+        // outputs are NOT saved; a loaded profile rebuilds the layout (outputs OFF).
         .commands {
             CommandMenu("Profiles") {
-                Button("New Profile…") {}.disabled(true)
-                Button("Open Profile…") {}.disabled(true)
+                Button("Save Profile…") { saveProfile() }
+                    .keyboardShortcut("s", modifiers: [.command, .shift])
+                Button("Open Profile…") { openProfile() }
+                    .keyboardShortcut("o", modifiers: [.command])
             }
         }
 
@@ -61,5 +64,39 @@ struct AirliveBridgeApp: App {
                 .preferredColorScheme(.dark)
         }
         .defaultSize(width: 1280, height: 800)
+    }
+
+    // MARK: - Profiles (menu actions)
+
+    /// Write the current setup to a `.airliveprofile` the operator picks.
+    private func saveProfile() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [BridgeProfileDocument.contentType]
+        panel.nameFieldStringValue = "Bridge"
+        panel.canCreateDirectories = true
+        panel.title = "Save Bridge Profile"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do { try model.snapshotProfile().write(to: url) }
+        catch { presentProfileError(error, verb: "save") }
+    }
+
+    /// Load a `.airliveprofile` and replace the current setup with it.
+    private func openProfile() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [BridgeProfileDocument.contentType]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.title = "Open Bridge Profile"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do { model.applyProfile(try BridgeProfile.read(from: url)) }
+        catch { presentProfileError(error, verb: "open") }
+    }
+
+    private func presentProfileError(_ error: Error, verb: String) {
+        let alert = NSAlert()
+        alert.messageText = "Couldn’t \(verb) the profile"
+        alert.informativeText = error.localizedDescription
+        alert.alertStyle = .warning
+        alert.runModal()
     }
 }

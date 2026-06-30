@@ -50,15 +50,19 @@ struct MirrorVideoView: NSViewRepresentable {
 
         override init(frame frameRect: NSRect) {
             super.init(frame: frameRect)
-            // FILL (cover) — like Figma "Fill": scale to cover the whole tile, preserving
-            // aspect, cropping the overflow.  Never a letterboxed strip in a corner.
-            contentLayer.contentsGravity = .resizeAspectFill
-            contentLayer.masksToBounds = true   // crop what spills past the tile
+            // AppKit OWNS the ROOT backing layer — it keeps it sized to the view's bounds
+            // and positioned correctly in the window.  Our video goes in a SUBLAYER we own,
+            // which we size/rotate ourselves AND may mutate off-main.  Driving the ROOT
+            // hosted layer's bounds/position by hand fought AppKit's own placement and
+            // parked the picture in a corner quadrant — the bug we kept chasing.
+            wantsLayer = true
+            // FIT (contain): scale to show the WHOLE frame, preserving aspect — fill the
+            // LONG side to 100%, bars on the short side.  A portrait phone screen fills the
+            // HEIGHT (bars left/right, whole screen visible); a landscape camera fills the
+            // WIDTH.  Never cropped to a sliver.  The bars are the layer's black background.
+            contentLayer.contentsGravity = .resizeAspect
             contentLayer.backgroundColor = NSColor.black.cgColor
-            // Layer-HOSTING: set `layer` BEFORE `wantsLayer` → the layer is OURS,
-            // safe to mutate off-main (an AppKit-managed layer must be main-only).
-            self.layer = contentLayer
-            self.wantsLayer = true
+            layer?.addSublayer(contentLayer)
         }
 
         @available(*, unavailable)
@@ -135,14 +139,23 @@ struct MirrorVideoView: NSViewRepresentable {
             let size = viewSize
             guard size.width > 0, size.height > 0 else { return }
             let rot = ((currentRotation % 360) + 360) % 360
-            contentLayer.position = CGPoint(x: size.width / 2, y: size.height / 2)
-            contentLayer.transform = CATransform3DIdentity
-            let isPortrait = (rot == 90 || rot == 270)
-            contentLayer.bounds = CGRect(
-                origin: .zero,
-                size: isPortrait ? CGSize(width: size.height, height: size.width) : size
-            )
-            if rot != 0 {
+            if rot == 0 {
+                // Common case: the sublayer simply overlays the whole view.  `frame` is
+                // well-defined here (identity transform) and is the simplest correct fill.
+                contentLayer.transform = CATransform3DIdentity
+                contentLayer.frame = CGRect(origin: .zero, size: size)
+            } else {
+                // Rotated: never set `.frame` under a transform (undefined).  Size the
+                // pre-rotation bounds to the tile (swapped for portrait) and centre, so
+                // after rotation the layer maps onto the full tile; resizeAspect then fits
+                // the whole frame inside (bars on the short side).
+                contentLayer.transform = CATransform3DIdentity
+                contentLayer.position = CGPoint(x: size.width / 2, y: size.height / 2)
+                let isPortrait = (rot == 90 || rot == 270)
+                contentLayer.bounds = CGRect(
+                    origin: .zero,
+                    size: isPortrait ? CGSize(width: size.height, height: size.width) : size
+                )
                 contentLayer.transform = CATransform3DMakeRotation(-CGFloat(rot) * .pi / 180, 0, 0, 1)
             }
         }

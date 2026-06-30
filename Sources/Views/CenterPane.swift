@@ -67,19 +67,11 @@ private struct ChannelDetail: View {
             VStack(alignment: .leading, spacing: Spacing.md) {
                 previewSection
                 tallyRow
-                // Output-delay now lives inside CameraControlPanel (so it shows in Multiview
-                // too), alongside Delivery.
-                // Camera control commands the iPhone — pointless (and a source of
-                // stale-state bugs) with no camera attached.  Dim + disable it
-                // until connected; it lights up the moment the phone joins.
-                CameraControlPanel(channel: channel)
-                    .disabled(!channel.isConnected || !channel.remoteControlAllowed)
-                    .opacity((channel.isConnected && channel.remoteControlAllowed) ? 1.0 : 0.4)
-                // Disclosure, never silent: the operator revoked remote control on the
-                // phone, so the camera drops our commands — say so instead of a dead panel.
-                if channel.isConnected && !channel.remoteControlAllowed {
-                    remoteControlDisabledNote
-                }
+                // Camera control.  For a Screen-Mirroring tile this leads with the
+                // "Remote control" dropdown (attach an Airlive connection); for a normal
+                // channel it's the control panel directly.  Dim/disabled-until-connected +
+                // operator-revoked disclosure live inside CameraControlSection.
+                CameraControlSection(channel: channel, showLens: true)
             }
             // Tight top padding; generous-but-compact around the rest.  The
             // ScrollView lets the stack grow past the window without overflow.
@@ -168,11 +160,11 @@ private struct ChannelDetail: View {
 
     private var noSignalOverlay: some View {
         VStack(spacing: Spacing.sm) {
-            Image(systemName: channel.isConnected ? "hourglass" : "wifi.slash")
+            Image(systemName: channel.anyConnected ? "hourglass" : "wifi.slash")
                 .font(.system(size: 26))
                 .foregroundColor(Theme.textFaint)
-            Text(channel.isConnected ? "Connected — waiting for video"
-                                     : "Waiting for camera to connect")
+            Text(channel.anyConnected ? "Connected — waiting for video"
+                                      : "Waiting for camera to connect")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundColor(Theme.textSecondary)
         }
@@ -209,21 +201,6 @@ private struct ChannelDetail: View {
                 .foregroundColor(Theme.textFaint)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    /// Shown under the (greyed) control panel when the phone operator has revoked
-    /// remote control — so a dropped command reads as "blocked", never "broken".
-    private var remoteControlDisabledNote: some View {
-        Card {
-            HStack(spacing: Spacing.sm) {
-                Image(systemName: "lock.fill").foregroundColor(Theme.textFaint)
-                Text("Operator disabled remote control on this camera.")
-                    .font(.system(size: 12))
-                    .foregroundColor(Theme.textFaint)
-                Spacer(minLength: 0)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
     }
 
     // MARK: Tally badge / border

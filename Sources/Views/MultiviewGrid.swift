@@ -75,10 +75,10 @@ struct MultiviewGrid: View {
                             .padding(.horizontal, Spacing.sm)
                     }
                     .bridgeButton(selected: preview.remote?.lens == label)
-                    .disabled(!preview.isConnected || !preview.remoteControlAllowed)
+                    .disabled(!preview.remoteControlConnected || !preview.remoteControlAllowed)
                 }
             }
-            .opacity((preview.isConnected && preview.remoteControlAllowed) ? 1 : 0.4)
+            .opacity((preview.remoteControlConnected && preview.remoteControlAllowed) ? 1 : 0.4)
         } else {
             Text("Stage a camera to pick its lens")
                 .font(.system(size: 11)).foregroundColor(Theme.textFaint)
@@ -161,22 +161,22 @@ struct MultiviewGrid: View {
     private var cameraControl: some View {
         if let preview = model.previewChannel() {
             // Lens lives in the quick-row above the panes here — hide the panel's LENS card.
-            CameraControlPanel(channel: preview, showLens: false)
-                .disabled(!preview.isConnected || !preview.remoteControlAllowed)
-                .opacity((preview.isConnected && preview.remoteControlAllowed) ? 1.0 : 0.4)
+            // For a Screen-Mirroring tile this leads with the "Remote control" dropdown.
+            CameraControlSection(channel: preview, showLens: false)
         }
     }
 
     // MARK: Camera thumbnails (rows of 4)
 
     private var thumbnails: some View {
-        let count = model.channels.count
+        let tiles = model.multiviewChannels          // Remote-Control channels carry no tile
+        let count = tiles.count
         let capacity = max(1, (count + 3) / 4) * 4   // whole rows of 4
         let columns = Array(repeating: GridItem(.flexible(), spacing: 0), count: 4)
         return LazyVGrid(columns: columns, spacing: 0) {
             ForEach(0 ..< capacity, id: \.self) { index in
                 if index < count {
-                    let channel = model.channels[index]
+                    let channel = tiles[index]
                     ThumbCell(channel: channel,
                               isProgram: channel.id == model.programID,
                               isPreview: channel.id == model.previewID,
@@ -304,7 +304,7 @@ private struct LivePane: View {
             .overlay(alignment: .bottom) {
             if showName {
                 HStack(spacing: Spacing.xs) {
-                    ConnectionDot(connected: channel.isConnected)
+                    ConnectionDot(connected: channel.anyConnected)   // combined: control link counts too
                     Text(channel.name).font(.system(size: 10, weight: .semibold)).foregroundColor(.white)
                 }
                 .padding(.horizontal, Spacing.sm)
@@ -317,9 +317,9 @@ private struct LivePane: View {
 
     private var offline: some View {
         VStack(spacing: Spacing.xs) {
-            Image(systemName: channel.isConnected ? "hourglass" : "wifi.slash")
+            Image(systemName: channel.anyConnected ? "hourglass" : "wifi.slash")
                 .font(.system(size: 18)).foregroundColor(Theme.textFaint)
-            Text(channel.isConnected ? "Waiting for video" : "No camera")
+            Text(channel.anyConnected ? "Waiting for video" : "No camera")
                 .font(.system(size: 10)).foregroundColor(Theme.textFaint)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -427,18 +427,19 @@ struct MultiviewWall: View {
     /// and the `.fit` keep every tile at 16:9.  bigRow = two 16:9 panes side by side; each
     /// thumbnail row is half a pane tall → W:H = 64 : 9·(2 + rows).
     private var gridAspect: CGFloat {
-        let rows = CGFloat(max(1, (model.channels.count + 3) / 4))
+        let rows = CGFloat(max(1, (model.multiviewChannels.count + 3) / 4))
         return 64.0 / (9.0 * (2.0 + rows))
     }
 
     private var thumbnails: some View {
-        let count = model.channels.count
+        let tiles = model.multiviewChannels          // Remote-Control channels carry no tile
+        let count = tiles.count
         let capacity = max(1, (count + 3) / 4) * 4
         let columns = Array(repeating: GridItem(.flexible(), spacing: 0), count: 4)
         return LazyVGrid(columns: columns, spacing: 0) {
             ForEach(0 ..< capacity, id: \.self) { index in
                 if index < count {
-                    let channel = model.channels[index]
+                    let channel = tiles[index]
                     ThumbCell(channel: channel,
                               isProgram: channel.id == model.programID,
                               isPreview: channel.id == model.previewID,

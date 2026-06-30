@@ -232,6 +232,13 @@ final class NDIOutput: VideoOutput {
     // mid-send.  Also guards `_isLive` (the public `isLive` accessor takes it).
     private let lock = NSLock()
 
+    // The program tap calls `send` on MAIN (BridgeModel.feedProgram); the BGRA convert +
+    // synchronous SDK send must NOT block main per frame.  Hand them to this serial queue.
+    // `sendInFlight` drops a frame while one is still being sent, so a slow/stalled NDI
+    // receiver can never back up a queue of retained pixel buffers (memory).  Guarded by `lock`.
+    private let sendQueue = DispatchQueue(label: "studio.airlive.bridge.ndi.send", qos: .userInteractive)
+    private var sendInFlight = false
+
     // BGRA conversion fallback — created lazily only if a non-BGRA frame arrives.
     private var ciContext: CIContext?
     // Recycled destination pool for the conversion path (no per-frame alloc).
@@ -262,9 +269,24 @@ final class NDIOutput: VideoOutput {
         _isLive = false
     }
 
-    /// Publish one decoded frame.  No-op when not live.  BGRA frames go straight
-    /// to the SDK; other formats are converted first.
+    /// Publish one decoded frame.  No-op when not live.  Called on MAIN (the program tap) but
+    /// the convert + SDK send run OFF main on `sendQueue`; a frame arriving while a send is
+    /// still in flight is dropped (latest-wins, bounded memory).  The IOSurface-backed buffer
+    /// is retained across the hand-off — no copy.
     func send(_ pixelBuffer: CVPixelBuffer, timeNs: UInt64) {
+        lock.lock()
+        guard _isLive, !sendInFlight else { lock.unlock(); return }
+        sendInFlight = true
+        lock.unlock()
+        sendQueue.async { [weak self] in
+            guard let self else { return }
+            self.deliver(pixelBuffer, timeNs: timeNs)
+            self.lock.lock(); self.sendInFlight = false; self.lock.unlock()
+        }
+    }
+
+    /// The actual convert + SDK send, off main on `sendQueue`.
+    private func deliver(_ pixelBuffer: CVPixelBuffer, timeNs: UInt64) {
         lock.lock(); defer { lock.unlock() }
         guard _isLive, let sender, let sendVideo = NDIRuntime.shared.sendVideo else { return }
 

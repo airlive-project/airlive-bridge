@@ -39,7 +39,14 @@ final class BridgeChannel: ObservableObject, Identifiable {
     @Published var name: String
 
     /// True while an iPhone is connected to this channel's receiver.
-    @Published var isConnected: Bool = false
+    @Published var isConnected: Bool = false {
+        didSet { if isConnected != oldValue { onConnectivityChanged?() } }
+    }
+
+    /// Fired on main when EITHER transport's connected state flips (see `controlConnected`).
+    /// The model uses it to re-assert tally to a (re)connected camera and clear a stale tally
+    /// border from a fully-disconnected one.  Set by `BridgeModel` at channel creation.
+    var onConnectivityChanged: (() -> Void)?
 
     /// "Has a live picture" gate for the no-signal overlay — a LOW-FREQUENCY
     /// published flag, NOT the per-frame buffer.  Set once when video starts,
@@ -110,8 +117,13 @@ final class BridgeChannel: ObservableObject, Identifiable {
     //    (AirPlay / capture / pre-connect) reads the safe legacy default. ──────────
     /// Is the camera CURRENTLY sending its own Airlive video?  The UI keys its video
     /// tile off THIS, never off a requested mode (protocol invariant W1).  nil remote
-    /// (AirPlay / capture) → true: those sources always carry their own video.
-    var videoActive: Bool { remote?.videoActive ?? true }
+    /// (AirPlay / capture) → true: those sources always carry their own video.  A combined
+    /// "Screen Mirroring + Remote Control" channel is ALWAYS video-active — its picture is the
+    /// AirPlay side, even though its ARLV control side reports `videoActive=false` (control-only).
+    var videoActive: Bool {
+        if kind == .screenMirroringPlusControl { return true }
+        return remote?.videoActive ?? true
+    }
     /// Operator's "Remote control" gate (default on).  Off → camera drops set-commands.
     var remoteControlAllowed: Bool { remote?.remoteControlAllowed ?? true }
     /// Operator's "Tally light" gate (default on).  Off → camera ignores tally cues.
@@ -134,6 +146,50 @@ final class BridgeChannel: ObservableObject, Identifiable {
         }
     }
 
+    /// Precise ADDITIONAL playout delay (ms) on top of `delay`'s preset — set in the
+    /// channel's gear settings to align this source with slower cameras (multicam sync).
+    /// Forwarded live to the receiver.
+    @Published var extraDelayMs: Int = 0 {
+        didSet {
+            guard extraDelayMs != oldValue else { return }
+            receiver?.updateExtraDelay(extraDelayMs)
+        }
+    }
+
+    // MARK: - "Screen Mirroring + Remote Control" — two transports, one channel ("killer combo")
+    //
+    // A `.screenMirroringPlusControl` channel runs BOTH receivers for the SAME phone: an AirPlay
+    // (UxPlay) receiver for VIDEO (`receiver`) and a control-only ARLV receiver for CONTROL +
+    // tally (`controlReceiver`).  The phone screen-mirrors (video) AND connects the Airlive app
+    // (control-only — no second encode, cool phone) to the same-named channel.  Video state
+    // (isConnected / latestFrame / publishFrame) comes from the AirPlay side; control state
+    // (`remote`, `controlConnected`) from the ARLV side.  See docs/DELIVERY-MODE-DESIGN.md.
+
+    /// True while the ARLV control connection (Airlive app) is up.  Separate from `isConnected`
+    /// (the video / AirPlay side) so one transport connecting doesn't imply the other.
+    @Published var controlConnected: Bool = false {
+        didSet { if controlConnected != oldValue { onConnectivityChanged?() } }
+    }
+
+    /// Whether the remote-control connection is live: the ARLV control side for a combined
+    /// channel, else the channel's single connection.  Drives the control panel's enabled state.
+    var remoteControlConnected: Bool {
+        kind == .screenMirroringPlusControl ? controlConnected : isConnected
+    }
+
+    /// True when EITHER transport is live — the video side (`isConnected`) or the control side
+    /// (`controlConnected`).  For a combined channel control can be up while video is down (or
+    /// vice-versa); the rail status icon + delete-confirm guard key off this so a live control
+    /// link is never shown as "disconnected".
+    var anyConnected: Bool { isConnected || controlConnected }
+
+    /// Only an ARLV (Airlive Camera) channel emits raw H.264 access units that the PASSTHROUGH
+    /// outputs (OBS relay / RTSP / SRT) re-publish without transcoding.  AirPlay, combined
+    /// (its video is AirPlay), and capture (BGRA) produce only DECODED frames — they can feed
+    /// NDI but NOT the passthrough relays.  The model warns the operator when the program lacks
+    /// this so those outputs don't go silently black.
+    var producesRawH264: Bool { kind == .airlive }
+
     /// Program taps: set by `BridgeModel` on the channel that is currently the
     /// program source (PGM in Multiview, the selected camera in Solo) and nil on
     /// every other channel.  Switching the source just moves the closures.
@@ -151,11 +207,13 @@ final class BridgeChannel: ObservableObject, Identifiable {
     // lives on `BridgeModel`; the model pushes it to this channel's receiver via
     // `receiver.updateAuth(...)` on start and on change.  Nothing per-channel here.
 
-    /// The owned receiver — TCP listener + Bonjour + decoder.  Forward-declared
-    /// (`ChannelReceiver` is created in the receiver phase) and optional so this
-    /// foundation file compiles standalone; the receiver phase assigns it in
-    /// `start()` and the published bindings flow from it.
+    /// The owned receiver — TCP listener + Bonjour + decoder.  For a combined channel this is
+    /// the AirPlay (video) receiver; for every other kind it's the single receiver.
     var receiver: ChannelReceiver?
+
+    /// The ARLV control-only receiver — ONLY for a `.screenMirroringPlusControl` channel (the
+    /// Airlive app connects here for control + tally; the camera gates its video encoder).
+    var controlReceiver: ChannelReceiver?
 
     init(id: UUID = UUID(), name: String, kind: ChannelKind = .airlive,
          captureDeviceID: String? = nil, delay: LatencyPreset = .normal) {
@@ -184,10 +242,17 @@ final class BridgeChannel: ObservableObject, Identifiable {
                 receiver = AirPlayReceiver(channel: self, name: name)   // advertises as this Apple-TV name
             case .airlive:
                 receiver = BridgeChannelReceiver(channel: self, order: order)
+            case .screenMirroringPlusControl:
+                // ONE channel, TWO transports for the same phone: AirPlay = video,
+                // ARLV (control-only) = control + tally.  Same name so the phone sees one
+                // "Camera X" in both Screen Mirroring and the Airlive app.
+                receiver = AirPlayReceiver(channel: self, name: name)                       // video
+                controlReceiver = BridgeChannelReceiver(channel: self, order: order, controlSide: true)  // control-only
             }
         }
         receiver?.start()
-        // The global auth config is pushed to this receiver by `BridgeModel`
+        controlReceiver?.start()
+        // The global auth config is pushed to this channel's receiver(s) by `BridgeModel`
         // (right after start, and whenever it changes) — see BridgeModel.applyAuth.
     }
 
@@ -204,10 +269,12 @@ final class BridgeChannel: ObservableObject, Identifiable {
         onProgramFormat = nil
         onProgramSample = nil
         receiver?.stop()
+        controlReceiver?.stop()
         publishFrame(nil)   // blank every mirror tile to black ("no signal")
         let clearUI = { [weak self] in
             guard let self else { return }
             self.isConnected = false
+            self.controlConnected = false
             self.latestFrame = nil
         }
         if Thread.isMainThread {
@@ -219,20 +286,43 @@ final class BridgeChannel: ObservableObject, Identifiable {
 
     // MARK: - Remote control
 
-    /// Send a control command to the connected iPhone (Mac → iPhone).  No-op
-    /// when no receiver / no connection is present.
+    /// Send a control command to the connected iPhone (Mac → iPhone).  Routes to the control
+    /// connection — the ARLV control receiver for a combined channel (AirPlay has no
+    /// back-channel), else the single receiver.  No-op when nothing is connected.
     func send(_ msg: ControlMessage) {
-        receiver?.send(msg)
+        (controlReceiver ?? receiver)?.send(msg)
     }
 
     // MARK: - Rename
 
-    /// Rename the channel and push the new label to the receiver so the Bonjour
-    /// TXT (`src`) updates for the iPhone.
+    /// Rename the channel and push the new label to both receivers so the Bonjour TXT (`src`)
+    /// and the AirPlay advertise name update for the iPhone.
     func rename(_ newName: String) {
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         name = trimmed
         receiver?.rename(trimmed)
+        controlReceiver?.rename(trimmed)
+    }
+
+    // MARK: - Fan-out to both receivers (combined channel)
+
+    /// Push the global auth config to every receiver this channel owns.  AirPlay no-ops it;
+    /// the ARLV receiver(s) apply it.
+    func updateAuth(require: Bool, password: String, disconnectNow: Bool) {
+        receiver?.updateAuth(require: require, password: password, disconnectNow: disconnectNow)
+        controlReceiver?.updateAuth(require: require, password: password, disconnectNow: disconnectNow)
+    }
+
+    /// Advertise this channel's order on every receiver (ARLV uses it; AirPlay no-ops).
+    func updateOrder(_ index: Int) {
+        receiver?.updateOrder(index)
+        controlReceiver?.updateOrder(index)
+    }
+
+    /// Mark whether this channel feeds the program bus, on every receiver (H1 gate).
+    func setProgramSource(_ isProgram: Bool) {
+        receiver?.setProgramSource(isProgram)
+        controlReceiver?.setProgramSource(isProgram)
     }
 }

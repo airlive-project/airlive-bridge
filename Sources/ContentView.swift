@@ -16,14 +16,21 @@ struct ContentView: View {
     @EnvironmentObject var model: BridgeModel
     @EnvironmentObject var shortcuts: ShortcutCenter
     @State private var showShortcuts = false
+    /// Each side rail collapses to a minimal strip INDEPENDENTLY — the chevron lives on the
+    /// rail itself (header when open, strip top when collapsed), so the operator hides exactly
+    /// the column they want for more multiview room.
+    @State private var leftCollapsed = false
+    @State private var rightCollapsed = false
 
     var body: some View {
         HStack(spacing: 0) {
             // No explicit dividers between zones — the rails carry faint edge
             // hairlines (see ChannelsRail / OutputsRail).
-            ChannelsRail(model: model)
+            ChannelsRail(model: model, collapsed: leftCollapsed,
+                         onToggleCollapse: { withAnimation(.easeInOut(duration: 0.2)) { leftCollapsed.toggle() } })
             CenterPane(model: model)
-            OutputsRail(model: model)
+            OutputsRail(model: model, collapsed: rightCollapsed,
+                        onToggleCollapse: { withAnimation(.easeInOut(duration: 0.2)) { rightCollapsed.toggle() } })
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.bgApp)

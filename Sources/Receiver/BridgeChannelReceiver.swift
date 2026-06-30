@@ -84,6 +84,29 @@ final class BridgeChannelReceiver: ChannelReceiver {
     /// Last busy state advertised — so a name-only re-advertise keeps the flag.
     private var advertisedBusy = false
 
+    // ── Program-source gate (H1) ──────────────────────────────────────────
+    /// True when THIS channel is the program source (set by the model via
+    /// `setProgramSource`, hopped onto `queue`).  Gates the per-frame program taps so a
+    /// NON-program channel does ZERO per-frame `DispatchQueue.main.async` hops — the big
+    /// win at 5-camera scale, where 4/5 of the hops were no-ops finding a nil closure.
+    private var isProgramSource = false
+    /// One main hop per (re)connect to flip the published "no signal" gate + log the
+    /// first frame; after that a non-program channel never hops on the frame path.
+    private var didFlipSignalGate = false
+
+    // ── Remote-snapshot coalescer (H2) ────────────────────────────────────
+    /// Coalesce the camera's `state` snapshots to ~1 Hz before touching the main-isolated
+    /// @Published `remote` (don't trust the phone's own throttle; protect main if it ever
+    /// sends faster).  Leading-edge immediate, then at most one push per window.  All three
+    /// fields are queue-confined.
+    private var pendingRemote: StateSnapshot?
+    private var remoteFlushScheduled = false
+    private let remoteCoalesceSeconds: Double = 1.0
+
+    /// M2: a dual-stack candidate that never reaches `.ready` is dropped after this, so a
+    /// half-open straggler can't sit in `pendingConnections` forever.
+    private let candidateReadyTimeout: TimeInterval = 10
+
     private let parser = PacketParser()
     private var formatDescription: CMVideoFormatDescription?
 
@@ -98,10 +121,15 @@ final class BridgeChannelReceiver: ChannelReceiver {
     // iPhone↔Mac crystal drift over a long show.  See CamSlotReceiver for the
     // full prose; the math below is unchanged.
 
-    /// Operator-chosen added delay (seconds), read from the channel's
-    /// `LatencyPreset`.  0 (Lowest) = promote on decode; >0 = hold frames in
-    /// `frameRing` until their playout deadline.  Re-read live on a preset change.
+    /// EFFECTIVE playout depth (seconds) = `basePresetSeconds` + `extraDelaySeconds`.
+    /// 0 (Lowest, no extra) = promote on decode; >0 = hold frames in `frameRing` until
+    /// their playout deadline.  Re-derived live on a preset OR extra-delay change.
     private var bufferSeconds: Double
+    /// The `LatencyPreset`'s coarse base (set by `updateDelay`).
+    private var basePresetSeconds: Double
+    /// The operator's precise ADDITIONAL ms (channel gear → "Additional delay"), as
+    /// seconds (set by `updateExtraDelay`).  Added on top of the preset base.
+    private var extraDelaySeconds: Double = 0
 
     private var anchorMacTime: TimeInterval = 0
     private var anchorIphonePTS: TimeInterval = 0
@@ -154,17 +182,29 @@ final class BridgeChannelReceiver: ChannelReceiver {
 
     private var effectiveAuthRequired: Bool { requireAuth && !authPassword.isEmpty }
 
+    /// Control-side of a combined "Screen Mirroring + Remote Control" channel: this ARLV
+    /// receiver carries ONLY control (the channel's video is its AirPlay side).  So it (a) tells
+    /// the camera to go CONTROL-ONLY (video encoder off) on connect, and (b) publishes control
+    /// state to `remote` / `controlConnected` WITHOUT touching the video state
+    /// (`isConnected` / `latestFrame` / mirror) the AirPlay receiver owns.  The camera honours
+    /// `setDeliveryMode` and remembers it across reconnects (sticky).
+    private let controlSide: Bool
+
     // MARK: - Init / deinit
 
-    init(channel: BridgeChannel, order: Int = 0, identity: BridgeIdentity = .shared) {
+    init(channel: BridgeChannel, order: Int = 0, identity: BridgeIdentity = .shared,
+         controlSide: Bool = false) {
         self.channel      = channel
         self.channelID    = channel.id
+        self.controlSide  = controlSide
         self.identity     = identity
         self.sid          = channel.id.uuidString
         self.src          = channel.name
         self.order        = order   // so the FIRST Bonjour advert already has the right ord
         self.instanceName = "Airlive \(channel.id.uuidString.prefix(8))"
-        self.bufferSeconds = channel.delay.seconds
+        self.basePresetSeconds = channel.delay.seconds
+        self.extraDelaySeconds = Swift.max(0, Double(channel.extraDelayMs) / 1000.0)
+        self.bufferSeconds = self.basePresetSeconds + self.extraDelaySeconds
         self.queue        = DispatchQueue(label: "studio.airlive.bridge.channel.\(channel.id.uuidString)",
                                           qos: .userInteractive)
     }
@@ -274,14 +314,31 @@ final class BridgeChannelReceiver: ChannelReceiver {
     func updateDelay(_ preset: LatencyPreset) {
         queue.async { [weak self] in
             guard let self else { return }
-            let newValue = preset.seconds
-            guard abs(newValue - self.bufferSeconds) > 0.0005 else { return }
-            self.bufferSeconds = newValue
-            self.anchorSet = false
-            self.pixelBufferLock.lock()
-            self.frameRing.removeAll(keepingCapacity: true)
-            self.pixelBufferLock.unlock()
+            self.basePresetSeconds = preset.seconds
+            self.applyEffectiveBufferLocked()
         }
+    }
+
+    /// Precise ADDITIONAL delay (ms) on top of the preset (channel gear).  Re-derives the
+    /// effective playout depth and re-anchors, exactly like a preset change.
+    func updateExtraDelay(_ ms: Int) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.extraDelaySeconds = Swift.max(0, Double(ms) / 1000.0)
+            self.applyEffectiveBufferLocked()
+        }
+    }
+
+    /// On `queue`: set `bufferSeconds = base + extra`; if it really changed, re-anchor and
+    /// drop frames queued under the old depth (cleaner than re-timing them).
+    private func applyEffectiveBufferLocked() {
+        let newValue = basePresetSeconds + extraDelaySeconds
+        guard abs(newValue - bufferSeconds) > 0.0005 else { return }
+        bufferSeconds = newValue
+        anchorSet = false
+        pixelBufferLock.lock()
+        frameRing.removeAll(keepingCapacity: true)
+        pixelBufferLock.unlock()
     }
 
     /// Apply the receiver-password auth config live.  Snapshots the toggle +
@@ -418,6 +475,20 @@ final class BridgeChannelReceiver: ChannelReceiver {
             }
         }
         conn.start(queue: queue)
+
+        // M2: a candidate that never reaches `.ready` (half-open straggler that also never
+        // `.failed`s) would otherwise sit in `pendingConnections` forever.  Drop it after a
+        // bound.  Guarded so we never touch the committed connection (it left `pending` the
+        // moment it won) or a candidate that already resolved.
+        queue.asyncAfter(deadline: .now() + candidateReadyTimeout) { [weak self, weak conn] in
+            guard let self, let conn else { return }
+            guard conn !== self.connection,
+                  self.pendingConnections.contains(where: { $0 === conn }) else { return }
+            print("[BridgeReceiver \(self.src)] ⌛ dropping candidate that never readied")
+            conn.stateUpdateHandler = nil
+            self.pendingConnections.removeAll { $0 === conn }
+            conn.cancel()
+        }
     }
 
     /// First candidate to `.ready` wins.  On `queue`.
@@ -468,6 +539,11 @@ final class BridgeChannelReceiver: ChannelReceiver {
         pixelBufferLock.unlock()
         anchorSet = false
         formatDescription = nil
+        didFlipSignalGate = false                 // re-flip the no-signal gate on reconnect (H1)
+        pendingRemote = nil                        // drop any coalesced snapshot (H2) so a
+        remoteFlushScheduled = false               // trailing flush can't resurrect stale state,
+                                                   // and the next connect's leading-edge push fires
+                                                   // immediately (no ~1 s blank on fast reconnect)
         publishConnected(false)
         publishSignalCleared()                    // UI returns to "no signal"
     }
@@ -582,6 +658,15 @@ final class BridgeChannelReceiver: ChannelReceiver {
         cancelAuthStallTimer()
         updateOccupancyAdvertisement(occupied: true)
         publishConnected(true)
+        // Set the delivery mode EXPLICITLY on every ARLV connect, so the camera's sticky
+        // `lastDeliveryControlOnly` can't leak across channels with different intent:
+        //   • combined channel's control side → control-only (video comes via AirPlay);
+        //   • a normal channel → video+control, which RESETS a camera that a previous
+        //     control-only connection left with its encoder off (the "connected but fps=0 /
+        //     only remote control" bug).
+        // The camera's `setEncoderEnabled` is idempotent (it re-confirms but doesn't thrash),
+        // so re-asserting the current mode is a free no-op.
+        send(.setDeliveryMode(controlSide ? .controlOnly : .videoAndControl))
         if let fmt = pendingFormatPayload {
             pendingFormatPayload = nil
             buildFormatDescription(from: fmt)
@@ -597,9 +682,11 @@ final class BridgeChannelReceiver: ChannelReceiver {
     /// a data race.  The relay re-dispatches to its own queue immediately, so the
     /// per-packet main hop is just a pointer handoff.
     private func forwardProgramFormat(_ payload: Data) {
+        guard isProgramSource else { return }   // H1: no main hop for a non-program channel
         DispatchQueue.main.async { [weak self] in self?.channel?.onProgramFormat?(payload) }
     }
     private func forwardProgramSample(_ payload: Data, _ timestampMicros: Int64) {
+        guard isProgramSource else { return }   // H1: no main hop for a non-program channel
         DispatchQueue.main.async { [weak self] in self?.channel?.onProgramSample?(payload, timestampMicros) }
     }
 
@@ -975,15 +1062,14 @@ final class BridgeChannelReceiver: ChannelReceiver {
 
         let delay = playout - CACurrentMediaTime()
         if delay <= 0.001 {
-            // Lowest (0 ms) path: promote INLINE on the VT decode-callback
-            // thread (no timer hop).  `promoteDue` therefore runs on TWO
-            // threads — this VT thread (inline) and `queue` (the asyncAfter
-            // timer).  Both touch `frameRing` only under `pixelBufferLock`, and
-            // `present` hops to main for everything else, so this is race-free.
-            // ⚠️ Any new `queue`-confined state read inside `promoteDue` MUST be
-            // guarded the same way — it can be entered straight off the VT
-            // thread here without a `queue` hop.
-            promoteDue()
+            // Lowest (0 ms): promote AS SOON AS POSSIBLE — but still hop onto `queue`
+            // (a zero-delay `async`, not the `asyncAfter` timer) instead of promoting
+            // INLINE on this VT decode thread.  That keeps `promoteDue`/`present`
+            // strictly queue-confined, so the per-frame gate state they read
+            // (`isProgramSource`, `didFlipSignalGate`) needs no extra lock.  The hop is
+            // a serial-queue enqueue (sub-ms), not a thread switch, so the low-latency
+            // baseline is preserved.  `frameRing` stays guarded by `pixelBufferLock`.
+            queue.async { [weak self] in self?.promoteDue() }
         } else {
             queue.asyncAfter(deadline: .now() + delay) { [weak self] in self?.promoteDue() }
         }
@@ -1020,29 +1106,47 @@ final class BridgeChannelReceiver: ChannelReceiver {
     private func present(_ buffer: CVPixelBuffer) {
         let timeNs = UInt64(CACurrentMediaTime() * 1_000_000_000.0)
 
-        // 1. Mirror — off main.
+        // 1. Mirror — off main.  ALWAYS (every tile that wants this channel repaints
+        //    off the same IOSurface; a busy main thread can never freeze preview).
         channel?.publishFrame(buffer)
 
-        // 2. Outputs + gate — on main.
+        // 2. Main-isolated work — but ONLY when there is any.  A non-program channel
+        //    needs main exactly ONCE per (re)connect (flip the no-signal gate + log the
+        //    first frame); the program source needs it every frame (the program tap).
+        //    So after its first frame a non-program channel does ZERO per-frame main
+        //    hops (H1) — the 5-cam win, where most hops found a nil `onProgramFrame`.
+        let isPgm = isProgramSource                       // captured on `queue`
+        let needGateFlip = !didFlipSignalGate
+        if needGateFlip { didFlipSignalGate = true }
+        guard isPgm || needGateFlip else { return }
+
         DispatchQueue.main.async { [weak self] in
             guard let self, let channel = self.channel else { return }
-            if !self.didLogFirstFrame {
-                self.didLogFirstFrame = true
-                print("[BridgeReceiver \(self.src)] ✅ first frame presented")
+            if needGateFlip {
+                if !self.didLogFirstFrame {
+                    self.didLogFirstFrame = true
+                    print("[BridgeReceiver \(self.src)] ✅ first frame presented")
+                }
+                // Flip the published "no signal" gate on the first frame only (guarded —
+                // never a per-frame published write).
+                if channel.latestFrame == nil { channel.latestFrame = buffer }
             }
-            // Program tap: when this channel is the program source, the model's
-            // closure forwards the frame to the program output(s).  nil otherwise.
-            channel.onProgramFrame?(buffer, timeNs)
-            // Once-per-session: flip the published "no signal" gate on the first
-            // frame only (guarded — never a per-frame published write).
-            if channel.latestFrame == nil { channel.latestFrame = buffer }
+            // Program tap: forward to the program output(s) while this is the source.
+            if isPgm { channel.onProgramFrame?(buffer, timeNs) }
         }
     }
 
     // MARK: - Publish to the owning channel (main queue)
 
     private func publishConnected(_ connected: Bool) {
-        DispatchQueue.main.async { [weak self] in self?.channel?.isConnected = connected }
+        // Control-side of a combined channel drives `controlConnected` (the ARLV side); the
+        // video/`isConnected` flag belongs to the AirPlay receiver.  Everything else uses
+        // `isConnected` as before.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let channel = self.channel else { return }
+            if self.controlSide { channel.controlConnected = connected }
+            else { channel.isConnected = connected }
+        }
     }
 
     /// Disconnect / format-change cleanup: clear the published `latestFrame` gate
@@ -1050,6 +1154,12 @@ final class BridgeChannelReceiver: ChannelReceiver {
     private func publishSignalCleared() {
         DispatchQueue.main.async { [weak self] in
             guard let self, let channel = self.channel else { return }
+            // Control-side: only its control state is ours — leave the AirPlay video alone.
+            if self.controlSide {
+                channel.controlConnected = false
+                channel.remote = nil
+                return
+            }
             channel.latestFrame = nil
             channel.publishFrame(nil)   // blank every mirror to black
             // Drop the last camera snapshot too (called ONLY on disconnect): otherwise a
@@ -1059,11 +1169,49 @@ final class BridgeChannelReceiver: ChannelReceiver {
         }
     }
 
+    /// H2: coalesce snapshots to ~1 Hz.  On `queue`.  Leading edge pushes the first
+    /// immediately (so the control UI lights up at once on connect); within the window we
+    /// only keep the latest and push it when the window closes — at most one main hop per
+    /// `remoteCoalesceSeconds`, no matter how fast the phone sends.
     private func publishRemote(_ snapshot: StateSnapshot) {
+        if remoteFlushScheduled {
+            pendingRemote = snapshot               // within window — defer the latest
+            return
+        }
+        remoteFlushScheduled = true
+        pushRemoteToMain(snapshot)                 // leading edge — immediate
+        queue.asyncAfter(deadline: .now() + remoteCoalesceSeconds) { [weak self] in
+            guard let self else { return }
+            self.remoteFlushScheduled = false
+            if let latest = self.pendingRemote {   // something arrived during the window
+                self.pendingRemote = nil
+                self.publishRemote(latest)         // push it + re-arm the window
+            }
+        }
+    }
+
+    private func pushRemoteToMain(_ snapshot: StateSnapshot) {
         DispatchQueue.main.async { [weak self] in
             guard let self, let channel = self.channel else { return }
             channel.remote = snapshot
-            channel.outputRotation = snapshot.outputRotation   // mirrors read this off-main
+            // Control-side of a combined channel: the VIDEO is the AirPlay side (already upright),
+            // so the ARLV snapshot's rotation must NOT rotate it — leave outputRotation to the
+            // video receiver.  Normal channels apply it as before.
+            if !self.controlSide { channel.outputRotation = snapshot.outputRotation }  // mirrors read this off-main
         }
+    }
+
+    // MARK: - Program-source gate (H1)
+
+    /// Mark whether THIS channel currently feeds the program bus.  Called by the model on
+    /// the main thread from `routeProgram`; hopped onto `queue` so the per-frame taps read
+    /// it race-free.  When false, the frame/sample/format taps skip their main hop entirely.
+    ///
+    /// Across a CUT there's a benign one-packet window: `routeProgram` sets the closures on
+    /// main, then this flag lands a moment later on `queue`.  Worst case a single sample is
+    /// dropped (flag not yet true on the new source) or forwarded to an already-nilled
+    /// closure (no-op) — never a crash, and the next frame self-corrects.
+    func setProgramSource(_ isProgram: Bool) {
+        queue.async { [weak self] in self?.isProgramSource = isProgram }
     }
 }

@@ -18,14 +18,16 @@ enum ChannelKind: String, CaseIterable, Identifiable {
     case airlive
     case capture   // HDMI/USB capture card (UVC) — the camera's clean HDMI out, wired
     case airplay
+    case screenMirroringPlusControl   // ONE channel: AirPlay video + Airlive control-only (same phone)
 
     var id: String { rawValue }
 
     var displayName: String {
         switch self {
-        case .airlive: return "Airlive Camera"
-        case .capture: return "HDMI / USB Capture"
-        case .airplay: return "Screen Mirroring"
+        case .airlive:                  return "Airlive Camera"
+        case .capture:                  return "HDMI / USB Capture"
+        case .airplay:                  return "Screen Mirroring"
+        case .screenMirroringPlusControl: return "Screen Mirroring + Remote Control"
         }
     }
 
@@ -33,26 +35,29 @@ enum ChannelKind: String, CaseIterable, Identifiable {
     /// from `displayName` (the add-menu's full "Airlive Camera").
     var sourceLabel: String {
         switch self {
-        case .airlive: return "Airlive"
-        case .capture: return "HDMI / USB"
-        case .airplay: return "Screen Mirroring"
+        case .airlive:                  return "Airlive"
+        case .capture:                  return "HDMI / USB"
+        case .airplay:                  return "Screen Mirroring"
+        case .screenMirroringPlusControl: return "Screen + Control"
         }
     }
 
     /// One-line description for the add menu.
     var subtitle: String {
         switch self {
-        case .airlive: return "iPhone running the Airlive app"
-        case .capture: return "Capture card (clean HDMI in)"
-        case .airplay: return "Any iPhone via AirPlay"
+        case .airlive:                  return "iPhone running the Airlive app"
+        case .capture:                  return "Capture card (clean HDMI in)"
+        case .airplay:                  return "Any iPhone via AirPlay"
+        case .screenMirroringPlusControl: return "AirPlay video + Airlive control (same phone)"
         }
     }
 
     var symbolName: String {
         switch self {
-        case .airlive: return "camera"
-        case .capture: return "cable.connector"
-        case .airplay: return "rectangle.on.rectangle"
+        case .airlive:                  return "camera"
+        case .capture:                  return "cable.connector"
+        case .airplay:                  return "rectangle.on.rectangle"
+        case .screenMirroringPlusControl: return "plus.rectangle.on.rectangle"
         }
     }
 

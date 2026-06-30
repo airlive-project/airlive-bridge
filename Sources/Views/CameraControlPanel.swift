@@ -51,6 +51,10 @@ struct CameraControlPanel: View {
     /// its own `availableLenses` yet, so the picker always has tiles to show.
     private static let fallbackLenses = ["0.5x", "1x", "2x", "3x", "5x"]
 
+    /// Device-read capability ranges for THIS camera (slider bounds adapt to the phone instead
+    /// of hardcoded tables).  Falls back to the wire defaults when an old camera sends none.
+    private var caps: DeviceCapabilities { channel.remote?.capabilities ?? DeviceCapabilities() }
+
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.md) {
             SectionLabel(text: "Camera control")
@@ -198,7 +202,7 @@ struct CameraControlPanel: View {
                 SliderRow(label: "ISO",
                           valueText: "\(Int(iso))",
                           value: $iso,
-                          range: 25...6400,
+                          range: Double(caps.isoMin)...Double(caps.isoMax),   // device-read bounds
                           step: 10,            // drag snaps to 10
                           arrowStep: 50,       // arrows jump ±50
                           enabled: !exposureAuto) { v in
@@ -207,7 +211,7 @@ struct CameraControlPanel: View {
                 SliderRow(label: "Shutter",
                           valueText: "1/\(Int(shutterDenom))",
                           value: $shutterDenom,
-                          range: 24...8000,
+                          range: Double(caps.shutterMinDenom)...Double(caps.shutterMaxDenom),
                           step: 1,
                           arrowStep: 10,
                           enabled: !exposureAuto) { v in
@@ -264,7 +268,7 @@ struct CameraControlPanel: View {
                 SliderRow(label: "Temperature",
                           valueText: "\(Int(wbKelvin))K",
                           value: $wbKelvin,
-                          range: 2500...10000,
+                          range: Double(caps.wbTempMin)...Double(caps.wbTempMax),   // device-read
                           step: 50,
                           arrowStep: 100,
                           enabled: !whiteBalanceAuto) { v in
@@ -273,7 +277,7 @@ struct CameraControlPanel: View {
                 SliderRow(label: "Tint",
                           valueText: tintLabel,
                           value: $tint,
-                          range: -150...150,
+                          range: Double(caps.wbTintMin)...Double(caps.wbTintMax),
                           step: 1,
                           arrowStep: 5,
                           enabled: !whiteBalanceAuto) { v in
@@ -387,5 +391,67 @@ struct CameraControlPanel: View {
         focusAuto = s.focusAuto
         isoCompensation = s.isoCompensation
         lutEnabled = s.lutEnabled
+    }
+}
+
+// MARK: - Camera control SECTION
+
+/// The camera-control block for ONE tile.  Shows the control panel when the channel owns a
+/// back-channel — an Airlive camera, or a combined "Screen Mirroring + Remote Control" channel
+/// (whose ARLV control side drives it) — otherwise a hint (plain Screen Mirroring / capture have
+/// no remote control).
+struct CameraControlSection: View {
+    @ObservedObject var channel: BridgeChannel
+    /// Hide the LENS card where a lens quick-row already sits above (multiview).
+    var showLens: Bool = true
+
+    var body: some View {
+        if channel.kind == .airlive || channel.kind == .screenMirroringPlusControl {
+            ControlPanel(c: channel, showLens: showLens)         // owns a back-channel (ARLV)
+        } else {
+            noControlHint                                         // plain Screen Mirroring / capture
+        }
+    }
+
+    private var noControlHint: some View {
+        VStack(alignment: .leading, spacing: Spacing.sm) {
+            SectionLabel(text: "Camera control")
+            HStack(spacing: Spacing.sm) {
+                Image(systemName: "slider.horizontal.3").font(.system(size: 14)).foregroundColor(Theme.textFaint)
+                Text("Screen Mirroring has no remote control. Add a “Screen Mirroring + Remote Control” channel instead.")
+                    .font(.system(size: 12)).foregroundColor(Theme.textSecondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+/// The control panel for ONE back-channel-owning channel, with the connected / operator-revoked
+/// gating.  A STRUCT (not a method) so its `@ObservedObject` subscribes to `c` — the
+/// `disabled`/`opacity` gating then reacts to THAT channel's `isConnected` /
+/// `remoteControlAllowed`, even when `c` is a bound Remote-Control channel different from the
+/// tile being shown (the parent only observes the video tile, not its control channel).
+private struct ControlPanel: View {
+    @ObservedObject var c: BridgeChannel
+    var showLens: Bool = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.sm) {
+            CameraControlPanel(channel: c, showLens: showLens)
+                .id(c.id)   // reset the panel's local @State when the controlled channel changes
+                // `remoteControlConnected` = the ARLV control side for a combined channel, else
+                // the single connection — so the panel enables on CONTROL, not on AirPlay video.
+                .disabled(!c.remoteControlConnected || !c.remoteControlAllowed)
+                .opacity((c.remoteControlConnected && c.remoteControlAllowed) ? 1.0 : 0.4)
+            if c.remoteControlConnected && !c.remoteControlAllowed { remoteControlDisabledNote }
+        }
+    }
+
+    private var remoteControlDisabledNote: some View {
+        HStack(spacing: Spacing.sm) {
+            Image(systemName: "hand.raised.slash").font(.system(size: 12)).foregroundColor(Theme.textFaint)
+            Text("Operator turned remote control off on the phone.")
+                .font(.system(size: 11)).foregroundColor(Theme.textSecondary)
+        }
     }
 }

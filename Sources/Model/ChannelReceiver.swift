@@ -45,9 +45,24 @@ protocol ChannelReceiver: AnyObject {
     /// concrete-type dependency.
     func updateDelay(_ preset: LatencyPreset)
 
+    /// Additional fixed playout delay (ms) ON TOP of `updateDelay`'s preset — the precise
+    /// per-source latency the operator dials in the channel's gear settings to align this
+    /// source with slower ones (multicam sync).  0 = none.
+    func updateExtraDelay(_ ms: Int)
+
     /// Apply the receiver-password auth config live (STREAM-AUTH-SPEC §4).
     /// `require && !password.isEmpty` turns the challenge-response on for the
     /// NEXT connection; `disconnectNow` additionally drops a currently-connected
     /// camera so a password change forces an immediate re-auth (revocation).
     func updateAuth(require: Bool, password: String, disconnectNow: Bool)
+
+    /// Tell the receiver whether THIS channel currently feeds the program bus, so it can
+    /// gate per-frame program taps (skip the main-thread hop on non-program channels — the
+    /// 5-camera scale win, H1).  Default no-op: only the ARLV receiver carries the raw
+    /// sample/format relay taps that make this worth gating.
+    func setProgramSource(_ isProgram: Bool)
+}
+
+extension ChannelReceiver {
+    func setProgramSource(_ isProgram: Bool) {}   // default no-op (AirPlay / capture)
 }

@@ -24,13 +24,20 @@ import AppKit   // NSPasteboard — copy the RTSP URL
 
 struct OutputsRail: View {
     @ObservedObject var model: BridgeModel
+    /// Focus mode: collapse to a minimal strip (just active-output tags) so the
+    /// centre gets maximum room for the multiview.
+    var collapsed: Bool = false
+    /// Toggle this rail's collapsed state (chevron lives on the rail; state in ContentView).
+    var onToggleCollapse: () -> Void = {}
+
+    /// Collapsed-strip width — matches the Channels strip so the centre stays centred.
+    private let collapsedWidth: CGFloat = 64
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            content
+        Group {
+            if collapsed { collapsedStrip } else { fullRail }
         }
-        .frame(width: 280)
+        .frame(width: collapsed ? collapsedWidth : 280)
         .background(Theme.bgRail)
         // Faint hairline separating this rail from the center zone (matches the
         // ChannelsRail edge + the mode-bar / footer dividers).
@@ -40,6 +47,68 @@ struct OutputsRail: View {
         // (name or SRT destination), so nothing can get stuck focused.
         .contentShape(Rectangle())
         .onTapGesture { resignInlineEditing() }
+    }
+
+    private var fullRail: some View {
+        VStack(spacing: 0) {
+            header
+            if showsPassthroughWarning { passthroughWarning }
+            content
+        }
+    }
+
+    /// The program is an AirPlay/combined/capture source (no raw H.264) AND at least one
+    /// passthrough output (OBS / RTSP / SRT) exists — those can't carry it, so warn instead of
+    /// letting them go silently black.  NDI is fine (decoded frames).
+    private var showsPassthroughWarning: Bool {
+        !model.programSupportsPassthrough &&
+        model.programOutputs.contains { $0.kind == .obs || $0.kind == .rtsp || $0.kind == .srt }
+    }
+
+    private var passthroughWarning: some View {
+        HStack(alignment: .top, spacing: Spacing.sm) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 12)).foregroundColor(Theme.accentYellow)
+            Text("Program is AirPlay — OBS, RTSP and SRT can't carry it (no raw H.264). Use NDI, or put an Airlive camera on program.")
+                .font(.system(size: 11)).foregroundColor(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, Spacing.lg)
+        .padding(.vertical, Spacing.sm)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.accentYellow.opacity(0.12))
+    }
+
+    /// Focus mode strip: compact tags for the program outputs — LIVE ones red
+    /// ("active") with white text, idle ones neutral + dimmed.  Mirrors the kind
+    /// badge so the strip reads at a glance.
+    private var collapsedStrip: some View {
+        VStack(spacing: 0) {
+            collapseChevron("chevron.left")   // expand this column back
+                .frame(maxWidth: .infinity)
+                .padding(.top, Spacing.md)
+            ScrollView {
+                VStack(spacing: Spacing.sm) {
+                    ForEach(Array(model.programOutputs.enumerated()), id: \.element.id) { pair in
+                        CollapsedOutputTag(output: pair.element)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, Spacing.md)
+            }
+        }
+    }
+
+    /// Bare chevron that toggles this rail's collapsed state (no label — pure control).
+    private func collapseChevron(_ system: String) -> some View {
+        Button(action: onToggleCollapse) {
+            Image(systemName: system)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(Theme.textFaint)
+                .frame(width: 22, height: 22)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     // "Outputs" + inline "+".  These are the PROGRAM's outputs — whatever is on
@@ -86,6 +155,7 @@ struct OutputsRail: View {
             .menuIndicator(.hidden)
             .fixedSize()
             .help("Add a program output")
+            collapseChevron("chevron.right")   // collapse this column
         }
         .padding(.horizontal, Spacing.lg)
         .padding(.top, Spacing.md)
@@ -170,6 +240,33 @@ private func defaultName(_ kind: OutputKind, _ model: BridgeModel) -> String {
     var n = 2                                          // extras: "NDI 2", "NDI 3"…
     while used.contains("\(base) \(n)") { n += 1 }
     return "\(base) \(n)"
+}
+
+// MARK: - Collapsed output tag (focus-mode strip)
+
+/// A compact program-output tag for the collapsed Outputs strip.  LIVE = red
+/// ("active") with white text; idle = neutral + dimmed.  Reads `output.isLive` at
+/// render — the rail re-renders when a toggle nudges the model's objectWillChange.
+private struct CollapsedOutputTag: View {
+    let output: VideoOutput
+    var body: some View {
+        let live = output.isLive
+        return VStack(spacing: 2) {
+            Image(systemName: output.kind.symbolName)
+                .font(.system(size: 11, weight: .semibold))
+            Text(output.kind.badgeLabel)                   // short code (NDI / RTSP / OBS…)
+                .font(.system(size: 9, weight: .bold))
+                .tracking(0.5)
+        }
+        .foregroundColor(live ? .white : Theme.textSecondary)
+        .frame(width: 48, height: 40)
+        .background(
+            RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+                .fill(live ? Theme.accentRed : Theme.bgSelected.opacity(0.6))
+        )
+        .opacity(live ? 1.0 : 0.55)
+        .help(output.label + (live ? " — live" : " — idle"))
+    }
 }
 
 // MARK: - Chooser card (quick-pick a protocol to add)

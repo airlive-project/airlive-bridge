@@ -47,14 +47,22 @@ isolation, no retain cycles, balanced observers). Fixes landed from the audit:
 
 Deferred hardening — do alongside the soak test (profiling-gated, low risk after the
 above keep main healthy):
-- **H1** — queue-confine the program sample/format taps so the relay path has zero
-  per-frame `DispatchQueue.main.async` hops (only matters if main ever stalls).
-- **H2** — coalesce `channel.remote` to ~1 Hz in the receiver (don't trust the
-  phone's throttle; protects main if a phone sends state faster).
-- **M2** — arm a "candidate never readied" timeout in `accept()` to drop stranded
-  dual-stack stragglers.
-- **M4** — honor `previewEnabled` in `present()` (skip `publishFrame` for hidden,
-  non-program channels) — delivers the documented thermal/no-op-post saving.
+- ✅ **H1 (DONE 2026-06-29)** — per-frame program taps gated on an `isProgramSource`
+  flag (set by `routeProgram`, queue-confined): a NON-program channel now does ZERO
+  per-frame `DispatchQueue.main.async` hops (at 5 cams ~4/5 of the old hops were no-ops
+  finding a nil closure). `present()` restructured so the one-shot no-signal gate still
+  flips exactly once per (re)connect. swift-reviewer caught + fixed a race (the Lowest-
+  preset inline promote now hops to `queue` so the gate state stays confined).
+- ✅ **H2 (DONE 2026-06-29)** — `channel.remote` coalesced to ~1 Hz in the receiver
+  (leading-edge immediate, then ≤1/sec), so a phone sending state faster can't churn
+  SwiftUI. Cleared on disconnect so a trailing flush can't resurrect stale state.
+- ✅ **M2 (DONE 2026-06-29)** — `accept()` arms a candidate-ready timeout; a half-open
+  dual-stack straggler that never reaches `.ready` is dropped from `pendingConnections`.
+- **M4 (still deferred)** — honor `previewEnabled` in `present()` (skip `publishFrame`
+  for hidden, non-program channels) — the documented thermal/no-op-post saving.
+  Deferred: needs a queue-safe `previewEnabled` mirror + correct "is program" knowledge
+  to avoid blanking a wanted tile, and overlaps the in-flight multiview-UI rework — do
+  it with the soak test once the UI behaviour settles.
 
 **Soak protocol (run with testers, 5 phones):** 3–4 h continuous · Instruments
 Allocations + Leaks + Time Profiler (memory must stay FLAT, no per-reconnect VT
@@ -62,60 +70,115 @@ session growth) · pull one camera's Wi-Fi mid-show → it must rejoin cleanly w
 touching the other 4 · add/reorder channels while others are live (must not drop
 them) · all 4 orientations · NDI + OBS simultaneously, with and without password.
 
+### Multi-camera scenario audit (2026-06-30) — 10 scenarios, 54 agents, 37 confirmed → deduped ~14
+
+A workflow traced realistic scenarios (delivery-mode swap, program-source-lost, camera-swap,
+combined two-receivers, all-disconnect, tally routing, threading, profile-on-the-fly,
+add/remove/reorder live, AirPlay/combined program vs passthrough outputs); each finding was
+adversarially re-verified.
+
+✅ **WAVE 1 FIXED + swift-reviewer-clean (2026-06-30):**
+- **CRITICAL** — AirPlay/combined program silently dead-aired OBS-relay/RTSP/SRT (they need raw
+  H.264; AirPlay emits only decoded frames).  Now: `BridgeModel.programSupportsPassthrough`
+  (false for airplay/combined/capture program) → yellow warning banner in OutputsRail;
+  `AirliveRelayOutput.clearLastFormat()` so a reconnect can't replay stale SPS/PPS into a
+  frameless relay; `requestKeyframeForProgram` gated on `producesRawH264 && videoActive`.
+- **HIGH** — `AirPlayReceiver.extraDelaySec` data race → `stateLock`; AirPlay stale-frame closure
+  resurrecting `isConnected` after `stop()` → `_stopped` guard + `[weak channel]` + nil callback
+  before teardown; `CaptureDeviceReceiver.stop()` async→sync (device re-acquire after profile);
+  combined-channel UI read `isConnected` (video) not the control side → `anyConnected` computed
+  (rail status + delete-confirm, multiview dot/offline, no-signal) + lens-row on
+  `remoteControlConnected`; dead-air cutting to a disconnected camera → `take()`/`programSelect`
+  require `isConnected`; tally not re-asserted on reconnect (LED stayed dark) →
+  `BridgeChannel.onConnectivityChanged` → `syncMultiviewTally(force:)`; `NDIOutput.send()` blocked
+  main per frame → own `sendQueue` + drop-in-flight.
+- **MEDIUM/LOW** — AirPlayReceiver missing H1 program-source gate (per-frame main hops) → gated;
+  TallyStore not cleared on disconnect (stale border) → cleared on full disconnect;
+  multiview→solo left stale auto-tally → `clearAllTally()`; `remoteFlushScheduled` not reset on
+  disconnect (≈1 s blank panel on fast reconnect) → reset.
+
+✅ **WAVE 2 — done 2026-06-30 (operator: "do all of wave 2"):**
+- **#12 AirPlay mid-session disconnect now detected.** `AirPlayEngine.mm` got an `onConnectionLost`
+  block (mirrors `onVideoFrame`): fired from `conn_reset` and from `conn_destroy` when
+  `openConnections_` hits 0.  `AirPlayReceiver` clears the channel's video state (`isConnected`/
+  `latestFrame`/blank mirror) + resets `_didFlipGate` so the next session re-flips — a phone that
+  stops mirroring no longer shows "connected" forever.  For a combined channel the control side is
+  untouched (only the video transport clears).
+- **#6 NDI dead-signal on program drop.** When the ON-AIR source's VIDEO transport drops
+  (`isConnected→false`), `BridgeModel` pushes ONE cached opaque-black 1080p BGRA frame to the
+  buffer outputs (NDI) — receiver shows black instead of a frozen last frame (operator's chosen
+  behaviour).  Keyed off `isConnected`, so a combined channel that loses AirPlay video still blacks.
+- **#20 OBS relay sample-before-format.** `AirliveRelayOutput.awaitFormat()` (called from
+  `routeProgram` on a real source change) drops `relaySample` until the new source's `relayFormat`
+  arrives (the forced keyframe brings it) — no ~300 ms decode-against-stale-SPS/PPS gap.
+
+⏸ **WAVE 2 — deliberately NOT done (risk > benefit this pass):**
+- **#28 `AirPlayEngine.stop()` joins native threads on main** (brief UI hitch during profile load).
+  Kept SYNCHRONOUS on purpose: an async teardown races the immediate rebuild's port bind
+  (profile reload → port conflict) and the detached thread joins risk a use-after-free of the
+  engine.  The hitch is brief + occasional; a safe off-main teardown needs a dedicated careful
+  pass (free the port synchronously, join the threads on a thread that owns the engine's lifetime).
+- LOW: `removeChannel` double `routeProgram`; multiview grid capacity formula diverges from
+  `multiviewCapacity()` at 17+ channels.
+
 ## Open decisions
 
 1. **UI / tech stack** — RESOLVED: SwiftUI + ported Studio Swift (shipped).
 
 ## Backlog (post-MVP)
 
-- **AirPlay ↔ control manual bind (delivery-mode "killer combo").** Delivery mode is
-  SHIPPED (Video+Control / Control-only toggle, videoActive-keyed "CONTROL ONLY"
-  placeholder, operator gates, deviceName label — see docs/DELIVERY-MODE-DESIGN.md). What
-  remains is the convenience that MERGES two transports into one tile: when an Airlive
-  channel is Control-only (`videoActive==false`) AND the operator has manually bound it to
-  an AirPlay (Screen Mirroring) tile from the same phone, composite the AirPlay video into
-  that channel's tile instead of the "CONTROL ONLY" placeholder — so one tile shows AirPlay
-  video + Airlive control/tally (one encode on the phone, full control). Bind is MANUAL
-  (operator taps "this AirPlay tile = this control link"; deviceName makes it obvious;
-  optional auto-match if the iPhone system name equals the operator name). Needs a
-  `linkedControlChannelID` on the AirPlay channel + a bind affordance in ChannelsRail + the
-  tile/program routing to pull the linked AirPlay video. Until then the combo still works as
-  TWO separate tiles. (David to send UI mockup, like the latency feature.)
+- ✅ **AirPlay + control "killer combo" — DONE 2026-06-29 (v4 — ONE combined channel, two transports).**
+  Final shape (operator's design): a THIRD "+" source type **"Screen Mirroring + Remote Control"**
+  (`ChannelKind.screenMirroringPlusControl`) — ONE channel that runs BOTH receivers for the SAME
+  phone: an AirPlay (UxPlay) receiver for VIDEO + a control-only ARLV receiver (`controlSide`) for
+  CONTROL + tally.  The phone screen-mirrors to it (video) AND connects the Airlive app to it
+  (control-only — the receiver sends `setDeliveryMode(.controlOnly)` on connect, so the phone gates
+  its encoder → cool, one encode).  CAMERA SIDE IS IMPLEMENTED (verified in `CaptureEngine.swift`:
+  `setDeliveryMode`→`setEncoderEnabled(false)`, `videoActive` reported, sticky across reconnects).
+  One tile shows the AirPlay video; its CAMERA CONTROL panel + tally drive over the ARLV side. No
+  binding/picker — it's self-contained.
+  - Impl: `BridgeChannel` now holds two receivers — `receiver` (AirPlay video) + `controlReceiver`
+    (ARLV control); `send` routes to the control side; `rename`/`updateAuth`/`updateOrder`/
+    `setProgramSource` fan out to both; `controlConnected` (separate from video `isConnected`),
+    `remoteControlConnected` computed (drives the panel's enabled state), `videoActive == true`
+    (video is AirPlay's, not the control side's `videoActive=false`).  `BridgeChannelReceiver`
+    gained a `controlSide` flag: sets `controlConnected`/`remote` only (never `isConnected`/
+    `latestFrame`/`outputRotation` — those belong to the AirPlay side) and sends control-only on
+    connect.  `CameraControlSection`/`ControlPanel` render the panel for any back-channel-owning
+    channel.  Persisted via `kind` in the profile (no binding to store).
+  - swift-reviewer passes: v3 HIGH (panel didn't observe its control channel — extracted
+    `ControlPanel`) carried forward; v4 dual-receiver state separation done (controlSide guards).
+  - **v1/v2/v3 superseded** (same day): v1 = "Video source" picker on the Airlive gear; v2 =
+    "Remote control" dropdown on the AirPlay tile; v3 = a SEPARATE control-only "Remote Control"
+    channel you bind to a Screen-Mirroring tile.  All reverted — operator wanted ONE channel that
+    IS both (UxPlay + the app), "two birds one stone", no binding step.
+  - Optional later: auto-match when the iPhone system name equals the operator name.
 
-- **Profiles (save / load a whole setup).** A "Profiles" menu (already stubbed in the menu
-  bar: New Profile… / Open Profile…) that serialises the entire configuration — channels
-  (kind, name, order, capture-device id), program outputs (kind, label, config, order) and
-  the password flag — to a `.airliveprofile` JSON file via NSSavePanel, restored via
-  NSOpenPanel (clear + re-add channels/outputs from the snapshot). Needs `BridgeModel`
-  snapshot/apply methods + Codable config structs (live channels/receivers are rebuilt on
-  load, not the connections). Wire the two existing (disabled) menu items to it. Nice
-  follow-ons: a recent-profiles list and "reopen last on launch".
+- ✅ **Profiles (save / load a whole setup) — DONE 2026-06-29.** Menu **Profiles → Save
+  Profile… (⇧⌘S) / Open Profile… (⌘O)** serialise the configuration to a `.airliveprofile`
+  JSON (`BridgeProfile`): channels (id, kind, name, order, capture-device id, delay +
+  extra-delay ms, preview toggle) + program outputs (kind, label, config, RTSP port) +
+  mode. `BridgeModel.snapshotProfile()` / `applyProfile(_:)` rebuild the layout — channel
+  IDS ARE PRESERVED so a previously-paired phone reconnects to the same slot; outputs come
+  back OFF (a restored output must not auto-publish). The PASSWORD is intentionally NOT in
+  the file (Keychain-global → the file is safe to share). LIVE connections are not saved.
+  Follow-ons (not done): a recent-profiles list and "reopen last on launch".
 
-- **Per-source latency in milliseconds (manual multicam sync).** A precise numeric
-  latency field (in ms) on EVERY source, set by the operator. This is a PROFESSIONAL
-  tool — expose the exact number, not consumer crutches (no "±1 frame" nudges, no vague
-  presets). The Mac can only ADD delay (buffer decoded frames), never reduce below a
-  source's own floor — so you sync by raising every fast source UP to the slowest. Example:
-  AirPlay arrives ~120 ms, the Airlive app ~230 ms → dial AirPlay +110 so both play out at
-  230 ms, in sync. Pure receiver-side (extra decoded frames held in a per-channel ring):
-  ZERO iPhone cost, no thermal impact.
-  - Mechanism: the ARLV channel already has a playout buffer + an Output-delay row
-    (`LatencyPreset`). Two pieces to build: (1) **KEEP the existing ARLV presets as-is** and
-    ADD a separate manual **ms field** ALONGSIDE them — it's an *additional* fine offset, not
-    a replacement (presets stay for quick coarse choice; the ms field is the precise extra);
-    (2) extend the SAME deadline-ring playout to AirPlay channels (today "show ASAP", no
-    buffer) so AirPlay can be delayed too. Additive, isolated, low risk (worst case = extra
-    latency, not a crash).
-  - **Auto-align is NOT exact and is deferred.** We can't know absolute capture→Mac latency
-    (phone and Mac clocks aren't synced — the skew is baked into `timestamp_us`; AirPlay's
-    RTP/NTP is cross-protocol). True auto needs either an event calibration (clap/flash
-    detected in every feed) or NTP-stamped capture time from the app (frozen wire / app
-    team). So manual is the shipping design; optional later: a "clap-sync" that's only
-    approximate.
-  - **UI: David will send a mockup** — implement the placement/layout from that, don't
-    invent it. (The ms field sits next to, not instead of, the ARLV preset row.)
-  - Caveat: AirPlay's inherent ~150–250 ms mirror latency is a floor; the ms field adds
-    ON TOP, it can't go below the floor.
+- ✅ **Per-source latency in milliseconds (manual multicam sync) — DONE 2026-06-29.**
+  A precise **"Additional delay (ms)"** field (type the exact number + ±10 stepper + Reset,
+  no consumer crutches) in each channel card's gear popover (`ChannelsRail`), bound to
+  `BridgeChannel.extraDelayMs` → forwarded live via `ChannelReceiver.updateExtraDelay(_:)`.
+  - ARLV: ADDED ON TOP of the existing `LatencyPreset` presets (kept as-is) — the receiver's
+    effective playout depth is `basePresetSeconds + extraDelaySeconds`, re-anchored on change.
+  - AirPlay: a NEW fixed-delay path (was "show ASAP") — frames held a constant offset on a
+    side queue; **0 = the original immediate path, unchanged → zero risk default**.
+  - HDMI/USB capture: no-op (local, no playout buffer).
+  - Pure receiver-side, zero iPhone cost / no thermal impact, as designed.
+  - **Auto-align stays deferred** (can't know absolute capture→Mac latency: phone/Mac clocks
+    unsynced; AirPlay RTP/NTP is cross-protocol). Manual is the shipping design; optional
+    later: an approximate "clap-sync".
+  - Caveat: AirPlay's inherent ~150–250 ms mirror latency is a floor; the ms field adds ON
+    TOP, it can't go below the floor.
 
 - **Multiview Full-Screen / Detach (clean wall).** The multiview top bar has two
   buttons: Full-Screen (today: native window full-screen) and Detach (opens the

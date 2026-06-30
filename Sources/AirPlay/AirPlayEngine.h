@@ -21,6 +21,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// the block — retain it if you need it past the call.
 @property (nonatomic, copy, nullable) void (^onVideoFrame)(CVPixelBufferRef pixelBuffer, uint64_t ptsNs);
 
+/// Called on a UxPlay network thread when the Screen-Mirroring session drops (the phone stopped
+/// mirroring, or the connection reset).  Lets the channel clear its "connected" state instead of
+/// showing a live link forever.  Hop to main for any UI state.
+@property (nonatomic, copy, nullable) void (^onConnectionLost)(void);
+
 - (void)start;
 - (void)stop;
 

@@ -34,8 +34,11 @@ final class CaptureDeviceReceiver: NSObject, ChannelReceiver, AVCaptureVideoData
     }
 
     func stop() {
-        sessionQueue.async { [weak self] in
-            guard let self else { return }
+        // SYNC teardown: the device must be fully released before a caller (e.g. profile
+        // reload) re-acquires it — an async stop races the re-add and the new session fails
+        // to claim the still-held capture device.  Callers are on main (not sessionQueue),
+        // so .sync can't deadlock; stopRunning still runs on sessionQueue as required.
+        sessionQueue.sync {
             if self.session.isRunning { self.session.stopRunning() }
             self.session.inputs.forEach { self.session.removeInput($0) }
             self.session.outputs.forEach { self.session.removeOutput($0) }
@@ -51,6 +54,7 @@ final class CaptureDeviceReceiver: NSObject, ChannelReceiver, AVCaptureVideoData
     func rename(_ newName: String) {}
     func updateOrder(_ index: Int) {}
     func updateDelay(_ preset: LatencyPreset) {}
+    func updateExtraDelay(_ ms: Int) {}   // local HDMI/USB capture: no playout buffer to delay
     func updateAuth(require: Bool, password: String, disconnectNow: Bool) {}
 
     // MARK: - Session (queue-confined)

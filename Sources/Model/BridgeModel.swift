@@ -31,7 +31,12 @@ final class BridgeModel: ObservableObject {
 
     /// Solo (one camera) vs Multiview (the switcher).
     @Published var mode: AppMode = .multiview {   // default to the switcher view
-        didSet { routeProgram(); if mode == .multiview { syncMultiviewTally() } }
+        didSet {
+            guard mode != oldValue else { return }
+            routeProgram()
+            if mode == .multiview { syncMultiviewTally() }
+            else { clearAllTally() }   // leaving multiview → cameras must not keep stale auto-tally
+        }
     }
 
     /// Multiview switcher buses: the camera staged in PREVIEW and the camera live
@@ -56,15 +61,74 @@ final class BridgeModel: ObservableObject {
     /// iPhones (`setCue`) AND mirrored in `TallyStore` so the rail/preview show it.  Only
     /// fires on a real change, so it's event-driven (one packet per cut/stage, never per
     /// frame).  Solo keeps its manual Tally row untouched.
-    private func syncMultiviewTally() {
-        for ch in channels {
+    /// `force` re-sends every cue even if unchanged — used when a camera (re)connects so its
+    /// tally LED is re-asserted (the camera forgot its cue across the drop), bypassing the
+    /// TallyStore dedup that would otherwise skip the "unchanged" send.
+    private func syncMultiviewTally(force: Bool = false) {
+        for ch in multiviewChannels {
             let state: TallyState = ch.id == programID ? .program
                                   : (ch.id == previewID ? .preview : .off)
-            guard TallyStore.shared.state(for: ch.id) != state else { continue }
+            if !force && TallyStore.shared.state(for: ch.id) == state { continue }
             TallyStore.shared.set(state, for: ch.id)
-            // Skip cameras whose operator turned tally OFF — the camera ignores the cue,
-            // so don't spend a packet (and don't pretend it's lit).
+            // `ch.send` routes to the channel's back-channel — the ARLV control side for a
+            // combined "Screen Mirroring + Remote Control" channel, else its single receiver.
+            // Skip if the operator turned tally OFF on that camera.
             if ch.tallyAllowed { ch.send(.setCue(state.rawValue)) }
+        }
+    }
+
+    /// A channel's connectivity edge changed (wired to `BridgeChannel.onConnectivityChanged`).
+    /// On (re)connect, re-assert tally so a rejoined camera's LED matches its bus again; on full
+    /// disconnect, clear its stale tally border so a dead channel doesn't keep glowing red/green.
+    private func handleConnectivityChange(_ channel: BridgeChannel) {
+        // Tally: re-assert to a (re)connected camera; clear a fully-disconnected one's border.
+        if channel.anyConnected {
+            if mode == .multiview { syncMultiviewTally(force: true) }
+        } else if TallyStore.shared.state(for: channel.id) != .off {
+            TallyStore.shared.set(.off, for: channel.id)
+        }
+        // NDI dead-signal: if the ON-AIR source's VIDEO transport just dropped, push ONE black
+        // frame so NDI reads as a clear "no source" instead of freezing on the camera's last
+        // frame (#6).  Keyed off `isConnected` (the video side), so a combined channel that loses
+        // its AirPlay video — even with its control link still up — still blacks the program.
+        // NDI holds the last frame, so one black frame suffices until the operator cuts elsewhere.
+        if channel.id == effectiveProgramID, !channel.isConnected, let black = blackProgramFrame {
+            feedProgram(black, timeNs: DispatchTime.now().uptimeNanoseconds)
+        }
+    }
+
+    /// A cached opaque-black 1080p BGRA frame, pushed to NDI when the program source drops (#6).
+    private lazy var blackProgramFrame: CVPixelBuffer? = Self.makeBlackBuffer(width: 1920, height: 1080)
+
+    private static func makeBlackBuffer(width: Int, height: Int) -> CVPixelBuffer? {
+        var pb: CVPixelBuffer?
+        let attrs = [kCVPixelBufferIOSurfacePropertiesKey as String: [:]] as CFDictionary
+        guard CVPixelBufferCreate(kCFAllocatorDefault, width, height,
+                                  kCVPixelFormatType_32BGRA, attrs, &pb) == kCVReturnSuccess,
+              let buf = pb else { return nil }
+        CVPixelBufferLockBaseAddress(buf, [])
+        if let base = CVPixelBufferGetBaseAddress(buf) {
+            var opaqueBlack: [UInt8] = [0, 0, 0, 255]   // BGRA: opaque black (not alpha-0 keyable)
+            memset_pattern4(base, &opaqueBlack, CVPixelBufferGetBytesPerRow(buf) * height)
+        }
+        CVPixelBufferUnlockBaseAddress(buf, [])
+        return buf
+    }
+
+    /// Clear every channel's tally (UI + the camera's LED) — used when leaving multiview, so a
+    /// camera that was red/green on the switcher doesn't stay lit under Solo's manual tally.
+    private func clearAllTally() {
+        for ch in channels {
+            if TallyStore.shared.state(for: ch.id) != .off { TallyStore.shared.set(.off, for: ch.id) }
+            if ch.tallyAllowed { ch.send(.setCue(TallyState.off.rawValue)) }
+        }
+    }
+
+    /// Wire a channel's connectivity-edge callback to the model (re-assert / clear tally).
+    private func wireConnectivity(_ channel: BridgeChannel) {
+        channel.onConnectivityChanged = { [weak self, weak channel] in
+            guard let self, let channel else { return }
+            self.handleConnectivityChange(channel)
         }
     }
 
@@ -83,8 +147,11 @@ final class BridgeModel: ObservableObject {
     /// program outputs (NDI/RTSP/SRT/OBS) with no picture.  Covers the CUT button, the
     /// Space shortcut, and double-click hot-cut (all route through here).
     func take() {
+        // Only cut to a source that is BOTH connected AND sending video — airing a
+        // disconnected or control-only camera dead-airs the program outputs.
         guard let p = previewID,
-              channels.first(where: { $0.id == p })?.videoActive ?? false else { return }
+              let pc = channels.first(where: { $0.id == p }),
+              pc.isConnected, pc.videoActive else { return }
         // Flip-flop like Studio's cutTransition: Preview → Program, and the OUTGOING
         // Program drops back into Preview (so you can cut straight back).  Suppress the
         // per-didSet tally so the swap emits ONE cue per camera, no red→off→green flash.
@@ -104,14 +171,15 @@ final class BridgeModel: ObservableObject {
     /// Digit N (0-based): put camera N on PROGRAM — a hot-cut in Multiview, a
     /// selection in Solo.  Out-of-range is a no-op.
     func programSelect(_ index: Int) {
-        guard index >= 0, index < channels.count else { return }
-        let id = channels[index].id
+        let list = multiviewChannels                  // digits map to visible tiles, not RC channels
+        guard index >= 0, index < list.count else { return }
+        let channel = list[index]
         if mode == .multiview {
-            // Don't hot-cut a Control-only (no-video) source straight to air.
-            guard channels[index].videoActive else { return }
-            programID = id
+            // Don't hot-cut a disconnected or Control-only (no-video) source straight to air.
+            guard channel.isConnected, channel.videoActive else { return }
+            programID = channel.id
         } else {
-            select(id)
+            select(channel.id)
         }
     }
 
@@ -137,6 +205,11 @@ final class BridgeModel: ObservableObject {
 
     /// Downstream program outputs (NDI today; SRT/RTSP later).
     @Published var programOutputs: [VideoOutput] = []
+
+    /// False when the current program source emits no raw H.264 (AirPlay / combined / capture):
+    /// the PASSTHROUGH outputs (OBS relay / RTSP / SRT) can't carry it, so the UI warns instead
+    /// of those outputs going silently black.  NDI is unaffected (it uses decoded frames).
+    @Published var programSupportsPassthrough: Bool = true
 
     /// The channel currently feeding the program: the PGM camera in Multiview, the
     /// selected camera in Solo.
@@ -184,7 +257,8 @@ final class BridgeModel: ObservableObject {
     func routeProgram() {
         let pid = effectiveProgramID
         for channel in channels {
-            if channel.id == pid {
+            let isProgram = channel.id == pid
+            if isProgram {
                 channel.onProgramFrame = { [weak self] buffer, timeNs in self?.feedProgram(buffer, timeNs: timeNs) }
                 channel.onProgramFormat = { [weak self] payload in self?.feedProgramFormat(payload) }
                 channel.onProgramSample = { [weak self] payload, ts in self?.feedProgramSample(payload, ts) }
@@ -193,9 +267,29 @@ final class BridgeModel: ObservableObject {
                 channel.onProgramFormat = nil
                 channel.onProgramSample = nil
             }
+            // H1: closures are set HERE (main); the receiver gates its per-frame taps on
+            // this flag so non-program channels skip the per-frame main hop entirely.
+            channel.setProgramSource(isProgram)
+        }
+        // Passthrough outputs (OBS/RTSP/SRT) need raw H.264; an AirPlay/combined/capture program
+        // emits only decoded frames (NDI-only).  Flag it for the UI, and forget any cached OBS
+        // format header so a reconnect can't replay the previous camera's SPS/PPS into a now
+        // frameless relay (which would stall OBS's decoder).
+        let programProducesRaw = channels.first(where: { $0.id == pid })?.producesRawH264 ?? true
+        programSupportsPassthrough = (pid == nil) ? true : programProducesRaw
+        if !programProducesRaw {
+            for case let relay as AirliveRelayOutput in programOutputs { relay.clearLastFormat() }
+        }
+        // On a REAL source change, gate the OBS relay's samples until the NEW source's format
+        // arrives (the forced keyframe below brings it) — otherwise OBS decodes the new camera's
+        // H.264 against the previous camera's SPS/PPS for ~300 ms (#20).
+        if pid != lastRoutedProgramID {
+            lastRoutedProgramID = pid
+            for case let relay as AirliveRelayOutput in programOutputs { relay.awaitFormat() }
         }
         requestKeyframeForProgram()   // instant relay resync on CUT / hot-cut / select
     }
+    private var lastRoutedProgramID: UUID?
 
     /// Last program we asked an IDR for — so routine re-routes (mode toggle, channel
     /// add/remove, re-selecting the SAME source, staging to Preview) never re-poke the
@@ -217,9 +311,11 @@ final class BridgeModel: ObservableObject {
     private func requestKeyframeForProgram(force: Bool = false) {
         let obsReceiving = programOutputs.contains { ($0 as? AirliveRelayOutput)?.isConnected == true }
         guard obsReceiving else { return }
-        // A Control-only program source has its encoder off — a keyframe poke is pointless
-        // (and a wasted control packet to the phone).
-        guard channels.first(where: { $0.id == effectiveProgramID })?.videoActive ?? false else { return }
+        // Only an ARLV camera actually sending video can satisfy a keyframe request: skip a
+        // Control-only source (encoder off) AND an AirPlay/combined source (no ARLV encoder at
+        // all) — a forceKeyframe to either is a wasted control packet that can't help.
+        guard let pc = channels.first(where: { $0.id == effectiveProgramID }),
+              pc.producesRawH264, pc.videoActive else { return }
         let pid = effectiveProgramID
         guard force || pid != lastKeyframeProgramID else { return }   // real source change only
         lastKeyframeProgramID = pid
@@ -254,7 +350,7 @@ final class BridgeModel: ObservableObject {
     /// channel count (capped at 16), so the grid grows in real steps instead of
     /// Studio's fixed 8.
     func multiviewCapacity() -> Int {
-        let n = channels.count
+        let n = multiviewChannels.count   // Remote-Control channels have no tile
         for cap in [4, 8, 12, 16] where n <= cap { return cap }
         return 16
     }
@@ -295,8 +391,8 @@ final class BridgeModel: ObservableObject {
     func pushAuthToAll(disconnectNow: Bool) {
         let password = BridgeKeychain.password(account: Self.authAccount) ?? ""
         for channel in channels {
-            channel.receiver?.updateAuth(require: !password.isEmpty, password: password,
-                                         disconnectNow: disconnectNow)
+            channel.updateAuth(require: !password.isEmpty, password: password,
+                               disconnectNow: disconnectNow)
         }
     }
 
@@ -304,8 +400,8 @@ final class BridgeModel: ObservableObject {
     /// receiver comes online, so its very first connection is gated correctly).
     private func applyAuth(to channel: BridgeChannel) {
         let password = BridgeKeychain.password(account: Self.authAccount) ?? ""
-        channel.receiver?.updateAuth(require: !password.isEmpty, password: password,
-                                     disconnectNow: false)
+        channel.updateAuth(require: !password.isEmpty, password: password,
+                           disconnectNow: false)
     }
 
     // MARK: - Selection helpers
@@ -343,7 +439,7 @@ final class BridgeModel: ObservableObject {
     /// Publish each channel's position (Bonjour TXT `ord`) so the iPhone lists
     /// channels in the operator's Bridge order — names stay free to rename.
     private func pushChannelOrder() {
-        for (index, channel) in channels.enumerated() { channel.receiver?.updateOrder(index) }
+        for (index, channel) in channels.enumerated() { channel.updateOrder(index) }
     }
 
     // MARK: - Channel management
@@ -356,6 +452,7 @@ final class BridgeModel: ObservableObject {
                     name: String? = nil) -> BridgeChannel {
         let channel = BridgeChannel(name: name ?? defaultChannelName(),
                                     kind: kind, captureDeviceID: captureDeviceID)
+        wireConnectivity(channel)
         channels.append(channel)
         selectedID = channel.id
         if previewID == nil { previewID = channel.id }   // stage the first camera
@@ -392,10 +489,111 @@ final class BridgeModel: ObservableObject {
         }
     }
 
+    // MARK: - Multiview tiles
+
+    /// Tiles shown in the multiview.  Every channel kind carries video — a combined
+    /// "Screen Mirroring + Remote Control" channel shows its AirPlay side — so all channels get
+    /// a tile.  The indirection stays (grid + capacity + program-select + tally all read it) so
+    /// a future tileless kind would have a single filter point.
+    var multiviewChannels: [BridgeChannel] { channels }
+
+    // MARK: - Profiles (save / load the whole setup)
+
+    /// Snapshot the current configuration into a portable profile.  LIVE state
+    /// (connections, which outputs run, the PVW/PGM buses) is NOT captured — only the
+    /// layout the operator built.  See `BridgeProfile`.
+    func snapshotProfile() -> BridgeProfile {
+        let channelConfigs = channels.map { ch in
+            BridgeProfile.ChannelConfig(
+                id: ch.id, name: ch.name, kind: ch.kind.rawValue,
+                captureDeviceID: ch.captureDeviceID, delayRaw: ch.delay.rawValue,
+                extraDelayMs: ch.extraDelayMs, previewEnabled: ch.previewEnabled)
+        }
+        let outputConfigs = programOutputs.map { out in
+            BridgeProfile.OutputConfig(
+                kind: out.kind.rawValue, label: out.label, config: out.config,
+                port: (out as? RTSPOutput).map { Int($0.port) })
+        }
+        return BridgeProfile(mode: mode.rawValue, channels: channelConfigs, outputs: outputConfigs)
+    }
+
+    /// Replace the ENTIRE setup with a saved profile: tear down the current channels +
+    /// outputs, then rebuild from the snapshot.  Channels come back as fresh receiver
+    /// slots (no live connection — the iPhone reconnects by the preserved id); outputs
+    /// come back OFF (a restored output must not auto-publish).
+    func applyProfile(_ profile: BridgeProfile) {
+        // Silence the per-didSet tally broadcasts while the buses churn through the rebuild
+        // (previewID/programID/mode/selectedID each fire on the way); we sync ONCE at the
+        // end with the final state in place.
+        suppressTallySync = true
+
+        // 1. Tear down the current setup.
+        for channel in channels { channel.stop() }
+        channels.forEach { TallyStore.shared.clear($0.id) }
+        channels = []
+        for output in programOutputs { output.stop() }
+        programOutputs = []
+        previewID = nil; programID = nil; selectedID = nil
+
+        // 2. Mode (before rebuilding so the tally/routing didSets see the right mode).
+        mode = AppMode(rawValue: profile.mode) ?? .multiview
+
+        // 3. Rebuild channels — preserve ids so a previously-paired phone reconnects to
+        //    the same slot.  Settings are set BEFORE start() so the receiver's init reads
+        //    the right delay / extra-delay.
+        for (index, cfg) in profile.channels.enumerated() {
+            let channel = BridgeChannel(
+                id: cfg.id, name: cfg.name,
+                kind: ChannelKind(rawValue: cfg.kind) ?? .airlive,
+                captureDeviceID: cfg.captureDeviceID,
+                delay: LatencyPreset(rawValue: cfg.delayRaw) ?? .normal)
+            channel.extraDelayMs = cfg.extraDelayMs
+            channel.previewEnabled = cfg.previewEnabled
+            wireConnectivity(channel)
+            channels.append(channel)
+            channel.start(order: index)
+            applyAuth(to: channel)            // gate it with the current global password
+        }
+        previewID = channels.first?.id        // stage the first camera (matches addChannel)
+        selectedID = channels.first?.id
+
+        // 4. Rebuild outputs — all OFF (operator toggles them on).
+        for cfg in profile.outputs {
+            guard let output = makeOutput(from: cfg) else { continue }
+            configureOutput(output)
+            programOutputs.append(output)
+        }
+
+        routeProgram()       // wire the program tap across the new channels
+        pushChannelOrder()   // advertise positions
+
+        // Now that the full setup is in place, broadcast tally once (matches take()'s
+        // single-sync discipline).
+        suppressTallySync = false
+        if mode == .multiview { syncMultiviewTally() }
+    }
+
+    /// Reconstruct a `VideoOutput` from a saved config (OFF — the caller never starts it).
+    /// Unknown / not-implemented kinds (e.g. `.vcam`) are skipped.
+    private func makeOutput(from cfg: BridgeProfile.OutputConfig) -> VideoOutput? {
+        guard let kind = OutputKind(rawValue: cfg.kind) else { return nil }
+        let output: VideoOutput?
+        switch kind {
+        case .ndi:  output = NDIOutput(label: cfg.label)
+        case .obs:  output = AirliveRelayOutput(label: cfg.label)
+        case .rtsp: output = RTSPOutput(label: cfg.label, port: UInt16(cfg.port ?? 8554))
+        case .srt:  output = SRTOutput(label: cfg.label)
+        case .vcam: output = nil                       // not implemented
+        }
+        output?.config = cfg.config
+        return output
+    }
+
     // MARK: - Private
 
-    /// "Camera N" using the lowest free index, so removing CAM 2 and adding
-    /// again reuses "Camera 2" rather than ever-increasing numbers.
+    /// "Camera N" using the lowest free index, so removing CAM 2 and re-adding reuses
+    /// "Camera 2" rather than ever-increasing numbers.  All kinds are cameras (a combined
+    /// channel is a camera with both video + control).
     private func defaultChannelName() -> String {
         let used = Set(channels.map(\.name))
         var n = 1
