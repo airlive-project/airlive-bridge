@@ -86,10 +86,15 @@ final class AirPlayReceiver: ChannelReceiver {
         stateLock.lock(); _stopped = true; _didFlipGate = false; stateLock.unlock()
         engine.onVideoFrame = nil       // stop NEW decoder callbacks BEFORE teardown (no stale frames)
         engine.onConnectionLost = nil   // and don't fire "lost" during our own teardown
-        engine.stop()
         channel?.publishFrame(nil)
         let clear = { [weak self] in self?.channel?.isConnected = false; self?.channel?.latestFrame = nil }
         if Thread.isMainThread { clear() } else { DispatchQueue.main.async(execute: clear) }
+        // engine.stop() joins the UxPlay restart worker + decoder thread and can block a while (a
+        // worker mid dnssd/httpd teardown, or a decode in flight) — do it OFF main so removing a
+        // channel from the SwiftUI list never freezes the UI. Capture self STRONGLY so the receiver +
+        // engine outlive the async teardown even if the channel is released meanwhile; engine.stop()
+        // is idempotent (running_ guard) so the deinit fallback is a safe no-op afterwards.
+        DispatchQueue.global(qos: .userInitiated).async { self.engine.stop() }
     }
 
     func send(_ msg: ControlMessage) {}              // no back-channel over AirPlay

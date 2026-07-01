@@ -627,9 +627,11 @@ private:
   ConnectionLostCallback connLostCb_ = nil;   // fired when the mirror session drops (#12)
   std::mutex cbMutex_;
 
-  // Decoupled-decode queue. Size 8 caps worst-case added latency at ~265ms
-  // @30fps / ~133ms @60fps (matches the obs-airlive plugin's tuned value).
-  BoundedQueue<VideoPacket> videoQueue_{8};
+  // Decoupled-decode queue. Depth 3 (was 8, inherited from a Pi-class / OBS-coupled decoder): the
+  // Bridge runs Apple-Silicon HW decode with drop-oldest already shielding the network thread, so it
+  // rarely needs slack — this caps a transient-stall backlog to ~1-2 frame intervals (~33-66ms)
+  // instead of ~265ms @30fps. Drop-oldest keeps the freshest frame, so on-air stays current.
+  BoundedQueue<VideoPacket> videoQueue_{3};
   std::thread decoderThread_;
   std::atomic<uint64_t> videoDropCount_{0};
 

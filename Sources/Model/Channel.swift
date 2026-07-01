@@ -75,9 +75,15 @@ final class BridgeChannel: ObservableObject, Identifiable {
         return _latestPixelBuffer
     }
 
-    /// Clockwise present rotation (0/90/180/270) from the camera's snapshot.  A
-    /// plain Int read off-main by mirrors (atomic-enough, same trade-off as Studio).
-    var outputRotation: Int = 0
+    /// Clockwise present rotation (0/90/180/270) from the camera's snapshot.  Written on main (the
+    /// receiver's StateSnapshot apply), read OFF main by the mirror + aspect path — a plain Int there
+    /// is a formal data race (a torn 0→90 read desyncs aspect vs transform). Guarded by its own lock.
+    private var _outputRotation: Int = 0
+    private let rotationLock = NSLock()
+    var outputRotation: Int {
+        get { rotationLock.lock(); defer { rotationLock.unlock() }; return _outputRotation }
+        set { rotationLock.lock(); _outputRotation = newValue; rotationLock.unlock() }
+    }
 
     /// On-screen aspect (width/height) derived from the LIVE buffer's real pixel
     /// dimensions: AirPlay reports a portrait iPhone screen, Airlive a landscape
@@ -139,7 +145,10 @@ final class BridgeChannel: ObservableObject, Identifiable {
 
     /// Jitter-buffer depth applied to this channel's output.  Forwarded live to
     /// the receiver so a mid-stream change re-anchors the playout timeline.
-    @Published var delay: LatencyPreset = .normal {
+    // Default .lowest (0 ms): a LAN + our no-B-frame stream has low jitter, and present() feeds BOTH
+    // the preview mirrors and the program/NDI output, so 0 cuts preview AND program latency together.
+    // Per-channel + operator-tunable — bump to Normal/Smooth/Safe on a weak link.
+    @Published var delay: LatencyPreset = .lowest {
         didSet {
             guard delay != oldValue else { return }
             receiver?.updateDelay(delay)
@@ -216,7 +225,7 @@ final class BridgeChannel: ObservableObject, Identifiable {
     var controlReceiver: ChannelReceiver?
 
     init(id: UUID = UUID(), name: String, kind: ChannelKind = .airlive,
-         captureDeviceID: String? = nil, delay: LatencyPreset = .normal) {
+         captureDeviceID: String? = nil, delay: LatencyPreset = .lowest) {
         self.id = id
         self.name = name
         self.kind = kind

@@ -26,6 +26,15 @@
 
 import SwiftUI
 
+/// An inversion-safe slider range from device-read capability bounds.  `DeviceCapabilities.init(from:)`
+/// is deliberately partial-tolerant (`decodeIfPresent ?? default`), so a sender that supplies ONE bound
+/// while its pair falls back to a default can yield lower > upper (e.g. isoMin=5000 with isoMax=3200
+/// default).  `lower...upper` traps with a fatalError on that — which would CRASH the Bridge from any
+/// non-conforming/hostile camera on the LAN.  min/max keeps it a valid (possibly single-point) range.
+private func capRange(_ a: Double, _ b: Double) -> ClosedRange<Double> {
+    Swift.min(a, b)...Swift.max(a, b)
+}
+
 struct CameraControlPanel: View {
     @ObservedObject var channel: BridgeChannel
     /// Hide the LENS card where a lens picker already sits above the panel (the multiview
@@ -202,7 +211,7 @@ struct CameraControlPanel: View {
                 SliderRow(label: "ISO",
                           valueText: "\(Int(iso))",
                           value: $iso,
-                          range: Double(caps.isoMin)...Double(caps.isoMax),   // device-read bounds
+                          range: capRange(Double(caps.isoMin), Double(caps.isoMax)),   // device-read, inversion-safe
                           step: 10,            // drag snaps to 10
                           arrowStep: 50,       // arrows jump ±50
                           enabled: !exposureAuto) { v in
@@ -211,7 +220,7 @@ struct CameraControlPanel: View {
                 SliderRow(label: "Shutter",
                           valueText: "1/\(Int(shutterDenom))",
                           value: $shutterDenom,
-                          range: Double(caps.shutterMinDenom)...Double(caps.shutterMaxDenom),
+                          range: capRange(Double(caps.shutterMinDenom), Double(caps.shutterMaxDenom)),
                           step: 1,
                           arrowStep: 10,
                           enabled: !exposureAuto) { v in
@@ -268,7 +277,7 @@ struct CameraControlPanel: View {
                 SliderRow(label: "Temperature",
                           valueText: "\(Int(wbKelvin))K",
                           value: $wbKelvin,
-                          range: Double(caps.wbTempMin)...Double(caps.wbTempMax),   // device-read
+                          range: capRange(Double(caps.wbTempMin), Double(caps.wbTempMax)),   // device-read, inversion-safe
                           step: 50,
                           arrowStep: 100,
                           enabled: !whiteBalanceAuto) { v in
@@ -277,7 +286,7 @@ struct CameraControlPanel: View {
                 SliderRow(label: "Tint",
                           valueText: tintLabel,
                           value: $tint,
-                          range: Double(caps.wbTintMin)...Double(caps.wbTintMax),
+                          range: capRange(Double(caps.wbTintMin), Double(caps.wbTintMax)),
                           step: 1,
                           arrowStep: 5,
                           enabled: !whiteBalanceAuto) { v in

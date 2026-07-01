@@ -1009,6 +1009,10 @@ final class BridgeChannelReceiver: ChannelReceiver {
             }
             decompressionSession = newSession
             decompressionFormat  = format
+            // Low-latency scheduling hint — bias VideoToolbox toward prompt decode (the AirPlay
+            // decoder sets this too; the direct-wire ARLV path was missing it). Thermally near-neutral
+            // on the Mac (a scheduler hint, adds no work), most useful at 5-camera scale.
+            VTSessionSetProperty(newSession, key: kVTDecompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         }
 
         guard let session = decompressionSession else { return }

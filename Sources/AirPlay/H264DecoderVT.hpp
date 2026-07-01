@@ -20,6 +20,7 @@
 #include <CoreVideo/CoreVideo.h>
 #include <VideoToolbox/VideoToolbox.h>
 #include <cstdint>
+#include <mutex>
 #include <span>
 #include <vector>
 
@@ -53,6 +54,12 @@ private:
                         CMTime dur);
 
   auto ensureSession(std::span<const uint8_t> sps, std::span<const uint8_t> pps) -> bool;
+
+  // Serializes decode() (decoder thread) against flush() and ~H264DecoderVT (UxPlay callback threads:
+  // conn_reset / video_flush / video_reset). Without it, flush() frees pendingBuffer_ / invalidates
+  // session_ concurrently with a decode → use-after-free + double-free on a mirror drop/glitch.
+  // onDecoded runs synchronously inside decode() (already under this lock), so it needs no lock.
+  std::mutex mutex_;
 
   CMVideoFormatDescriptionRef formatDesc_ = nullptr;
   VTDecompressionSessionRef session_ = nullptr;

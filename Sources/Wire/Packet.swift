@@ -337,7 +337,7 @@ public enum DeliveryMode: String, Sendable, CaseIterable, Identifiable {
 /// payload (one of state / floatValue / intValue / stringValue /
 /// boolValue / lutPayload) is read.  Optional fields keep the JSON
 /// compact (omitted fields don't get encoded).
-public struct ControlMessage: Codable {
+public struct ControlMessage: Codable, Sendable {
     public let type: String
     public var state: StateSnapshot?
     public var floatValue: Float?

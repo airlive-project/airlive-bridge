@@ -271,23 +271,38 @@ final class BridgeModel: ObservableObject {
             // this flag so non-program channels skip the per-frame main hop entirely.
             channel.setProgramSource(isProgram)
         }
-        // Passthrough outputs (OBS/RTSP/SRT) need raw H.264; an AirPlay/combined/capture program
-        // emits only decoded frames (NDI-only).  Flag it for the UI, and forget any cached OBS
-        // format header so a reconnect can't replay the previous camera's SPS/PPS into a now
-        // frameless relay (which would stall OBS's decoder).
-        let programProducesRaw = channels.first(where: { $0.id == pid })?.producesRawH264 ?? true
+        // Passthrough outputs (OBS/RTSP/SRT) need raw H.264 ACTIVELY flowing.  A source that is
+        // AirPlay/combined/capture (no raw encoder) OR a Control-only Airlive camera (encoder off,
+        // videoActive=false) produces none — both must flag the UI (so the passthrough warning shows
+        // instead of a silently black OBS/RTSP/SRT) and forget any cached format so a reconnect can't
+        // replay the previous camera's SPS/PPS into a now-frameless relay.
+        let pc = channels.first(where: { $0.id == pid })
+        let programHasVideo = pc != nil && pc!.isConnected && pc!.videoActive
+        let programProducesRaw = (pc?.producesRawH264 ?? true) && (pc?.videoActive ?? true)
         programSupportsPassthrough = (pid == nil) ? true : programProducesRaw
         if !programProducesRaw {
-            for case let relay as AirliveRelayOutput in programOutputs { relay.clearLastFormat() }
+            for output in programOutputs { output.clearLastFormat() }   // OBS + RTSP + SRT (NDI no-op)
         }
-        // On a REAL source change, gate the OBS relay's samples until the NEW source's format
-        // arrives (the forced keyframe below brings it) — otherwise OBS decodes the new camera's
-        // H.264 against the previous camera's SPS/PPS for ~300 ms (#20).
+        // Program with no LIVE video (nil / disconnected / Control-only / AirPlay-video-dropped):
+        // push ONE black frame so NDI shows a clear no-signal instead of FREEZING on the PREVIOUS
+        // camera's last decoded frame.  handleConnectivityChange covers a mid-air drop of the current
+        // source; THIS covers a CUT/select TO a source that has no video.
+        if !programHasVideo, let black = blackProgramFrame {
+            feedProgram(black, timeNs: DispatchTime.now().uptimeNanoseconds)
+        }
+        // On a REAL source change, gate EVERY passthrough output until the new source's format
+        // arrives (#20 — was OBS-relay-only; RTSP/SRT decoded ~300 ms against the old SPS/PPS), and
+        // FORCE an IDR for the new source.  Forcing (not the lastKeyframeProgramID dedup) is
+        // essential: after A→AirPlay→A the dedup sees A unchanged and skips, leaving the relay gated
+        // with no keyframe → OBS frozen for a GOP.  The force still no-ops safely if the new source
+        // can't produce a keyframe (requestKeyframe re-checks producesRawH264/videoActive).
         if pid != lastRoutedProgramID {
             lastRoutedProgramID = pid
-            for case let relay as AirliveRelayOutput in programOutputs { relay.awaitFormat() }
+            for output in programOutputs { output.awaitFormat() }        // OBS + RTSP + SRT (NDI no-op)
+            requestKeyframeForProgram(force: true)
+        } else {
+            requestKeyframeForProgram()   // routine re-route (mode toggle, add/remove): dedup, no re-poke
         }
-        requestKeyframeForProgram()   // instant relay resync on CUT / hot-cut / select
     }
     private var lastRoutedProgramID: UUID?
 
@@ -308,9 +323,20 @@ final class BridgeModel: ObservableObject {
     /// `force` for a fresh relay connect).  Gated tightly so the phone emits at most
     /// one extra I-frame per real CUT and never for routine UI churn or for NDI, and
     /// DEBOUNCED so rapid CUTs collapse to a single IDR on the settled program.
+    /// Any LIVE passthrough consumer that needs a clean IDR after a CUT — the OBS relay (connected),
+    /// or an RTSP/SRT output that's serving.  RTSP/SRT are gated on the same awaitFormat() as the OBS
+    /// relay now, so they too need the forced keyframe or they freeze/corrupt for a whole GOP on a cut.
+    private func hasLivePassthroughConsumer() -> Bool {
+        programOutputs.contains { out in
+            if let relay = out as? AirliveRelayOutput { return relay.isConnected }   // real TCP peer
+            if let rtsp = out as? RTSPOutput { return rtsp.hasPlayingClient }         // a client is PLAYING
+            if let srt = out as? SRTOutput { return srt.isLive }                      // caller-mode: connected peer
+            return false   // NDI decodes frames, needs no IDR request
+        }
+    }
+
     private func requestKeyframeForProgram(force: Bool = false) {
-        let obsReceiving = programOutputs.contains { ($0 as? AirliveRelayOutput)?.isConnected == true }
-        guard obsReceiving else { return }
+        guard hasLivePassthroughConsumer() else { return }
         // Only an ARLV camera actually sending video can satisfy a keyframe request: skip a
         // Control-only source (encoder off) AND an AirPlay/combined source (no ARLV encoder at
         // all) — a forceKeyframe to either is a wasted control packet that can't help.
@@ -323,9 +349,9 @@ final class BridgeModel: ObservableObject {
         keyframeDebounce?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            // Re-check at fire time: the program may have moved again and the relay
+            // Re-check at fire time: the program may have moved again and every passthrough consumer
             // may have dropped — never poke the phone for nothing.
-            guard self.programOutputs.contains(where: { ($0 as? AirliveRelayOutput)?.isConnected == true }) else { return }
+            guard self.hasLivePassthroughConsumer() else { return }
             self.channels.first { $0.id == self.effectiveProgramID }?.send(.forceKeyframe())
         }
         keyframeDebounce = work

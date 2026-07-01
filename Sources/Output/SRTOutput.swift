@@ -94,6 +94,11 @@ final class SRTOutput: VideoOutput {
     private let queue = DispatchQueue(label: "studio.airlive.bridge.srt", qos: .userInitiated)
     private var sock: Int32 = SRT_INVALID_SOCK
     private let muxer = MPEGTSMuxer()
+    /// Passthrough-CUT gating (mirrors AirliveRelayOutput): drop forwarded samples until the new
+    /// source's SPS/PPS arrives after a program CUT, so SRT/TS receivers don't decode the new
+    /// camera's deltas against the previous camera's muxer parameter sets (#20).
+    private var awaitingFormat = false
+    private var awaitToken = 0
 
     init(label: String) { self.label = label }
 
@@ -109,6 +114,7 @@ final class SRTOutput: VideoOutput {
             guard let self else { return }
             if self.sock != SRT_INVALID_SOCK { _ = SRTRuntime.shared.close(self.sock); self.sock = SRT_INVALID_SOCK }
             self.isLive = false
+            self.awaitingFormat = false   // don't inherit a stale CUT gate across a stop/start
         }
     }
 
@@ -116,14 +122,35 @@ final class SRTOutput: VideoOutput {
 
     func relayFormat(_ payload: Data) {
         queue.async { [weak self] in
-            guard let ps = H264NAL.parameterSets(fromFormat: payload) else { return }
-            self?.muxer.sps = ps.sps; self?.muxer.pps = ps.pps
+            guard let self, let ps = H264NAL.parameterSets(fromFormat: payload) else { return }
+            self.muxer.sps = ps.sps; self.muxer.pps = ps.pps
+            self.awaitingFormat = false   // new source's format is here — samples may flow (#20)
+        }
+    }
+
+    /// Forget cached SPS/PPS when the program moves to a source with no raw H.264 (AirPlay/combined).
+    func clearLastFormat() {
+        queue.async { [weak self] in self?.muxer.sps = nil; self?.muxer.pps = nil }
+    }
+
+    /// Gate samples until the next format after a CUT; 1.5 s safety timeout so a swallowed/dropped
+    /// keyframe doesn't strand SRT receivers frozen until the next long-GOP keyframe.
+    func awaitFormat() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.awaitingFormat = true
+            self.awaitToken &+= 1
+            let token = self.awaitToken
+            self.queue.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                guard let self, self.awaitToken == token, self.awaitingFormat else { return }
+                self.awaitingFormat = false
+            }
         }
     }
 
     func relaySample(_ payload: Data, timestampMicros: Int64) {
         queue.async { [weak self] in
-            guard let self, self.isLive, self.sock != SRT_INVALID_SOCK else { return }
+            guard let self, !self.awaitingFormat, self.isLive, self.sock != SRT_INVALID_SOCK else { return }
             let nals = H264NAL.nalUnits(fromAVCC: payload)
             guard !nals.isEmpty else { return }
             let keyframe = nals.contains { H264NAL.type(of: $0) == 5 }

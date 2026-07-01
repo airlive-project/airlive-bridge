@@ -33,6 +33,13 @@ final class RTSPOutput: VideoOutput {
     }
     private var _isLive = false
     private let liveLock = NSLock()
+
+    /// True while ≥1 RTSP client is actually PLAYING (not merely: server started).  Read on main by
+    /// BridgeModel to decide whether a program CUT needs a forced IDR — `isLive` alone (server up, no
+    /// client) would poke the phone for nobody (CLAUDE.md "no work for nobody").  Maintained on `queue`
+    /// (refreshPlayState) from the queue-confined client play/close transitions; read under liveLock.
+    private var _hasPlayingClient = false
+    var hasPlayingClient: Bool { liveLock.lock(); defer { liveLock.unlock() }; return _hasPlayingClient }
     let port: UInt16
 
     private let queue = DispatchQueue(label: "studio.airlive.bridge.rtsp", qos: .userInitiated)
@@ -43,6 +50,12 @@ final class RTSPOutput: VideoOutput {
     private var pps: [UInt8]?
     private var seq: UInt16 = 0
     private let ssrc: UInt32 = 0x4152_4C56   // "ARLV"
+    /// Passthrough-CUT gating (mirrors AirliveRelayOutput): drop forwarded samples until the new
+    /// source's SPS/PPS arrives after a program CUT, so RTP/RTSP clients don't packetize the new
+    /// camera's NALs against the previous camera's sprop-parameter-sets (#20). awaitToken
+    /// invalidates a stale safety-timeout when a newer await/format lands.
+    private var awaitingFormat = false
+    private var awaitToken = 0
 
     /// Max RTP payload before FU-A fragmentation.  ~1400 keeps packets comfortably
     /// under a typical MTU even though TCP wouldn't strictly require it.
@@ -69,6 +82,7 @@ final class RTSPOutput: VideoOutput {
             self.listener?.cancel(); self.listener = nil
             self.clients.forEach { $0.close() }; self.clients.removeAll()
             self.sps = nil; self.pps = nil
+            self.awaitingFormat = false   // don't inherit a stale CUT gate across a stop/start
         }
     }
 
@@ -78,12 +92,33 @@ final class RTSPOutput: VideoOutput {
         queue.async { [weak self] in
             guard let self, let ps = H264NAL.parameterSets(fromFormat: payload) else { return }
             self.sps = ps.sps; self.pps = ps.pps
+            self.awaitingFormat = false   // new source's format is here — samples may flow (#20)
+        }
+    }
+
+    /// Forget cached SPS/PPS when the program moves to a source with no raw H.264 (AirPlay/combined).
+    func clearLastFormat() {
+        queue.async { [weak self] in self?.sps = nil; self?.pps = nil }
+    }
+
+    /// Gate samples until the next format after a CUT; 1.5 s safety timeout so a swallowed/dropped
+    /// keyframe doesn't strand RTSP clients frozen until the next long-GOP keyframe.
+    func awaitFormat() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.awaitingFormat = true
+            self.awaitToken &+= 1
+            let token = self.awaitToken
+            self.queue.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                guard let self, self.awaitToken == token, self.awaitingFormat else { return }
+                self.awaitingFormat = false
+            }
         }
     }
 
     func relaySample(_ payload: Data, timestampMicros: Int64) {
         queue.async { [weak self] in
-            guard let self else { return }
+            guard let self, !self.awaitingFormat else { return }   // drop until new format after a CUT (#20)
             let nals = H264NAL.nalUnits(fromAVCC: payload)
             guard !nals.isEmpty else { return }
             let ts = H264NAL.ts90kHz(microseconds: timestampMicros)
@@ -124,6 +159,14 @@ final class RTSPOutput: VideoOutput {
     /// Remove a client that closed (called on `queue` by the client).
     fileprivate func remove(_ client: RTSPClient) {
         clients.removeAll { $0 === client }
+        refreshPlayState()
+    }
+
+    /// Recompute the "any client playing" flag from the queue-confined `clients`.  MUST be called on
+    /// `queue` (client add/remove + PLAY transitions all run there); publishes to the lock-backed flag.
+    fileprivate func refreshPlayState() {
+        let any = clients.contains { $0.isPlaying }
+        liveLock.lock(); _hasPlayingClient = any; liveLock.unlock()
     }
 
     /// SDP describing the single H.264 video track (uses the live SPS/PPS if known).
@@ -284,6 +327,7 @@ private final class RTSPClient {
                     extra: "Transport: RTP/AVP/TCP;unicast;interleaved=\(rtpChannel)-\(rtpChannel + 1)\r\nSession: \(session)")
         case "PLAY":
             isPlaying = true
+            owner?.refreshPlayState()   // a client is now playing → RTSP is a live passthrough consumer
             respond(cseq: cseq, extra: "Session: \(session)\r\nRTP-Info: url=stream")
         case "GET_PARAMETER":
             respond(cseq: cseq, extra: "Session: \(session)")   // keepalive

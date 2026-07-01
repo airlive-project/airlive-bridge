@@ -238,6 +238,13 @@ final class NDIOutput: VideoOutput {
     // receiver can never back up a queue of retained pixel buffers (memory).  Guarded by `lock`.
     private let sendQueue = DispatchQueue(label: "studio.airlive.bridge.ndi.send", qos: .userInteractive)
     private var sendInFlight = false
+    // While a send is in flight, the newest frame is STASHED here (latest-wins) instead of dropped,
+    // then delivered as the tail when the send completes.  This guarantees a ONE-SHOT frame — the
+    // black dead-signal pushed on a program drop / cut-to-no-video — is never lost to the in-flight
+    // drop (which would freeze the program on the previous camera's last frame).  Bounded to one
+    // IOSurface-backed buffer (CF-retained, no copy), so memory stays bounded.
+    private var pendingBuffer: CVPixelBuffer?
+    private var pendingTimeNs: UInt64 = 0
 
     // BGRA conversion fallback — created lazily only if a non-BGRA frame arrives.
     private var ciContext: CIContext?
@@ -275,13 +282,37 @@ final class NDIOutput: VideoOutput {
     /// is retained across the hand-off — no copy.
     func send(_ pixelBuffer: CVPixelBuffer, timeNs: UInt64) {
         lock.lock()
-        guard _isLive, !sendInFlight else { lock.unlock(); return }
+        guard _isLive else { lock.unlock(); return }
+        if sendInFlight {
+            // Stash the newest frame (latest-wins) rather than dropping it, so a one-shot dead-signal
+            // frame survives; a continuous stream just coalesces to the newest. Delivered as the tail.
+            pendingBuffer = pixelBuffer
+            pendingTimeNs = timeNs
+            lock.unlock()
+            return
+        }
         sendInFlight = true
         lock.unlock()
+        dispatchSend(pixelBuffer, timeNs: timeNs)
+    }
+
+    /// Deliver on `sendQueue`; when it finishes, flush any frame stashed during the send (tail
+    /// delivery) so the LAST buffer is always sent.  sendInFlight stays true across the chain, so
+    /// sends remain strictly serialized and memory stays bounded to one pending buffer.
+    private func dispatchSend(_ pixelBuffer: CVPixelBuffer, timeNs: UInt64) {
         sendQueue.async { [weak self] in
             guard let self else { return }
             self.deliver(pixelBuffer, timeNs: timeNs)
-            self.lock.lock(); self.sendInFlight = false; self.lock.unlock()
+            self.lock.lock()
+            if let pending = self.pendingBuffer {
+                let t = self.pendingTimeNs
+                self.pendingBuffer = nil
+                self.lock.unlock()
+                self.dispatchSend(pending, timeNs: t)
+            } else {
+                self.sendInFlight = false
+                self.lock.unlock()
+            }
         }
     }
 

@@ -113,6 +113,7 @@ H264DecoderVT::H264DecoderVT() = default;
 
 H264DecoderVT::~H264DecoderVT()
 {
+  std::lock_guard<std::mutex> lk(mutex_);   // serialize against any in-flight decode()/flush()
   if (session_)
   {
     VTDecompressionSessionInvalidate(session_);
@@ -202,6 +203,7 @@ auto H264DecoderVT::ensureSession(std::span<const uint8_t> sps, std::span<const 
 
 auto H264DecoderVT::decode(std::span<const uint8_t> data, uint64_t pts) -> CVPixelBufferRef
 {
+  std::lock_guard<std::mutex> lk(mutex_);   // vs flush()/dtor on UxPlay callback threads
   auto nalus = walkAnnexB(data.data(), data.size());
   if (nalus.empty())
     return nullptr;
@@ -307,6 +309,7 @@ auto H264DecoderVT::decode(std::span<const uint8_t> data, uint64_t pts) -> CVPix
 
 auto H264DecoderVT::flush() -> void
 {
+  std::lock_guard<std::mutex> lk(mutex_);   // vs decode() on the decoder thread — prevents the UAF
   if (pendingBuffer_)
   {
     CVPixelBufferRelease(pendingBuffer_);

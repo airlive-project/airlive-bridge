@@ -100,6 +100,14 @@ protocol VideoOutput: AnyObject {
     func relayFormat(_ payload: Data)
     func relaySample(_ payload: Data, timestampMicros: Int64)
 
+    /// Passthrough-CUT gating — implemented by EVERY raw-H.264 relay (OBS / RTSP / SRT), no-op for
+    /// buffer outputs (NDI).  `awaitFormat` drops forwarded samples until the new source's SPS/PPS
+    /// arrives after a program CUT, so the new camera's H.264 is never decoded against the previous
+    /// camera's parameter sets (#20 — was relay-only, now covers RTSP/SRT too).  `clearLastFormat`
+    /// forgets the cached format when the program moves to a source with no raw H.264.
+    func awaitFormat()
+    func clearLastFormat()
+
     /// Transport-specific config string from the output card's second field — e.g.
     /// the SRT destination `srt://host:port`.  Defaults to a no-op (NDI group / RTSP
     /// path are not wired today); only SRT stores it.
@@ -109,5 +117,7 @@ protocol VideoOutput: AnyObject {
 extension VideoOutput {
     func relayFormat(_ payload: Data) {}
     func relaySample(_ payload: Data, timestampMicros: Int64) {}
+    func awaitFormat() {}
+    func clearLastFormat() {}
     var config: String { get { "" } set {} }
 }
