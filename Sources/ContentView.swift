@@ -1,9 +1,8 @@
 // ContentView.swift — the three-zone window.
 //
 //   ┌──────────┬───────────────────────────┬──────────────┐
-//   │ Channels │   Selected channel        │  Publish to  │
-//   │  (rail)  │   preview + tally + delay │   (rail)     │
-//   │          │   + camera control        │              │
+//   │ Channels │   Multiview (PVW/PGM +    │  Publish to  │
+//   │  (rail)  │   CUT + camera control)   │   (rail)     │
 //   └──────────┴───────────────────────────┴──────────────┘
 //
 // Left and right are fixed-width recessed rails; the center expands.  The model
@@ -15,7 +14,6 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject var model: BridgeModel
     @EnvironmentObject var shortcuts: ShortcutCenter
-    @State private var showShortcuts = false
     /// Each side rail collapses to a minimal strip INDEPENDENTLY — the chevron lives on the
     /// rail itself (header when open, strip top when collapsed), so the operator hides exactly
     /// the column they want for more multiview room.
@@ -39,28 +37,18 @@ struct ContentView: View {
         .overlay(Rectangle().frame(height: 1).foregroundColor(Theme.stroke),
                  alignment: .top)
         .preferredColorScheme(.dark)
-        // GLOBAL Solo ⇄ Multiview switch lives IN the title bar — our themed
-        // control, on our dark background, so the title bar is the working strip
-        // (no separate empty row, no grey chrome).
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                SegmentedBar(selection: $model.mode,
-                             options: AppMode.allCases,
-                             label: { $0.label })
-                    .frame(width: 320)
-            }
-            ToolbarItem(placement: .automatic) {
-                Button { showShortcuts.toggle() } label: {
-                    Image(systemName: "keyboard")
-                }
-                .help("Shortcuts")
-                .popover(isPresented: $showShortcuts, arrowEdge: .bottom) {
-                    ShortcutSettings(shortcuts: shortcuts, bindings: shortcuts.bindings)
-                }
-            }
-        }
+        // No toolbar items: the Solo ⇄ Multiview switch was REMOVED for launch
+        // (2026-07-03) — Multiview is the only mode; Solo needs a real per-channel
+        // routing design (aux buses) and ships later.  The dark toolbar background
+        // stays so the title bar reads as part of the app, not grey chrome.
         .toolbarBackground(Theme.bgApp, for: .windowToolbar)
         .toolbarBackground(.visible, for: .windowToolbar)
-        .navigationTitle("")
+        // OBS-style working title: "Airlive Bridge 1.0.0 - Profile: EAGLES" (no
+        // scenes segment — Bridge has no scene collections).
+        .navigationTitle("Airlive Bridge \(Self.appVersion) - Profile: \(model.profileName)")
     }
+
+    /// Marketing version from the bundle (single source: MARKETING_VERSION in project.yml).
+    private static let appVersion =
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
 }

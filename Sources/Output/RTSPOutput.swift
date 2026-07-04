@@ -40,6 +40,10 @@ final class RTSPOutput: VideoOutput {
     /// (refreshPlayState) from the queue-confined client play/close transitions; read under liveLock.
     private var _hasPlayingClient = false
     var hasPlayingClient: Bool { liveLock.lock(); defer { liveLock.unlock() }; return _hasPlayingClient }
+
+    /// Fires on MAIN when a client starts PLAYING — the model forces one IDR so the new viewer
+    /// decodes immediately instead of waiting out the camera's 6–10 s GOP.
+    var onPlay: (() -> Void)?
     let port: UInt16
 
     private let queue = DispatchQueue(label: "studio.airlive.bridge.rtsp", qos: .userInitiated)
@@ -328,6 +332,9 @@ private final class RTSPClient {
         case "PLAY":
             isPlaying = true
             owner?.refreshPlayState()   // a client is now playing → RTSP is a live passthrough consumer
+            // Force one IDR for the fresh viewer — a mid-GOP join would otherwise sit on garbage
+            // until the camera's next natural keyframe (LAN GOP is 6–10 s).
+            if let owner { DispatchQueue.main.async { owner.onPlay?() } }
             respond(cseq: cseq, extra: "Session: \(session)\r\nRTP-Info: url=stream")
         case "GET_PARAMETER":
             respond(cseq: cseq, extra: "Session: \(session)")   // keepalive

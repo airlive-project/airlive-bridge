@@ -20,6 +20,7 @@ import AppKit   // NSApp.keyWindow.toggleFullScreen
 
 struct MultiviewGrid: View {
     @ObservedObject var model: BridgeModel
+    @EnvironmentObject var shortcuts: ShortcutCenter
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -61,20 +62,30 @@ struct MultiviewGrid: View {
     }
 
     /// Quick lens picker for the STAGED (Preview) camera — pick the look before you
-    /// cut it to air.  Labels are the camera's reported ladder (0.5x / 1x / 2x …),
-    /// falling back to the canonical iPhone ladder until it reports.
+    /// cut it to air.  Shown ONLY once the camera has reported ITS ladder (no invented
+    /// default buttons for a camera that hasn't said what it can do); capped at 6 —
+    /// the deepest iPhone ladder and the Z X C V B N shortcut row.
     @ViewBuilder
     private var lensQuickRow: some View {
-        if let preview = model.previewChannel() {
+        if let preview = model.previewChannel(),
+           let lenses = preview.remote?.availableLenses, !lenses.isEmpty {
             HStack(spacing: Spacing.xs) {
-                ForEach(lensLadder(preview), id: \.self) { label in
-                    Button { preview.send(.setLens(label)) } label: {
-                        Text(label)
-                            .font(.system(size: 11, weight: .medium))
-                            .frame(height: 26)
-                            .padding(.horizontal, Spacing.sm)
+                ForEach(Array(lenses.prefix(6).enumerated()), id: \.element) { pair in
+                    Button { preview.send(.setLens(pair.element)) } label: {
+                        HStack(spacing: 3) {
+                            Text(pair.element)
+                                .font(.system(size: 11, weight: .medium))
+                            if shortcuts.showHints {
+                                Text(shortcuts.bindings.chord(
+                                        for: ShortcutAction(kind: .lens, index: pair.offset)).display)
+                                    .font(.system(size: 9, weight: .medium))
+                                    .foregroundColor(Theme.textFaint.opacity(0.7))
+                            }
+                        }
+                        .frame(height: 26)
+                        .padding(.horizontal, Spacing.sm)
                     }
-                    .bridgeButton(selected: preview.remote?.lens == label)
+                    .bridgeButton(selected: preview.remote?.lens == pair.element)
                     .disabled(!preview.remoteControlConnected || !preview.remoteControlAllowed)
                 }
             }
@@ -85,29 +96,31 @@ struct MultiviewGrid: View {
         }
     }
 
-    private func lensLadder(_ channel: BridgeChannel) -> [String] {
-        let reported = channel.remote?.availableLenses ?? []
-        return reported.isEmpty ? ["0.5x", "1x", "2x", "3x", "5x"] : reported
-    }
-
     /// CUT preview → program (also Space, handled centrally by ShortcutCenter so it
     /// works globally — no per-button shortcut, to avoid a double cut).  Moved to the
     /// top-center; the old full-width bar under the panes is gone.
     private var cutButton: some View {
-        // Can only cut a source that actually has video — a Control-only (videoActive=false)
-        // preview would dead-air the program outputs, so the button (and take()) refuse it.
-        let canCut = model.previewChannel()?.videoActive ?? false
+        // ANY staged channel cuts to air, signal or not — a channel with no live video airs BLACK,
+        // like an empty input on a real switcher.  Only disabled when nothing is staged at all.
+        let canCut = model.previewID != nil
         return Button { model.take() } label: {
-            Text("CUT  (Space)")
-                .font(.system(size: 11, weight: .medium))
-                .frame(height: 26)
-                .padding(.horizontal, Spacing.sm)
+            HStack(spacing: 4) {
+                Text("CUT")
+                    .font(.system(size: 11, weight: .medium))
+                if shortcuts.showHints {
+                    Text(shortcuts.bindings.chord(for: ShortcutAction(kind: .cut, index: 0)).display)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(Theme.textFaint.opacity(0.7))
+                }
+            }
+            .frame(height: 26)
+            .padding(.horizontal, Spacing.sm)
         }
         .bridgeButton()
         .disabled(!canCut)
         .opacity(canCut ? 1 : 0.5)
-        .help(canCut ? "Cut the Preview camera to Program (Space)"
-                     : "Preview has no video (Control-only or none) — can't cut to air")
+        .help(canCut ? "Cut the Preview channel to Program (Space) — no signal airs black"
+                     : "Stage a channel in Preview first")
     }
 
     /// Full-Screen the window.  ROADMAP: a CLEAN multiview-only full-screen (hide the
@@ -268,7 +281,7 @@ private func bottomChip(_ text: String, color: Color = .white) -> some View {
         .foregroundColor(color)
         .padding(.horizontal, Spacing.sm)
         .padding(.vertical, 2)
-        .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(Color.black.opacity(0.5)))
+        .background(RoundedRectangle(cornerRadius: Radius.control, style: .continuous).fill(Color.black.opacity(0.5)))
         .padding(.bottom, Spacing.sm)
 }
 
@@ -309,7 +322,7 @@ private struct LivePane: View {
                 }
                 .padding(.horizontal, Spacing.sm)
                 .padding(.vertical, 2)
-                .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(Color.black.opacity(0.5)))
+                .background(RoundedRectangle(cornerRadius: Radius.control, style: .continuous).fill(Color.black.opacity(0.5)))
                 .padding(.bottom, Spacing.sm)
             }
         }
@@ -389,6 +402,7 @@ struct MultiviewWall: View {
             .background(Color.black)
             .background(WallWindowConfigurator(aspect: gridAspect, model: model) { w in
                 if win !== w { win = w }
+                w.isRestorable = false   // don't auto-reopen the wall next launch (see NonRestorableWindow)
             })
             // OBS-style projector menu on right-click.
             .contextMenu { wallMenu }
@@ -491,8 +505,27 @@ private struct WallWindowConfigurator: NSViewRepresentable {
         if model.wallFullscreenRequested {
             model.wallFullscreenRequested = false
             if !window.styleMask.contains(.fullScreen) { window.toggleFullScreen(nil) }
+            // The Full-Screen BUTTON means "fullscreen mode", not "detach": leaving
+            // fullscreen (Esc / toggle) closes the wall window outright instead of
+            // stranding the operator in a windowed detach they then have to close.
+            // Detach + the context-menu Fullscreen toggle keep the windowed behaviour.
+            coord.closeOnExitFullScreen = true
+            if coord.exitObserver == nil {
+                coord.exitObserver = NotificationCenter.default.addObserver(
+                    forName: NSWindow.didExitFullScreenNotification,
+                    object: window, queue: .main) { [weak window] _ in
+                    guard coord.closeOnExitFullScreen else { return }
+                    coord.closeOnExitFullScreen = false
+                    window?.close()
+                }
+            }
         }
     }
 
-    final class Coordinator { var sized = false }
+    final class Coordinator {
+        var sized = false
+        var closeOnExitFullScreen = false
+        var exitObserver: Any?
+        deinit { if let o = exitObserver { NotificationCenter.default.removeObserver(o) } }
+    }
 }

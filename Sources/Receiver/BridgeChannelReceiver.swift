@@ -364,6 +364,15 @@ final class BridgeChannelReceiver: ChannelReceiver {
 
         let tcp = NWProtocolTCP.Options()
         tcp.noDelay = true
+        // Dead-peer detection: a phone POWERED OFF mid-stream (or walking out of Wi-Fi range) never
+        // sends a FIN, so without probes the committed connection stays "alive" FOREVER — the slot
+        // reads busy, the TXT advertises busy=1, and the returning phone can't reconnect to its own
+        // channel.  Keepalive reaps the dead peer in ~5+2×3 ≈ 11 s → handleDisconnect frees the slot
+        // + re-advertises busy=0.  (The OBS plugin tunes the same knobs on its side.)
+        tcp.enableKeepalive = true
+        tcp.keepaliveIdle = 5      // seconds of silence before the first probe
+        tcp.keepaliveInterval = 2  // seconds between probes
+        tcp.keepaliveCount = 3     // unanswered probes → connection failed
         let params = NWParameters(tls: nil, tcp: tcp)
         // SO_REUSEADDR — a fresh launch re-binds cleanly past a TIME_WAIT socket.
         params.allowLocalEndpointReuse = true
@@ -447,10 +456,26 @@ final class BridgeChannelReceiver: ChannelReceiver {
     // MARK: - Connection (one iPhone per channel; keep listening for reconnect)
 
     private func accept(_ conn: NWConnection) {
-        // One iPhone per channel: reject newcomers while a connection is committed.
-        if connection != nil {
-            conn.cancel()
-            return
+        // One iPhone per channel — but a NEW connect while the slot is held usually means the phone
+        // died without a FIN (powered off / battery / Wi-Fi drop) and came back: the held connection
+        // is a half-open corpse keepalive hasn't reaped yet.  TAKEOVER: evict the corpse, admit the
+        // newcomer, so the returning phone reconnects INSTANTLY instead of waiting out the probes.
+        // Guards:
+        //  • age ≥ 3 s — a happy-eyeballs sibling of the JUST-committed connection (the losing
+        //    IPv4/IPv6 socket arrives ms later) must not evict its own winner;
+        //  • auth OFF only — with auth ON an unauthenticated stranger could kick a legit camera
+        //    (DoS) without knowing the password; there the keepalive reap (~11 s) frees the slot.
+        if let held = connection {
+            let ageNs = DispatchTime.now().uptimeNanoseconds - committedAtNs
+            let heldLongEnough = ageNs > 3_000_000_000
+            guard heldLongEnough, !effectiveAuthRequired else {
+                conn.cancel()
+                return
+            }
+            print("[BridgeReceiver \(src)] 🔁 new connect while slot held \(ageNs / 1_000_000_000)s — assuming stale peer, taking over")
+            held.stateUpdateHandler = nil            // its cancel must not re-enter dropConnection
+            handleDisconnect(held, reason: "superseded by a new connection")
+            held.cancel()
         }
         // Anti-bruteforce: a source that just burned through its auth attempts is
         // refused outright (no challenge, no slot) until its ban expires.
@@ -491,6 +516,10 @@ final class BridgeChannelReceiver: ChannelReceiver {
         }
     }
 
+    /// When the committed connection took the slot (uptime ns) — the takeover age guard in
+    /// `accept` reads it to tell a genuine reconnect from a happy-eyeballs sibling.  On `queue`.
+    private var committedAtNs: UInt64 = 0
+
     /// First candidate to `.ready` wins.  On `queue`.
     private func commitConnection(_ conn: NWConnection) {
         guard connection == nil else {
@@ -498,6 +527,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
             return
         }
         connection = conn
+        committedAtNs = DispatchTime.now().uptimeNanoseconds
         anchorSet = false                         // fresh stream → re-anchor PTS
         resetAuthState()                          // clean slate for this connection
         for other in pendingConnections where other !== conn {

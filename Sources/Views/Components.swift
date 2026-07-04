@@ -542,6 +542,23 @@ struct StatusPill: View {
     }
 }
 
+// MARK: - Non-restorable window marker
+
+/// Marks the hosting NSWindow as NOT part of macOS state restoration.  Auxiliary
+/// windows (Shortcuts, the multiview wall) must not silently reopen on the next
+/// launch just because the app quit while they were up — the operator opens them
+/// deliberately.  Attach as `.background(NonRestorableWindow())`.
+struct NonRestorableWindow: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { view.window?.isRestorable = false }
+        return view
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { nsView.window?.isRestorable = false }
+    }
+}
+
 // MARK: - Connection dot
 
 /// Small filled circle: accent-blue when connected, faint grey when not.  A

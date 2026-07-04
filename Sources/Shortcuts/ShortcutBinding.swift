@@ -6,7 +6,7 @@
 // in other apps — see ShortcutCenter), so it is never stored in a base chord.
 //
 // Bindings persist in UserDefaults as JSON; an unset action falls back to its
-// default, so an empty store == stock layout (Space / 1–9 / ⇧1–6).
+// default, so an empty store == stock layout (Space / 1–9 / Z X C V B N).
 
 import Foundation
 import AppKit
@@ -28,41 +28,70 @@ struct KeyChord: Equatable, Codable {
         self.keyCode = keyCode; self.shift = shift; self.command = command
     }
 
-    /// Human label, e.g. "Space", "⇧1", "⌘K".
+    /// Human label with "+" between parts, e.g. "Space", "⇧+1", "⌘+Delete",
+    /// "⇧+⌘+Z" (⇧ before ⌘ — Apple's modifier order).  The separator keeps a
+    /// modifier+word chord readable ("⌘Delete" ran together in the chip).
     var display: String {
-        (command ? "⌘" : "") + (shift ? "⇧" : "") + KeyNames.name(for: keyCode)
+        var parts: [String] = []
+        if shift { parts.append("⇧") }
+        if command { parts.append("⌘") }
+        parts.append(KeyNames.name(for: keyCode))
+        return parts.joined(separator: "+")
     }
 }
 
-/// One rebindable action.  `camera`/`lens` carry a 0-based index.
+/// One rebindable action.  `camera`/`programCut`/`lens` carry a 0-based index.
+///
+/// The two-bus switcher keyboard: plain digit = channel → PREVIEW (safe bus, same
+/// as clicking the tile), ⌘digit = channel → PROGRAM (direct cut).  Space = staged
+/// cut, ⌘Delete = remove the selected channel (in-app only — see ShortcutCenter).
 struct ShortcutAction: Identifiable, Hashable {
-    enum Kind: String, Hashable { case cut, camera, lens }
+    enum Kind: String, Hashable { case cut, camera, programCut, lens, removeChannel }
     let kind: Kind
-    let index: Int   // ignored for .cut
+    let index: Int   // ignored for .cut / .removeChannel
 
-    var id: String { kind == .cut ? "cut" : "\(kind.rawValue)\(index)" }
+    var id: String {
+        switch kind {
+        case .cut:           return "cut"
+        case .removeChannel: return "removeChannel"
+        default:             return "\(kind.rawValue)\(index)"
+        }
+    }
 
     var title: String {
         switch kind {
-        case .cut:    return "Cut"
-        case .camera: return "Camera \(index + 1)"
-        case .lens:   return "Lens \(index + 1)"
+        case .cut:           return "Cut"
+        case .camera:        return "Channel \(index + 1) → Preview"   // rail order, 1-based
+        case .programCut:    return "Channel \(index + 1) → Program"
+        case .lens:          return "Lens \(index + 1)"
+        case .removeChannel: return "Remove Selected Channel"
         }
     }
 
-    /// Stock binding: Cut = Space, Camera N = digit N, Lens N = ⇧+digit N.
+    /// Stock binding: Cut = Space, Channel N → Preview = digit N, → Program = ⌘N,
+    /// Lens N = the Z-row letter, Remove = ⌘Delete (Finder's delete idiom).
+    /// Lenses sit on Z X C V B N (6 = the deepest lens ladder an iPhone reports) —
+    /// one plain key per lens, mirroring the digits-for-cameras idea on the row below.
     var defaultChord: KeyChord {
         switch kind {
-        case .cut:    return KeyChord(keyCode: 49)                               // Space
-        case .camera: return KeyChord(keyCode: KeyNames.digitKeyCode(index + 1)) // 1–9
-        case .lens:   return KeyChord(keyCode: KeyNames.digitKeyCode(index + 1), shift: true)
+        case .cut:           return KeyChord(keyCode: 49)                               // Space
+        case .camera:        return KeyChord(keyCode: KeyNames.digitKeyCode(index + 1)) // 1–9
+        case .programCut:    return KeyChord(keyCode: KeyNames.digitKeyCode(index + 1),
+                                             command: true)                             // ⌘1–⌘9
+        case .lens:          return KeyChord(keyCode: Self.lensRowKeys[min(index, Self.lensRowKeys.count - 1)])
+        case .removeChannel: return KeyChord(keyCode: 51, command: true)                // ⌘Delete
         }
     }
+
+    /// Z X C V B N virtual keycodes (US layout) — the lens defaults.
+    private static let lensRowKeys: [UInt16] = [6, 7, 8, 9, 11, 45]
 
     /// The full action set, in display order.
     static let all: [ShortcutAction] =
-        [ShortcutAction(kind: .cut, index: 0)]
+        [ShortcutAction(kind: .cut, index: 0),
+         ShortcutAction(kind: .removeChannel, index: 0)]
         + (0 ..< 9).map { ShortcutAction(kind: .camera, index: $0) }
+        + (0 ..< 9).map { ShortcutAction(kind: .programCut, index: $0) }
         + (0 ..< 6).map { ShortcutAction(kind: .lens, index: $0) }
 }
 

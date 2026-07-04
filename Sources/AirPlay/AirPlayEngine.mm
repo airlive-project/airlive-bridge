@@ -19,9 +19,17 @@
 //
 // PIPELINE (decoupled decode):
 //   network thread → video_process copies bytes+pts into an owning VideoPacket
-//   → BoundedQueue (drop-oldest) → decoder thread → H264DecoderVT::decode →
+//   → BoundedQueue → decoder thread → H264DecoderVT::decode →
 //   onVideoFrame(pixelBuffer, ptsNs) → release. Decoupling stops a slow decoder
 //   from back-pressuring TCP (the obs-airplay/RPiPlay "growing latency" bug).
+//
+// ⚠️ COMPRESSED frames are NEVER silently dropped mid-stream.  Dropping one
+//   H.264 P-frame breaks the reference chain and the decoder paints smeared /
+//   magenta garbage until the next IDR (shipped once: "картинка сыпется" — and
+//   a rotation's new-SPS burst eaten by the old depth-3 drop-oldest queue is
+//   also why portrait never re-negotiated).  The queue is deep enough to absorb
+//   network bursts; if it EVER overflows, we purge and go blind until the next
+//   SPS/IDR — a brief freeze, never corruption.
 //
 
 #import "AirPlayEngine.h"
@@ -258,16 +266,72 @@ public:
            teardown_110 ? *teardown_110 : 0);
   }
 
+  // True when the Annex-B payload carries an SPS (7) or IDR (5) NALU — the only
+  // packets that can (re)start a broken reference chain.
+  static bool containsSyncNalu(const uint8_t *d, size_t len)
+  {
+    size_t i = 0;
+    while (i + 4 < len)
+    {
+      size_t hdr = 0;
+      if (d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 1)
+        hdr = i + 3;
+      else if (i + 5 < len && d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 0 && d[i + 3] == 1)
+        hdr = i + 4;
+      if (hdr != 0)
+      {
+        uint8_t type = d[hdr] & 0x1F;
+        if (type == 5 || type == 7)
+          return true;
+        i = hdr + 1;   // continue after this NALU header
+      }
+      else
+      {
+        ++i;
+      }
+    }
+    return false;
+  }
+
   static void video_process(void *cls, raop_ntp_t * /*ntp*/, video_decode_struct *data)
   {
     auto *self = static_cast<AirPlayEngineImpl *>(cls);
+    const bool sync = containsSyncNalu(data->data, static_cast<size_t>(data->data_len));
+
+    // Blind after a drop: non-sync frames reference frames the decoder never saw —
+    // decoding them paints smeared/magenta garbage.  Skip until a sync point.
+    if (self->needIdr_.load(std::memory_order_relaxed))
+    {
+      if (!sync)
+        return;
+      self->needIdr_.store(false, std::memory_order_relaxed);
+      os_log(ap_log(), "sync point after drop — decode resumes");
+    }
+
     VideoPacket pkt;
     pkt.data.assign(data->data, data->data + data->data_len);
     // This UxPlay fork carries the presentation time as ntp_time_remote (ns);
     // there is no separate `pts` field as in the older obs-airplay struct.
     pkt.pts = data->ntp_time_remote;
     pkt.nal_count = data->nal_count;
-    self->videoDropCount_ += self->videoQueue_.push(std::move(pkt));
+
+    const size_t dropped = self->videoQueue_.push(std::move(pkt));
+    if (dropped > 0)
+    {
+      self->videoDropCount_ += dropped;
+      // The dropped frame broke the chain for everything behind it.  If the packet
+      // we just queued is itself a sync point the stream heals right there (≤2
+      // stale frames flash by); otherwise purge the now-garbage queue and go blind
+      // until the next SPS/IDR — a short freeze instead of seconds of smear.
+      if (!sync)
+      {
+        self->videoDropCount_ += self->videoQueue_.clear();
+        self->needIdr_.store(true, std::memory_order_relaxed);
+        os_log_error(ap_log(),
+                     "video queue overflow — purged, freezing until next IDR (dropped total %llu)",
+                     static_cast<unsigned long long>(self->videoDropCount_.load()));
+      }
+    }
   }
 
   static void video_flush(void *cls)
@@ -282,6 +346,12 @@ public:
   static void audio_process(void * /*cls*/, raop_ntp_t * /*ntp*/, audio_decode_struct * /*data*/)
   {
     // Video-only. Discard audio entirely (no decode, no fdk-aac).
+    // (The bit-9 "don't even send audio" advert experiment is POSTPONED until the
+    // rotation config is verified — one variable at a time.  This one-shot log
+    // tells us whether the phone streams audio at all with the current advert.)
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true))
+      os_log(ap_log(), "audio stream active — discarding (bit-9 off experiment postponed)");
   }
 
   static void audio_flush(void * /*cls*/) {}
@@ -627,13 +697,19 @@ private:
   ConnectionLostCallback connLostCb_ = nil;   // fired when the mirror session drops (#12)
   std::mutex cbMutex_;
 
-  // Decoupled-decode queue. Depth 3 (was 8, inherited from a Pi-class / OBS-coupled decoder): the
-  // Bridge runs Apple-Silicon HW decode with drop-oldest already shielding the network thread, so it
-  // rarely needs slack — this caps a transient-stall backlog to ~1-2 frame intervals (~33-66ms)
-  // instead of ~265ms @30fps. Drop-oldest keeps the freshest frame, so on-air stays current.
-  BoundedQueue<VideoPacket> videoQueue_{3};
+  // Decoupled-decode queue.  Depth 32 ABSORBS network bursts (Wi-Fi jitter hands
+  // several NALUs at once) — the old depth 3 overflowed on every burst and its
+  // drop-oldest ate COMPRESSED P-frames, smearing the picture until the next IDR
+  // (see the pipeline comment up top).  Depth adds NO steady-state latency: the
+  // HW decoder (~2 ms/frame) outruns the 30 fps producer, so the queue idles
+  // near-empty; 32 only bounds the pathological case, where video_process purges
+  // + freezes until the next sync point instead of corrupting.
+  BoundedQueue<VideoPacket> videoQueue_{32};
   std::thread decoderThread_;
   std::atomic<uint64_t> videoDropCount_{0};
+  // Set after an overflow purge: skip every non-sync packet (the decoder is blind
+  // without its reference frames) until an SPS/IDR restarts the chain.
+  std::atomic<bool> needIdr_{false};
 
   // Restart worker.
   std::thread restartWorker_;

@@ -21,23 +21,6 @@ enum TallyState: String, CaseIterable, Identifiable {
     case program = "program"
 
     var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .off:     return "Off"
-        case .preview: return "Preview"
-        case .program: return "Program"
-        }
-    }
-
-    /// Accent for this position: red Program, yellow Preview, neutral Off.
-    var accent: Color {
-        switch self {
-        case .off:     return Theme.textFaint
-        case .preview: return Theme.accentYellow
-        case .program: return Theme.accentRed
-        }
-    }
 }
 
 /// Shared, observable per-channel tally memory.  `shared` is the single app-wide

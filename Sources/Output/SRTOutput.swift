@@ -91,9 +91,30 @@ final class SRTOutput: VideoOutput {
     private var _isLive = false
     private let liveLock = NSLock()
 
+    /// Fires on MAIN when the caller actually connects — the model forces one IDR so the
+    /// receiver decodes immediately instead of waiting out the camera's 6–10 s GOP.
+    var onReady: (() -> Void)?
+
+    /// True while the SRT socket is ACTUALLY connected (isLive is true already during the
+    /// brief connect attempt) — drives the card's spinner→green power button.
+    var isConnected: Bool { liveLock.lock(); defer { liveLock.unlock() }; return _isConnected }
+    private var _isConnected = false
+    /// Fires on MAIN whenever `isConnected` flips (model → objectWillChange → live card state).
+    var onConnectionChanged: (() -> Void)?
+    private func setConnected(_ value: Bool) {
+        liveLock.lock()
+        let changed = _isConnected != value
+        _isConnected = value
+        liveLock.unlock()
+        if changed { DispatchQueue.main.async { [weak self] in self?.onConnectionChanged?() } }
+    }
+
     private let queue = DispatchQueue(label: "studio.airlive.bridge.srt", qos: .userInitiated)
     private var sock: Int32 = SRT_INVALID_SOCK
     private let muxer = MPEGTSMuxer()
+    /// Last destination we logged as invalid — the toggle/retry path re-hits connect(), and
+    /// re-printing the same complaint every attempt flooded the console (seen live).
+    private var lastInvalidDestLogged: String?
     /// Passthrough-CUT gating (mirrors AirliveRelayOutput): drop forwarded samples until the new
     /// source's SPS/PPS arrives after a program CUT, so SRT/TS receivers don't decode the new
     /// camera's deltas against the previous camera's muxer parameter sets (#20).
@@ -114,6 +135,7 @@ final class SRTOutput: VideoOutput {
             guard let self else { return }
             if self.sock != SRT_INVALID_SOCK { _ = SRTRuntime.shared.close(self.sock); self.sock = SRT_INVALID_SOCK }
             self.isLive = false
+            self.setConnected(false)
             self.awaitingFormat = false   // don't inherit a stale CUT gate across a stop/start
         }
     }
@@ -183,9 +205,13 @@ final class SRTOutput: VideoOutput {
     private func connect(to dest: String) {
         guard SRTRuntime.shared.available else { isLive = false; return }
         guard let (host, port) = Self.parse(dest) else {
-            print("[SRTOutput \(label)] ❌ invalid destination '\(dest)' — expected srt://host:port")
+            if lastInvalidDestLogged != dest {   // once per distinct value, not per retry
+                lastInvalidDestLogged = dest
+                print("[SRTOutput \(label)] ❌ invalid destination '\(dest)' — expected srt://host:port")
+            }
             isLive = false; return
         }
+        lastInvalidDestLogged = nil
         let s = SRTRuntime.shared.createSocket()
         guard s != SRT_INVALID_SOCK else {
             print("[SRTOutput \(label)] ❌ create_socket failed"); isLive = false; return
@@ -207,12 +233,15 @@ final class SRTOutput: VideoOutput {
         }
         sock = s
         isLive = true
+        setConnected(true)
         print("[SRTOutput \(label)] ✅ SRT caller connected to \(host):\(port)")
+        DispatchQueue.main.async { [weak self] in self?.onReady?() }   // model forces one IDR
     }
 
     private func dropConnection() {
         if sock != SRT_INVALID_SOCK { _ = SRTRuntime.shared.close(sock); sock = SRT_INVALID_SOCK }
         isLive = false
+        setConnected(false)
         print("[SRTOutput \(label)] 🔌 SRT peer gone — stopped")
     }
 

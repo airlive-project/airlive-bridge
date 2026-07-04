@@ -15,6 +15,10 @@ targets:
       path: Sources/Info.plist
       properties:
         CFBundleDisplayName: Airlive Bridge
+        # Single version source: MARKETING_VERSION (settings below).  Substituted by
+        # Xcode at build; the window title reads it via CFBundleShortVersionString.
+        # MUST live here, not as a hand-edit to the plist (xcodegen wipes those).
+        CFBundleShortVersionString: $(MARKETING_VERSION)
         # Points the Dock/Finder at the asset-catalog AppIcon.  MUST live here: xcodegen
         # regenerates Sources/Info.plist from these properties, so a hand-edit to the plist
         # is wiped on the next `xcodegen` — which is why the icon never stuck before.
@@ -42,7 +46,7 @@ targets:
     settings:
       base:
         PRODUCT_NAME: Airlive Bridge
-        MARKETING_VERSION: "0.1.0"
+        MARKETING_VERSION: "1.0.0"   # semver: MAJOR.MINOR.PATCH — bump like a real release train
         SWIFT_VERSION: "5.9"
         # Apple Silicon only — the vendored UxPlay/openssl/libplist static libs are arm64.
         # A bare `ARCHS: arm64` gets DROPPED by xcodegen (never lands in the pbxproj), so an

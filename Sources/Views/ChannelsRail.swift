@@ -6,8 +6,8 @@
 // live status + connection dot (top-right), and the renameable name field below.
 //
 // ORDER MATTERS: the row order is the channel order — it drives the multiview tile
-// layout AND the number-key shortcuts.  Drag a row (or use the ▲/▼ arrows on hover)
-// and the ordinals renumber top-to-bottom, so swapping 2↔3 makes the old 3 the new 2.
+// layout AND the number-key shortcuts.  The ▲/▼ chip next to the ordinal moves the
+// row; the ordinals renumber top-to-bottom, so swapping 2↔3 makes the old 3 the new 2.
 
 import SwiftUI
 import AVFoundation   // capture-device enumeration for the "+ → HDMI / USB Capture" menu
@@ -99,7 +99,7 @@ struct ChannelsRail: View {
         Button(action: onToggleCollapse) {
             Image(systemName: system)
                 .font(.system(size: 11, weight: .bold))
-                .foregroundColor(Theme.textFaint)
+                .foregroundColor(Theme.textSecondary)
                 .frame(width: 22, height: 22)
                 .contentShape(Rectangle())
         }
@@ -180,6 +180,7 @@ struct ChannelsRail: View {
                             isFirst: idx == 0,
                             isLast: idx == model.channels.count - 1,
                             onSelect: { model.select(channel.id); resignInlineEditing() },
+                            onRename: { model.renameChannel(channel.id, to: $0) },   // via model → undoable
                             onRemove: {
                                 TallyStore.shared.clear(channel.id)
                                 model.removeChannel(channel.id)
@@ -231,6 +232,7 @@ private struct ChannelRow: View {
     let isFirst: Bool
     let isLast: Bool
     let onSelect: () -> Void
+    let onRename: (String) -> Void
     let onRemove: () -> Void
     let onMoveUp: () -> Void
     let onMoveDown: () -> Void
@@ -251,7 +253,7 @@ private struct ChannelRow: View {
                 }
             }
         }
-        // Click the row (anywhere but the name field) drives the Solo preview.
+        // Click the row (anywhere but the name field) stages the channel in Preview.
         .contentShape(Rectangle())
         .onTapGesture { onSelect() }
         .contextMenu {
@@ -270,22 +272,34 @@ private struct ChannelRow: View {
 
     // MARK: Top row
 
-    // TOP: source kind (left) · signal status · delete (right).
+    // TOP: connection · source kind ··· gear · delete.  The reorder arrows are NOT
+    // here — moving a row renumbers it, so they live next to the ordinal below.
     private var topRow: some View {
         HStack(spacing: Spacing.sm) {
-            statusLine                       // connection icon — now on the LEFT
+            statusLine                       // connection icon — on the LEFT
             Text(channel.kind.sourceLabel)
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(size: 11, weight: .semibold))
+                .tracking(0.6)
                 .foregroundColor(Theme.textSecondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
+            // The tuned extra delay stays VISIBLE with the settings collapsed — a faint
+            // "+40 ms" next to the SOURCE (it delays the source, not the channel name),
+            // so a delayed channel is never a surprise on air.
+            if !showSettings && channel.extraDelayMs > 0 {
+                Text("+\(channel.extraDelayMs) ms")
+                    .font(.system(size: 10))
+                    .foregroundColor(Theme.textFaint.opacity(0.8))
+                    .lineLimit(1)
+                    .fixedSize()
+            }
             Spacer(minLength: Spacing.xs)
             gearButton                       // per-source delay (combined channels have video too)
             trashButton
         }
     }
 
-    // BOTTOM: ordinal · reorder arrows · editable name.
+    // BOTTOM: ordinal · ▲/▼ · editable name.
     private var bottomRow: some View {
         HStack(spacing: Spacing.sm) {
             ordinalBadge
@@ -301,13 +315,17 @@ private struct ChannelRow: View {
         OrdinalBadge(index: index, isProgram: isProgram, isPreview: isPreview)
     }
 
-    /// ▲/▼ reorder-by-one — one chip the same height as the number / name / trash.
+    /// ▲/▼ reorder-by-one, boxed in a chip RIGHT NEXT TO the ordinal — moving a row
+    /// renumbers it, so the arrows visibly belong to the number.  The inapplicable
+    /// direction (first row's ▲, last row's ▼) stays in place but semi-transparent
+    /// and inert, so the pair never shifts or disappears.
     private var reorderArrows: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: Spacing.xxs) {
             arrowButton("chevron.up",   enabled: !isFirst, action: onMoveUp)
             arrowButton("chevron.down", enabled: !isLast,  action: onMoveDown)
         }
-        .frame(height: ControlMetrics.pillHeight)
+        .padding(.horizontal, Spacing.xs)
+        .frame(height: ControlMetrics.pillHeight)   // same 28 pt chip as the ordinal
         .background(
             RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
                 .fill(Theme.bgSelected.opacity(0.6))
@@ -319,8 +337,10 @@ private struct ChannelRow: View {
         Button(action: action) {
             Image(systemName: system)
                 .font(.system(size: 10, weight: .bold))
-                .foregroundColor(enabled ? Theme.textSecondary : Theme.textFaint.opacity(0.4))
-                .frame(width: 22, height: ControlMetrics.pillHeight)
+                // Inactive = the SAME arrow at ~1/3 opacity (not the faint-grey token):
+                // it should read as "this arrow, ghosted", not as a different element.
+                .foregroundColor(Theme.textSecondary.opacity(enabled ? 1 : 0.35))
+                .frame(width: 16, height: 22)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -333,8 +353,11 @@ private struct ChannelRow: View {
     private var statusLine: some View {
         let connected = channel.anyConnected   // combined channel: control link counts too
         return Image(systemName: connected ? "wifi" : "wifi.slash")
-            .font(.system(size: 13, weight: .medium))
+            .font(.system(size: 12, weight: .medium))
             .foregroundColor(connected ? Theme.previewGreen : Theme.textFaint)
+            // Same 28 pt column as the ordinal badge on the row below, so the two
+            // left-edge elements line up instead of the icon floating off-grid.
+            .frame(width: ControlMetrics.pillHeight, alignment: .center)
             .help(connected ? "Connected" : "Disconnected")
     }
 
@@ -342,7 +365,7 @@ private struct ChannelRow: View {
     private var nameField: some View {
         InlineEditable(placeholder: "Channel",
                        value: channel.name,
-                       font: .system(size: 13, weight: .semibold)) { channel.rename($0) }
+                       font: .system(size: 12, weight: .medium)) { onRename($0) }
     }
 
     /// Per-channel settings (the gear, where the connection icon used to sit) — opens a
@@ -351,12 +374,8 @@ private struct ChannelRow: View {
         Button { showSettings.toggle() } label: {
             Image(systemName: "gearshape")
                 .font(.system(size: 12))
-                .foregroundColor(Theme.textFaint)
-                .frame(width: 36, height: ControlMetrics.pillHeight)
-                .background(
-                    RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                        .fill(Theme.bgSelected.opacity(0.6))
-                )
+                .foregroundColor(Theme.textSecondary)
+                .frame(width: 22, height: 22)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -367,12 +386,8 @@ private struct ChannelRow: View {
         Button { requestRemove() } label: {
             Image(systemName: "trash")
                 .font(.system(size: 12))
-                .foregroundColor(Theme.textFaint)
-                .frame(width: 36, height: ControlMetrics.pillHeight)
-                .background(
-                    RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                        .fill(Theme.bgSelected.opacity(0.6))
-                )
+                .foregroundColor(Theme.textSecondary)
+                .frame(width: 22, height: 22)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -398,8 +413,8 @@ struct OrdinalBadge: View {
     var body: some View {
         let digit: Color = isProgram ? Theme.accentRed
                          : (isPreview ? Theme.previewGreen : Theme.textSecondary)
-        let fill: Color = isProgram ? Color(hex: 0x4A1E1E)                    // deep red
-                        : (isPreview ? Color(hex: 0x18421F)                   // deep green
+        let fill: Color = isProgram ? Theme.tallyProgramBg
+                        : (isPreview ? Theme.tallyPreviewBg
                         : Theme.bgSelected.opacity(0.6))                      // neutral chip
         return Text("\(index)")
             .font(.system(size: 12, weight: .bold).monospacedDigit())
@@ -440,15 +455,34 @@ private struct ChannelSettingsView: View {
                     .onSubmit { commit() }
                     .onChange(of: focused) { if !$0 { commit() } }
                 resetButton                                 // Reset, left of the arrows
-                Stepper("", value: Binding(
-                    get: { channel.extraDelayMs },
-                    set: { channel.extraDelayMs = max(0, $0); draft = String(channel.extraDelayMs) }
-                ), step: 10)
-                .labelsHidden()
+                // Our own −/＋ (10 ms), not a native Stepper — AppKit chrome renders
+                // differently across macOS versions and breaks the flat look.
+                stepButton("minus", enabled: channel.extraDelayMs > 0) {
+                    channel.extraDelayMs = max(0, channel.extraDelayMs - 10)
+                    draft = String(channel.extraDelayMs)
+                }
+                stepButton("plus", enabled: true) {
+                    channel.extraDelayMs += 10
+                    draft = String(channel.extraDelayMs)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear { draft = String(channel.extraDelayMs) }
+    }
+
+    /// Quiet ±10 ms step — bare icon, same language as the reorder chevrons.
+    private func stepButton(_ system: String, enabled: Bool,
+                            action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: system)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(enabled ? Theme.textSecondary : Theme.textFaint.opacity(0.35))
+                .frame(width: 18, height: 22)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
     }
 
     /// Reset the additional delay to 0 (chip, left of the arrows).  Greyed + disabled when
@@ -499,7 +533,7 @@ private struct SecurityFooter: View {
                     .font(.system(size: 12))
                     .foregroundColor(model.hasPassword ? Theme.accentBlue : Theme.textFaint)
                     .frame(width: 16)
-                Text(model.hasPassword ? "Airlive password set" : "Set Airlive password")
+                Text(model.hasPassword ? "Receiver password set" : "Set receiver password")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(Theme.textSecondary)
                 Spacer()
@@ -549,7 +583,7 @@ private struct SecurityFooter: View {
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(Theme.textSecondary)
                 Button { commit() } label: {
-                    Text("Save").font(.system(size: 12, weight: .semibold)).frame(width: 64, height: 30)
+                    Text("Save").font(.system(size: 12, weight: .semibold)).frame(width: 64, height: ControlMetrics.segmentHeight)
                 }
                 .bridgeButton(selected: !draft.isEmpty)
                 .disabled(draft.isEmpty)

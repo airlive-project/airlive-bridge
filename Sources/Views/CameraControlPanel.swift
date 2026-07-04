@@ -415,23 +415,66 @@ struct CameraControlSection: View {
     var showLens: Bool = true
 
     var body: some View {
-        if channel.kind == .airlive || channel.kind == .screenMirroringPlusControl {
+        if channel.kind == .screenMirroringPlusControl {
+            // Combined channel: its TWO transports connect separately, so show the
+            // two-step how-to until BOTH are up, with the control panel below.
+            VStack(alignment: .leading, spacing: Spacing.md) {
+                if !(channel.isConnected && channel.controlConnected) { combinedConnectHint }
+                ControlPanel(c: channel, showLens: showLens)     // owns a back-channel (ARLV)
+            }
+        } else if channel.kind == .airlive {
             ControlPanel(c: channel, showLens: showLens)         // owns a back-channel (ARLV)
-        } else {
-            noControlHint                                         // plain Screen Mirroring / capture
+        } else if !channel.isConnected {
+            connectHint                                           // not connected yet → HOW to connect
+        }
+        // Connected Screen Mirroring / capture: nothing to control, nothing to say.
+    }
+
+    /// Connect steps for the combined channel.  Video is the NATIVE AirPlay mirror —
+    /// the phone runs no second encode, the thermally-coolest way to get its picture
+    /// here — and the Airlive Camera app connects control-only on top of it.  Each
+    /// step shows its own state, so the operator sees which half is still missing.
+    private var combinedConnectHint: some View {
+        VStack(alignment: .leading, spacing: Spacing.xs) {
+            SectionLabel(text: "Connect")
+            stepLine(done: channel.isConnected,
+                     text: "Video: iPhone → Control Center → Screen Mirroring → “\(channel.name)”.")
+            stepLine(done: channel.controlConnected,
+                     text: "Control: Airlive Camera → Live → “\(channel.name)”.")
+            Text("Video rides the native AirPlay mirror — no second encode, the phone stays cool. The Airlive link carries control only.")
+                .font(.system(size: 11))
+                .foregroundColor(Theme.textFaint)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// One connect step with its live state: green check = this transport is up.
+    private func stepLine(done: Bool, text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: Spacing.sm) {
+            Image(systemName: done ? "checkmark.circle.fill" : "circle")
+                .font(.system(size: 11))
+                .foregroundColor(done ? Theme.previewGreen : Theme.textFaint)
+            Text(text)
+                .font(.system(size: 12))
+                .foregroundColor(Theme.textFaint)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    private var noControlHint: some View {
-        VStack(alignment: .leading, spacing: Spacing.sm) {
-            SectionLabel(text: "Camera control")
-            HStack(spacing: Spacing.sm) {
-                Image(systemName: "slider.horizontal.3").font(.system(size: 14)).foregroundColor(Theme.textFaint)
-                Text("Screen Mirroring has no remote control. Add a “Screen Mirroring + Remote Control” channel instead.")
-                    .font(.system(size: 12)).foregroundColor(Theme.textSecondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+    /// A short HOW-TO for the kinds without remote control — useful (the connect steps)
+    /// instead of a complaint, and only while nothing is connected.  Quiet hint styling.
+    private var connectHint: some View {
+        VStack(alignment: .leading, spacing: Spacing.xs) {
+            SectionLabel(text: "Connect")
+            Text(channel.kind == .capture
+                 ? "Plug the HDMI / USB capture device in — the picture appears automatically."
+                 : "iPhone → Control Center → Screen Mirroring → “\(channel.name)”.")
+                .font(.system(size: 12))
+                .foregroundColor(Theme.textFaint)
+                .fixedSize(horizontal: false, vertical: true)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

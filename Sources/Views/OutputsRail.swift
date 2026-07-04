@@ -52,31 +52,8 @@ struct OutputsRail: View {
     private var fullRail: some View {
         VStack(spacing: 0) {
             header
-            if showsPassthroughWarning { passthroughWarning }
             content
         }
-    }
-
-    /// The program is an AirPlay/combined/capture source (no raw H.264) AND at least one
-    /// passthrough output (OBS / RTSP / SRT) exists — those can't carry it, so warn instead of
-    /// letting them go silently black.  NDI is fine (decoded frames).
-    private var showsPassthroughWarning: Bool {
-        !model.programSupportsPassthrough &&
-        model.programOutputs.contains { $0.kind == .obs || $0.kind == .rtsp || $0.kind == .srt }
-    }
-
-    private var passthroughWarning: some View {
-        HStack(alignment: .top, spacing: Spacing.sm) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 12)).foregroundColor(Theme.accentYellow)
-            Text("Program is AirPlay — OBS, RTSP and SRT can't carry it (no raw H.264). Use NDI, or put an Airlive camera on program.")
-                .font(.system(size: 11)).foregroundColor(Theme.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(.horizontal, Spacing.lg)
-        .padding(.vertical, Spacing.sm)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.accentYellow.opacity(0.12))
     }
 
     /// Focus mode strip: compact tags for the program outputs — LIVE ones red
@@ -104,7 +81,7 @@ struct OutputsRail: View {
         Button(action: onToggleCollapse) {
             Image(systemName: system)
                 .font(.system(size: 11, weight: .bold))
-                .foregroundColor(Theme.textFaint)
+                .foregroundColor(Theme.textSecondary)
                 .frame(width: 22, height: 22)
                 .contentShape(Rectangle())
         }
@@ -116,10 +93,9 @@ struct OutputsRail: View {
     // channel.
     private var header: some View {
         HStack(spacing: Spacing.sm) {
-            // Solo = plain "Outputs" (they publish the selected channel).  Multiview = these
-            // publish the PROGRAM bus (the CUT result), so "Program Outputs" — plural, there
-            // can be several (NDI + OBS + RTSP + SRT…).
-            Text(model.mode == .multiview ? "Program Outputs" : "Outputs")
+            // These publish the PROGRAM bus (the CUT result) — plural, there can be
+            // several (NDI + OBS + RTSP + SRT…).
+            Text("Program Outputs")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
             Spacer()
@@ -127,7 +103,10 @@ struct OutputsRail: View {
             // menu of output TYPES: NDI adds a real output; SRT / RTSP / Virtual
             // Camera show as "soon" (disabled).
             Menu {
-                ForEach(OutputKind.allCases) { kind in
+                // OBS is offered only while absent — there is exactly one local plugin to feed,
+                // so a second instance could never connect (single loopback slot).
+                let hasOBS = model.programOutputs.contains { $0.kind == .obs }
+                ForEach(OutputKind.allCases.filter { $0 != .obs || !hasOBS }) { kind in
                     Button {
                         if kind.isImplemented { addProgramOutput(kind, to: model) }
                     } label: {
@@ -250,7 +229,9 @@ private func defaultName(_ kind: OutputKind, _ model: BridgeModel) -> String {
 private struct CollapsedOutputTag: View {
     let output: VideoOutput
     var body: some View {
-        let live = output.isLive
+        // The always-on OBS relay reads "live" only while actually CONNECTED to OBS —
+        // its isLive is permanently true by design (no toggle).
+        let live = (output as? AirliveRelayOutput).map(\.isConnected) ?? output.isLive
         return VStack(spacing: 2) {
             Image(systemName: output.kind.symbolName)
                 .font(.system(size: 11, weight: .semibold))
@@ -258,11 +239,13 @@ private struct CollapsedOutputTag: View {
                 .font(.system(size: 9, weight: .bold))
                 .tracking(0.5)
         }
-        .foregroundColor(live ? .white : Theme.textSecondary)
+        // Same tally treatment as the channels strip's OrdinalBadge: bright text on a
+        // SOLID DARK fill (deep green when live), never a bright filled chip.
+        .foregroundColor(live ? Theme.previewGreen : Theme.textSecondary)
         .frame(width: 48, height: 40)
         .background(
             RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                .fill(live ? Theme.accentRed : Theme.bgSelected.opacity(0.6))
+                .fill(live ? Theme.tallyPreviewBg : Theme.bgSelected.opacity(0.6))
         )
         .opacity(live ? 1.0 : 0.55)
         .help(output.label + (live ? " — live" : " — idle"))
@@ -346,13 +329,23 @@ private struct OutputCard: View {
     @State private var refresh = 0
     @State private var confirmingDelete = false
 
+    /// Same template as the channel cards: TOP = On/Off chip · protocol tag ··· trash;
+    /// BOTTOM = ▲/▼ chip · editable name.  The On/Off chip and the ▲/▼ chip share one
+    /// width (`ControlMetrics.chipWidth`) so the left column stacks exactly.
+    /// OBS is a SINGLE row (▲/▼ · tag · status ··· trash) — no power (always on),
+    /// no name (it lives in OBS), so there is nothing to put on a second row.
     var body: some View {
         _ = refresh // re-evaluate after a start/stop/rename bump
+        let live = isLiveNow
         return Card(padding: Spacing.sm) {
             VStack(alignment: .leading, spacing: Spacing.sm) {
-                controlRow    // badge · arrows · on/off
-                nameRow       // name field + delete (right of it)
-                secondRow     // SRT destination / RTSP URL — only where it carries info
+                if output.kind == .obs {
+                    obsRow(live: live)
+                } else {
+                    topRow(live: live)
+                    bottomRow
+                    secondRow
+                }
             }
         }
         // Removing a LIVE output cuts the stream — confirm first (an idle one deletes
@@ -366,33 +359,62 @@ private struct OutputCard: View {
         }
     }
 
-    // TOP line: kind badge on the left, controls (delete + on/off) on the right.
-    // The name moved to its own full-width row below — inline it was cramped (a wide
-    // badge like "OBS AIRLIVE BRIDGE" squeezed the field out).
-    private var controlRow: some View {
-        HStack(spacing: Spacing.sm) {
-            kindBadge
-            reorderArrows           // ▲/▼ right of the protocol tag
-            Spacer(minLength: Spacing.xs)
-            onOffToggle
-        }
+    /// "Live" for the dot/outline: the OBS relay is live only while ACTUALLY connected
+    /// (its isLive is just the toggle); the others publish the moment they're on.
+    private var isLiveNow: Bool {
+        (output as? AirliveRelayOutput).map(\.isConnected) ?? output.isLive
     }
 
-    /// Name + delete on one row — the trash sits to the right of the name field.
-    private var nameRow: some View {
+    // TOP: On/Off chip (same size as the ▲/▼ chip below — the two stack in one
+    // column) · protocol tag ··· trash.
+    private func topRow(live: Bool) -> some View {
         HStack(spacing: Spacing.sm) {
-            nameField
+            onOffToggle
+            Text(output.kind.badgeLabel)
+                .font(.system(size: 11, weight: .semibold))
+                .tracking(0.6)
+                .foregroundColor(Theme.textSecondary)
+            Spacer(minLength: Spacing.xs)
             trashButton
         }
     }
 
-    /// ▲/▼ reorder-by-one — one chip the same height as every other control.
+    // BOTTOM: ▲/▼ chip · editable name.
+    private var bottomRow: some View {
+        HStack(spacing: Spacing.sm) {
+            reorderArrows
+            nameField
+        }
+    }
+
+    /// The whole OBS card in ONE row: ▲/▼ · tag · connection status ··· trash.
+    private func obsRow(live: Bool) -> some View {
+        HStack(spacing: Spacing.sm) {
+            reorderArrows
+            Text(output.kind.badgeLabel)
+                .font(.system(size: 11, weight: .semibold))
+                .tracking(0.6)
+                .foregroundColor(Theme.textSecondary)
+            Text(live ? "Connected" : "Add Plugin in OBS")
+                .font(.system(size: 10, weight: live ? .semibold : .regular))
+                .foregroundColor(live ? Theme.previewGreen : Theme.textFaint)
+                .lineLimit(1)
+                .help(live ? "Program is feeding the OBS \"Airlive Bridge\" source"
+                           : "Launch OBS and add the \"OBS Airlive Bridge\" source — connects automatically")
+            Spacer(minLength: Spacing.xs)
+            trashButton
+        }
+    }
+
+    /// ▲/▼ reorder-by-one, boxed in a chip the exact size of the On/Off chip, so the
+    /// two stack in a clean column.  The inapplicable direction stays visible but
+    /// semi-transparent and inert.
     private var reorderArrows: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: Spacing.xxs) {
             arrowButton("chevron.up",   enabled: !isFirst, action: onMoveUp)
             arrowButton("chevron.down", enabled: !isLast,  action: onMoveDown)
         }
-        .frame(height: ControlMetrics.pillHeight)
+        .frame(width: ControlMetrics.chipWidth, height: ControlMetrics.pillHeight)
         .background(
             RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
                 .fill(Theme.bgSelected.opacity(0.6))
@@ -404,75 +426,59 @@ private struct OutputCard: View {
         Button(action: action) {
             Image(systemName: system)
                 .font(.system(size: 10, weight: .bold))
-                .foregroundColor(enabled ? Theme.textSecondary : Theme.textFaint.opacity(0.4))
-                .frame(width: 22, height: ControlMetrics.pillHeight)
+                // Inactive = the SAME arrow ghosted to ~1/3 opacity (matches ChannelsRail).
+                .foregroundColor(Theme.textSecondary.opacity(enabled ? 1 : 0.35))
+                .frame(width: 16, height: 22)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
     }
 
-    /// The kind tag IS the live indicator: red fill + white text when publishing,
-    /// neutral otherwise.  Same 28pt height + 6pt radius as every other control.
-    private var kindBadge: some View {
-        let live = output.isLive
-        return HStack(spacing: Spacing.xxs) {
-            Image(systemName: output.kind.symbolName)
-                .font(.system(size: 10, weight: .semibold))
-                .frame(width: 13)                      // uniform icon column
-            Text(output.kind.badgeLabel)               // short code, never the long name
-                .font(.system(size: 10, weight: .bold))
-                .tracking(0.8)
-                .frame(minWidth: 30, alignment: .leading)   // pad every tag to the widest (RTSP)
-        }
-        .foregroundColor(live ? .white : Theme.textSecondary)
-        .padding(.horizontal, Spacing.sm)
-        .frame(height: ControlMetrics.pillHeight)
-        .background(
-            RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                .fill(live ? Theme.accentRed : Theme.bgSelected)
-        )
-        .fixedSize(horizontal: true, vertical: false)
-    }
-
     /// Source-name field (the real NDI source name; a display label for the others) — the
     /// shared inline-editable element: single click to rename, commits on blur/Return.
     private var nameField: some View {
         InlineEditable(placeholder: output.kind.displayName,
-                       value: output.label) { output.label = $0; refresh += 1 }
+                       value: output.label,
+                       font: .system(size: 12, weight: .medium)) {   // same as the channel name
+            // Through the model: registers an undo record + nudges objectWillChange
+            // (VideoOutput isn't observable) so the session autosave hears it too.
+            model.renameOutput(output, to: $0); refresh += 1
+        }
     }
 
     private var trashButton: some View {
         Button { requestDelete() } label: {
             Image(systemName: "trash")
                 .font(.system(size: 12))
-                .foregroundColor(Theme.textFaint)
-                .frame(width: 36, height: ControlMetrics.pillHeight)
-                .background(
-                    RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                        .fill(Theme.bgSelected.opacity(0.6))
-                )
+                .foregroundColor(Theme.textSecondary)
+                .frame(width: 22, height: 22)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .help("Remove output")
     }
 
+    /// The card's power state: off / connecting (on, no peer yet) / on.  Only the two
+    /// CALLER-style outputs have a real connecting phase (OBS relay, SRT); NDI/RTSP are
+    /// servers — flipping them on IS being live.
+    private var powerState: PowerToggle.PowerState {
+        if let relay = output as? AirliveRelayOutput {
+            return !relay.isLive ? .off : (relay.isConnected ? .on : .connecting)
+        }
+        if let srt = output as? SRTOutput {
+            return !srt.isLive ? .off : (srt.isConnected ? .on : .connecting)
+        }
+        return output.isLive ? .on : .off
+    }
+
     private var onOffToggle: some View {
-        Toggle("", isOn: Binding(
-            get: { output.isLive },
-            set: { newValue in
-                if newValue { output.start() } else { output.stop() }
-                refresh += 1
-                // isLive changed but the array didn't — nudge the model so observers
-                // (the badge colour, channel rows) re-read.
-                model.objectWillChange.send()
-            }
-        ))
-        .toggleStyle(.switch)
-        .tint(Theme.accentBlue)   // native blue switch (the live status is the red badge)
-        .labelsHidden()
-        .fixedSize()
+        PowerToggle(state: powerState) {
+            if output.isLive { output.stop() } else { output.start() }
+            refresh += 1
+            // isLive changed but the array didn't — nudge the model so observers re-read.
+            model.objectWillChange.send()
+        }
     }
 
     /// A second line ONLY where it carries real information: SRT's destination (the
@@ -493,7 +499,9 @@ private struct OutputCard: View {
         InlineEditable(placeholder: output.kind.configFieldExample,
                        value: output.config,
                        font: .system(size: 11).monospaced(),
-                       allowEmpty: true) { output.config = $0; refresh += 1 }
+                       allowEmpty: true) {
+            model.setOutputConfig(output, to: $0); refresh += 1   // undo + autosave (see nameField)
+        }
     }
 
     /// The actual address a client connects to: rtsp://<this-mac>:<port>/program.
@@ -502,33 +510,69 @@ private struct OutputCard: View {
         let port = (output as? RTSPOutput)?.port ?? 8554
         let url = "rtsp://\(ProcessInfo.processInfo.hostName):\(port)/program"
         return HStack(spacing: Spacing.xs) {
-            Image(systemName: "link").font(.system(size: 10)).foregroundColor(Theme.textFaint)
             Text(url)
-                .font(.system(size: 11).monospaced())
-                .foregroundColor(Theme.textSecondary)
+                .font(.system(size: 10).monospaced())
+                .foregroundColor(Theme.textFaint)
                 .lineLimit(1).truncationMode(.middle)
-            Spacer(minLength: 0)
             Button {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(url, forType: .string)
             } label: {
-                Image(systemName: "doc.on.doc").font(.system(size: 10)).foregroundColor(Theme.textFaint)
+                Image(systemName: "doc.on.doc").font(.system(size: 11)).foregroundColor(Theme.textSecondary)
             }
             .buttonStyle(.plain)
             .help("Copy RTSP URL")
+            Spacer(minLength: 0)
         }
-        .padding(.horizontal, Spacing.sm)
-        .frame(height: ControlMetrics.pillHeight)
-        .background(
-            RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                .fill(Theme.bgApp)
-        )
     }
 
     /// Live outputs confirm before removal; idle ones delete immediately.
+    /// `isLiveNow`, NOT `isLive`: the OBS relay's isLive is permanently true (it's
+    /// always listening for the plugin) — only an ACTUAL connection means removing
+    /// it cuts a stream.  Nothing connected → nothing to warn about.
     private func requestDelete() {
-        if output.isLive { confirmingDelete = true }
+        if isLiveNow { confirmingDelete = true }
         else { model.removeProgramOutput(output) }
+    }
+}
+
+// MARK: - Power chip (the card's custom on/off control)
+
+/// Power chip — control AND state indicator in one, sized exactly like the card's
+/// ▲/▼ chip so the two stack in a clean column.  The ⏻ icon in all three states
+/// (approved design): off = neutral chip, grey icon; connecting = spinner; on =
+/// signal-green icon on the deep-green tally fill (the app's quiet live treatment —
+/// bright glyph on a solid dark fill, never a bright filled chip).  Green, not red:
+/// red reads as error/stop on a button.
+struct PowerToggle: View {
+    enum PowerState { case off, connecting, on }
+    let state: PowerState
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+                    .fill(state == .on ? Theme.tallyPreviewBg : Theme.bgSelected.opacity(0.6))
+                switch state {
+                case .connecting:
+                    ProgressView()
+                        .controlSize(.mini)
+                case .on:
+                    Image(systemName: "power")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Theme.previewGreen)
+                case .off:
+                    Image(systemName: "power")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Theme.textSecondary)
+                }
+            }
+            .frame(width: ControlMetrics.chipWidth, height: ControlMetrics.pillHeight)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(state == .connecting ? "Connecting…" : (state == .on ? "On — click to stop" : "Off — click to start"))
     }
 }
 

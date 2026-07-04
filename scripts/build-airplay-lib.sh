@@ -29,6 +29,29 @@ rm -rf "$STAGE" "$BUILD"; mkdir -p "$STAGE"
 cp -R "$UX/." "$STAGE/"
 sed -i '' '/add_subdirectory( renderers )/,$d' "$STAGE/CMakeLists.txt"
 
+# ── AIRLIVE PATCH (applied to the STAGED copy — the submodule stays pristine) ──
+# Rotation contract (found 2026-07-04, field-proven by obs-airplay): the /info
+# plist must advertise features WITH bit 8 (ScreenRotate) + bits 0/4/33-36, while
+# the Bonjour TXT stays STOCK (0x5A7FFEE6, bit 8 OFF).  That split makes iOS
+# re-encode the mirror upright and re-negotiate dimensions on every rotation.
+#   • bit 8 in BOTH → phone streams its native portrait buffer with sideways
+#     content, expecting the receiver to rotate pixels (tried; not wanted);
+#   • bit 8 in NEITHER (stock) → orientation pinned at session start forever.
+echo "▶︎ Applying Airlive patch to the staged copy…"
+python3 - "$STAGE/lib/raop_handlers.h" <<'EOF'
+import sys
+path = sys.argv[1]
+src = open(path).read()
+old = "uint64_t features = dnssd_get_airplay_features(raop->dnssd);"
+new = ("uint64_t features = ((uint64_t) 0x1E << 32) | 0x5A7FFFF7; "
+       "/* AIRLIVE: proven /info mask - see build-airplay-lib.sh */")
+if old not in src:
+    sys.exit("AIRLIVE PATCH FAILED: features line not found in raop_handlers.h "
+             "(upstream changed?) - re-derive the patch before building")
+open(path, "w").write(src.replace(old, new, 1))
+print("  patched raop_handlers.h: /info features -> 0x1E:5A7FFFF7 (rotation contract)")
+EOF
+
 echo "▶︎ Configuring (lib only, macOS 13 target)…"
 # Match the app's deployment target so the .a objects don't warn ("built for
 # newer macOS 26 than 13"). (Homebrew libcrypto/libplist stay at their own minos.)

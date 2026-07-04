@@ -67,6 +67,12 @@ enum Theme {
     /// `#3EB85C` — multiview PREVIEW (staged) border.  Broadcast green, matched
     /// to Studio's Preview tally so the switcher reads the same on both apps.
     static let previewGreen = Color(hex: 0x3EB85C)
+
+    // ── Tally chip fills (bright digit/text on a SOLID DARK tally shade) ────
+    /// `#4A1E1E` — deep red fill behind an ON-AIR ordinal/tag.
+    static let tallyProgramBg = Color(hex: 0x4A1E1E)
+    /// `#18421F` — deep green fill behind a PREVIEW/live ordinal/tag.
+    static let tallyPreviewBg = Color(hex: 0x18421F)
 }
 
 // MARK: - Spacing & radius constants
@@ -102,6 +108,9 @@ enum Radius {
 /// `ControlSize` type used by the `.controlSize(_:)` modifier.
 enum ControlMetrics {
     static let pillHeight: CGFloat    = 28
+    /// Width of the small card chips that stack in a column (the output card's
+    /// On/Off chip over its ▲/▼ chip) — one width so they align exactly.
+    static let chipWidth: CGFloat     = 44
     static let segmentHeight: CGFloat = 30
     static let tileHeight: CGFloat    = 40
     static let sliderKnob: CGFloat    = 14

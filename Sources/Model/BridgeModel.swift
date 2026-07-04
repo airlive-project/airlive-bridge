@@ -7,13 +7,16 @@
 
 import Foundation
 import CoreVideo
+import Combine   // session-autosave subscriptions (model + per-channel objectWillChange)
 
-/// What the Bridge is monitoring / sending: one camera at a time (Solo) or the
-/// composited grid of all cameras (Multiview).  The two are MUTUALLY EXCLUSIVE
-/// for output — we never publish solo feeds AND the multiview program at once
-/// (Phase 2 wires the senders to this).
+/// ⚠️ Solo is REMOVED FROM THE UI for launch (2026-07-03): the toolbar switch is
+/// gone and `mode` stays `.multiview` for the app's whole life (profile load pins
+/// it too).  The enum + the `mode ==` branches below are KEPT deliberately — the
+/// routing/tally paths are field-verified, and stripping the plumbing would mean
+/// re-touching them right before release for zero behaviour change.  If Solo
+/// returns it will be as per-output aux routing, not as this global switch.
 enum AppMode: String, CaseIterable, Identifiable {
-    case multiview, solo          // order = the toolbar switch order (Multiview first)
+    case multiview, solo
     var id: String { rawValue }
     var label: String { self == .solo ? "Solo" : "Multiview" }
 }
@@ -24,6 +27,20 @@ final class BridgeModel: ObservableObject {
 
     /// All channels, in display order.
     @Published var channels: [BridgeChannel] = []
+
+    /// Display name of the loaded/saved profile — the `.airliveprofile` FILE name
+    /// (set by the app's Save/Open menu actions).  Shown in the window title, OBS
+    /// style: "Airlive Bridge 1.0.0 - Profile: EAGLES".  "Default" until the
+    /// operator saves or opens one.  Persisted so the title survives relaunches.
+    @Published var profileName: String = "Default" {
+        didSet { UserDefaults.standard.set(profileName, forKey: "bridge.profileName") }
+    }
+
+    /// The named profile FILE behind menu "Save Profile" (update-in-place); nil until
+    /// the operator saves/opens one — then Save overwrites it without a panel.
+    var profileURL: URL? {
+        didSet { UserDefaults.standard.set(profileURL?.path, forKey: "bridge.profileURL") }
+    }
 
     /// Currently-selected channel's id (drives the center zone), or nil when
     /// none is selected.  In Solo mode the selected camera IS the program source.
@@ -87,13 +104,11 @@ final class BridgeModel: ObservableObject {
         } else if TallyStore.shared.state(for: channel.id) != .off {
             TallyStore.shared.set(.off, for: channel.id)
         }
-        // NDI dead-signal: if the ON-AIR source's VIDEO transport just dropped, push ONE black
-        // frame so NDI reads as a clear "no source" instead of freezing on the camera's last
-        // frame (#6).  Keyed off `isConnected` (the video side), so a combined channel that loses
-        // its AirPlay video — even with its control link still up — still blacks the program.
-        // NDI holds the last frame, so one black frame suffices until the operator cuts elsewhere.
-        if channel.id == effectiveProgramID, !channel.isConnected, let black = blackProgramFrame {
-            feedProgram(black, timeNs: DispatchTime.now().uptimeNanoseconds)
+        // Re-pick the program feed mode when the ON-AIR source's connectivity flips: a mid-air
+        // drop falls to continuous black, a reconnect goes back to passthrough/transcode — so
+        // every output keeps carrying the program across the gap (never a freeze, never silence).
+        if channel.id == effectiveProgramID {
+            applyFeedMode(computeFeedMode())
         }
     }
 
@@ -115,6 +130,71 @@ final class BridgeModel: ObservableObject {
         return buf
     }
 
+    /// LAW: the PROGRAM streams to EVERY output, no exceptions.  How the passthrough outputs
+    /// (OBS/RTSP/SRT) get their H.264 depends on what's on air:
+    ///   • `.passthrough` — an Airlive camera: forward its ORIGINAL bitstream (zero transcode);
+    ///   • `.transcode`   — a source with decoded frames only (AirPlay mirror / HDMI capture):
+    ///                      encode those frames with `programEncoder`;
+    ///   • `.black`       — no live video at all: a 30 fps black frame, encoded the same way.
+    /// NDI always takes the decoded frames directly and is unaffected by the mode.
+    enum ProgramFeedMode { case passthrough, transcode, black }
+    private var programFeedMode: ProgramFeedMode = .black
+
+    private var blackTimer: DispatchSourceTimer?
+    private lazy var programEncoder: ProgramEncoder = {
+        let enc = ProgramEncoder()
+        // Guarded by the CURRENT mode ON MAIN: a VT callback already in flight when the operator
+        // cuts back to a raw camera must not slip a stale encoded format/sample into the program.
+        enc.onFormat = { [weak self] payload in
+            guard let self, self.programFeedMode != .passthrough else { return }
+            self.feedProgramFormat(payload)
+        }
+        enc.onSample = { [weak self] payload, pts in
+            guard let self, self.programFeedMode != .passthrough else { return }
+            self.feedProgramSample(payload, pts)
+        }
+        return enc
+    }()
+
+    /// The mode the CURRENT program state calls for.  Main-confined.
+    private func computeFeedMode() -> ProgramFeedMode {
+        guard let pc = channels.first(where: { $0.id == effectiveProgramID }),
+              pc.isConnected, pc.videoActive else { return .black }
+        return pc.producesRawH264 ? .passthrough : .transcode
+    }
+
+    /// Apply a feed mode: run the black ticker only in `.black`, keep the encoder alive for
+    /// both encoded modes, drop it entirely on raw passthrough.  Idempotent; main-confined
+    /// (all callers — routeProgram, connectivity edges — are main).
+    private func applyFeedMode(_ mode: ProgramFeedMode) {
+        programFeedMode = mode
+        switch mode {
+        case .black:
+            programEncoder.start()
+            if blackTimer == nil {
+                pushBlackFrame()                        // immediate — don't wait a frame interval
+                let t = DispatchSource.makeTimerSource(queue: .main)
+                t.schedule(deadline: .now() + .milliseconds(33), repeating: .milliseconds(33))
+                t.setEventHandler { [weak self] in self?.pushBlackFrame() }
+                t.resume()
+                blackTimer = t
+            }
+        case .transcode:
+            blackTimer?.cancel(); blackTimer = nil
+            programEncoder.start()   // fed per-frame from feedProgram()
+        case .passthrough:
+            blackTimer?.cancel(); blackTimer = nil
+            programEncoder.stop()
+        }
+    }
+
+    private func pushBlackFrame() {
+        guard let black = blackProgramFrame else { return }
+        let now = DispatchTime.now().uptimeNanoseconds
+        feedProgram(black, timeNs: now)            // NDI (decoded frames)
+        programEncoder.encode(black, timeNs: now)  // OBS/RTSP/SRT (H.264)
+    }
+
     /// Clear every channel's tally (UI + the camera's LED) — used when leaving multiview, so a
     /// camera that was red/green on the switcher doesn't stay lit under Solo's manual tally.
     private func clearAllTally() {
@@ -124,12 +204,19 @@ final class BridgeModel: ObservableObject {
         }
     }
 
-    /// Wire a channel's connectivity-edge callback to the model (re-assert / clear tally).
+    /// Wire a channel's connectivity-edge callback to the model (re-assert / clear tally),
+    /// and its change stream to the session autosave — a rename / delay tweak on the
+    /// channel object doesn't touch any model-level @Published, so the model wouldn't
+    /// hear about it otherwise.  (Autosave diffs the encoded snapshot, so the channel's
+    /// live-state churn — snapshots, connects — costs one tiny JSON encode, no disk.)
     private func wireConnectivity(_ channel: BridgeChannel) {
         channel.onConnectivityChanged = { [weak self, weak channel] in
             guard let self, let channel else { return }
             self.handleConnectivityChange(channel)
         }
+        channel.objectWillChange
+            .sink { [weak self] _ in self?.scheduleAutosave() }
+            .store(in: &autosaveCancellables)
     }
 
     /// One-shot request to take the detached Multiview Wall window fullscreen (set by
@@ -142,16 +229,12 @@ final class BridgeModel: ObservableObject {
 
     /// Load a camera into Preview (stage it).
     func stage(_ id: UUID) { previewID = id }
-    /// Cut: the staged Preview camera goes live to Program.  REFUSES a Control-only source
-    /// (videoActive=false): airing a channel with no video would silently dead-air the
-    /// program outputs (NDI/RTSP/SRT/OBS) with no picture.  Covers the CUT button, the
-    /// Space shortcut, and double-click hot-cut (all route through here).
+    /// Cut: the staged Preview camera goes live to Program.  ANY created channel can be cut to air,
+    /// signal or not — a channel with no live video airs BLACK (like a real switcher: an empty input
+    /// is a legitimate program; the black feeder covers NDI, passthrough blacks on its timeout).
+    /// Covers the CUT button, the Space shortcut, and double-click hot-cut (all route through here).
     func take() {
-        // Only cut to a source that is BOTH connected AND sending video — airing a
-        // disconnected or control-only camera dead-airs the program outputs.
-        guard let p = previewID,
-              let pc = channels.first(where: { $0.id == p }),
-              pc.isConnected, pc.videoActive else { return }
+        guard let p = previewID, channels.contains(where: { $0.id == p }) else { return }
         // Flip-flop like Studio's cutTransition: Preview → Program, and the OUTGOING
         // Program drops back into Preview (so you can cut straight back).  Suppress the
         // per-didSet tally so the swap emits ONE cue per camera, no red→off→green flash.
@@ -170,17 +253,21 @@ final class BridgeModel: ObservableObject {
 
     /// Digit N (0-based): put camera N on PROGRAM — a hot-cut in Multiview, a
     /// selection in Solo.  Out-of-range is a no-op.
+    /// Plain digit 1–9: stage that tile in PREVIEW — the safe bus, same as clicking
+    /// the tile.  (Direct-to-air lives on ⌘digit — `cutDirect` — the classic
+    /// two-bus switcher keyboard: number row = preview bus, ⌘row = program bus.)
     func programSelect(_ index: Int) {
         let list = multiviewChannels                  // digits map to visible tiles, not RC channels
         guard index >= 0, index < list.count else { return }
-        let channel = list[index]
-        if mode == .multiview {
-            // Don't hot-cut a disconnected or Control-only (no-video) source straight to air.
-            guard channel.isConnected, channel.videoActive else { return }
-            programID = channel.id
-        } else {
-            select(channel.id)
-        }
+        select(list[index].id)                        // select() also stages Preview
+    }
+
+    /// ⌘digit 1–9: cut that tile STRAIGHT to PROGRAM, preview untouched.  Any created
+    /// channel cuts to air — no signal = black program (real-switcher model).
+    func cutDirect(_ index: Int) {
+        let list = multiviewChannels
+        guard index >= 0, index < list.count else { return }
+        programID = list[index].id
     }
 
     /// ⇧+digit N (0-based): set the FOCUSED camera's lens to its Nth available
@@ -206,11 +293,6 @@ final class BridgeModel: ObservableObject {
     /// Downstream program outputs (NDI today; SRT/RTSP later).
     @Published var programOutputs: [VideoOutput] = []
 
-    /// False when the current program source emits no raw H.264 (AirPlay / combined / capture):
-    /// the PASSTHROUGH outputs (OBS relay / RTSP / SRT) can't carry it, so the UI warns instead
-    /// of those outputs going silently black.  NDI is unaffected (it uses decoded frames).
-    @Published var programSupportsPassthrough: Bool = true
-
     /// The channel currently feeding the program: the PGM camera in Multiview, the
     /// selected camera in Solo.
     var effectiveProgramID: UUID? { mode == .solo ? selectedID : programID }
@@ -221,8 +303,8 @@ final class BridgeModel: ObservableObject {
     /// adapter…).  Not started here; `feedProgram*` only sends to live outputs.
     private func seedDefaultOutputs() {
         let defaults: [VideoOutput] = [
+            AirliveRelayOutput(label: OutputKind.obs.displayName),   // OBS Plugin pinned at the TOP
             NDIOutput(label: OutputKind.ndi.displayName),
-            AirliveRelayOutput(label: OutputKind.obs.displayName),
             RTSPOutput(label: OutputKind.rtsp.displayName, port: 8554),
             SRTOutput(label: OutputKind.srt.displayName),
         ]
@@ -236,7 +318,27 @@ final class BridgeModel: ObservableObject {
             // onReady fires on main once OBS is actually connected — force one IDR
             // even if the program source didn't change (the fresh relay needs it).
             relay.onReady = { [weak self] in self?.requestKeyframeForProgram(force: true) }
+            // Live Connected/Waiting status on the OBS card.
+            relay.onConnectionChanged = { [weak self] in self?.objectWillChange.send() }
+            // ALWAYS ON — no toggle: the plugin receives, the Bridge sends, period.  Same-machine
+            // loopback: when OBS (with the source) is up it connects within ~1 s, otherwise the
+            // relay just keeps retrying — zero operator action, nothing to mis-toggle.
+            relay.start()
         }
+        // SRT peer accepted the call / RTSP client hit PLAY — force one IDR so the viewer decodes
+        // NOW, not at the next natural keyframe (the camera's LAN GOP is 6–10 s; a mid-GOP join
+        // would sit dark that long).
+        if let srt = output as? SRTOutput {
+            srt.onReady = { [weak self] in self?.requestKeyframeForProgram(force: true) }
+            // Spinner → green on the card the moment the caller actually connects (and back on drop).
+            srt.onConnectionChanged = { [weak self] in self?.objectWillChange.send() }
+        }
+        if let rtsp = output as? RTSPOutput {
+            rtsp.onPlay = { [weak self] in self?.requestKeyframeForProgram(force: true) }
+        }
+        // An output added mid-stream starts with the CURRENT program SPS/PPS (the camera won't
+        // resend them — once per connection), so its first decoded frame is the forced IDR above.
+        if let cached = lastProgramFormatPayload { output.relayFormat(cached) }
     }
 
     /// Add an EXTRA program output (from "+").  Created OFF — a fresh output must never
@@ -246,10 +348,23 @@ final class BridgeModel: ObservableObject {
         configureOutput(output)
         programOutputs.append(output)
         routeProgram()
+        // Undo tracks the CURRENT instance through remove→restore cycles via a Ref box
+        // (a restored output is a fresh object with a fresh id).
+        let cfg = outputConfig(of: output)
+        let ref = Ref(output)
+        registerUndo(
+            undo: { [weak self] in self?.removeProgramOutput(ref.value) },
+            redo: { [weak self] in if let new = self?.restoreOutput(cfg) { ref.value = new } })
     }
     func removeProgramOutput(_ output: VideoOutput) {
+        guard let index = programOutputs.firstIndex(where: { $0.id == output.id }) else { return }
+        let cfg = outputConfig(of: output)
+        let ref = Ref(output)
+        registerUndo(
+            undo: { [weak self] in if let new = self?.restoreOutput(cfg, at: index) { ref.value = new } },
+            redo: { [weak self] in self?.removeProgramOutput(ref.value) })
         output.stop()
-        programOutputs.removeAll { $0.id == output.id }
+        programOutputs.remove(at: index)
     }
 
     /// Wire the effective-program channel's frames to the program outputs; clear
@@ -271,25 +386,19 @@ final class BridgeModel: ObservableObject {
             // this flag so non-program channels skip the per-frame main hop entirely.
             channel.setProgramSource(isProgram)
         }
-        // Passthrough outputs (OBS/RTSP/SRT) need raw H.264 ACTIVELY flowing.  A source that is
-        // AirPlay/combined/capture (no raw encoder) OR a Control-only Airlive camera (encoder off,
-        // videoActive=false) produces none — both must flag the UI (so the passthrough warning shows
-        // instead of a silently black OBS/RTSP/SRT) and forget any cached format so a reconnect can't
-        // replay the previous camera's SPS/PPS into a now-frameless relay.
+        // Leaving raw passthrough (AirPlay/capture/Control-only on air): forget the CAMERA's
+        // cached SPS/PPS so a reconnecting output can't replay it against encoder frames.
+        // The encoder re-populates the cache with ITS format on the first IDR (≤1 s).
         let pc = channels.first(where: { $0.id == pid })
-        let programHasVideo = pc != nil && pc!.isConnected && pc!.videoActive
         let programProducesRaw = (pc?.producesRawH264 ?? true) && (pc?.videoActive ?? true)
-        programSupportsPassthrough = (pid == nil) ? true : programProducesRaw
         if !programProducesRaw {
+            lastProgramFormatPayload = nil
             for output in programOutputs { output.clearLastFormat() }   // OBS + RTSP + SRT (NDI no-op)
         }
-        // Program with no LIVE video (nil / disconnected / Control-only / AirPlay-video-dropped):
-        // push ONE black frame so NDI shows a clear no-signal instead of FREEZING on the PREVIOUS
-        // camera's last decoded frame.  handleConnectivityChange covers a mid-air drop of the current
-        // source; THIS covers a CUT/select TO a source that has no video.
-        if !programHasVideo, let black = blackProgramFrame {
-            feedProgram(black, timeNs: DispatchTime.now().uptimeNanoseconds)
-        }
+        // Pick how the passthrough outputs are fed for THIS program state (LAW: every output
+        // always carries the program): camera → raw passthrough, AirPlay/capture → transcode,
+        // no live video → continuous black.  handleConnectivityChange re-applies on drops.
+        applyFeedMode(computeFeedMode())
         // On a REAL source change, gate EVERY passthrough output until the new source's format
         // arrives (#20 — was OBS-relay-only; RTSP/SRT decoded ~300 ms against the old SPS/PPS), and
         // FORCE an IDR for the new source.  Forcing (not the lastKeyframeProgramID dedup) is
@@ -362,9 +471,24 @@ final class BridgeModel: ObservableObject {
         for output in programOutputs where output.isLive {
             output.send(buffer, timeNs: timeNs)   // buffer outputs (NDI)
         }
+        // TRANSCODE mode (AirPlay mirror / HDMI capture on air — no raw bitstream): the same
+        // decoded frame is hardware-encoded so OBS/RTSP/SRT carry the program too.  LAW: the
+        // program streams to every output, no exceptions.
+        if programFeedMode == .transcode {
+            programEncoder.encode(buffer, timeNs: timeNs)
+        }
     }
+    /// Latest program SPS/PPS payload — handed to a passthrough output the moment it starts, so a
+    /// mid-stream toggle-on can decode.  CRITICAL: the camera sends formatDescription ONCE per
+    /// connection (deliberate, thermal) and its LAN GOP is 6–10 s — an output that missed the one
+    /// format packet would mux slices with NO SPS/PPS forever (found live: SRT "non-existing PPS").
+    private var lastProgramFormatPayload: Data?
     private func feedProgramFormat(_ payload: Data) {
-        for output in programOutputs where output.isLive { output.relayFormat(payload) }   // relay (OBS)
+        lastProgramFormatPayload = payload
+        // ALL outputs, live or not: relayFormat only caches parameter sets (cheap) — samples
+        // stay isLive-gated in feedProgramSample.  An OFF output must still track the current
+        // format so flipping it on later starts from valid decode state.
+        for output in programOutputs { output.relayFormat(payload) }
     }
     private func feedProgramSample(_ payload: Data, _ ts: Int64) {
         for output in programOutputs where output.isLive { output.relaySample(payload, timestampMicros: ts) }
@@ -401,7 +525,14 @@ final class BridgeModel: ObservableObject {
     /// `objectWillChange` so the UI re-reads it.
     var hasPassword: Bool { BridgeKeychain.password(account: Self.authAccount) != nil }
 
-    init() { seedDefaultOutputs() }
+    init() {
+        seedDefaultOutputs()
+        routeProgram()   // the program bus runs from launch — empty program = continuous black
+        if !restoreLastSession() {   // a previous session replaces the seeded defaults
+            seedFirstLaunchChannels()
+        }
+        wireAutosave()
+    }
 
     /// Set (or clear) the global password.  Stored in the Keychain, then pushed
     /// to every channel.  A password change is a REVOCATION (`disconnectNow`) so
@@ -451,15 +582,27 @@ final class BridgeModel: ObservableObject {
     /// `channels` order, so the grid follows automatically; program/preview are
     /// tracked by id, so they stay valid.
     func moveChannel(from source: IndexSet, to destination: Int) {
+        let before = channels.map(\.id)
         channels.move(fromOffsets: source, toOffset: destination)
         pushChannelOrder()
+        let after = channels.map(\.id)
+        guard before != after else { return }
+        registerUndo(
+            undo: { [weak self] in self?.reorderChannels(before) },
+            redo: { [weak self] in self?.reorderChannels(after) })
     }
 
     /// Reorder the program outputs (drag-reorder in the Outputs rail).  Order is
     /// purely cosmetic — it doesn't change which channel is on program — so a plain
     /// @Published move (which re-renders the list) is all that's needed.
     func moveProgramOutput(from source: IndexSet, to destination: Int) {
+        let before = programOutputs.map(\.id)
         programOutputs.move(fromOffsets: source, toOffset: destination)
+        let after = programOutputs.map(\.id)
+        guard before != after else { return }
+        registerUndo(
+            undo: { [weak self] in self?.reorderOutputs(before) },
+            redo: { [weak self] in self?.reorderOutputs(after) })
     }
 
     /// Publish each channel's position (Bonjour TXT `ord`) so the iPhone lists
@@ -476,7 +619,7 @@ final class BridgeModel: ObservableObject {
     func addChannel(kind: ChannelKind = .airlive,
                     captureDeviceID: String? = nil,
                     name: String? = nil) -> BridgeChannel {
-        let channel = BridgeChannel(name: name ?? defaultChannelName(),
+        let channel = BridgeChannel(name: name ?? defaultChannelName(kind: kind),
                                     kind: kind, captureDeviceID: captureDeviceID)
         wireConnectivity(channel)
         channels.append(channel)
@@ -486,6 +629,10 @@ final class BridgeModel: ObservableObject {
         applyAuth(to: channel)      // gate it with the current global password
         routeProgram()              // wire the program tap (covers the new channel)
         pushChannelOrder()          // advertise positions (this one + any shifted)
+        let cfg = channelConfig(of: channel)
+        registerUndo(
+            undo: { [weak self] in self?.removeChannel(cfg.id) },
+            redo: { [weak self] in self?.restoreChannel(cfg) })
         return channel
     }
 
@@ -494,6 +641,10 @@ final class BridgeModel: ObservableObject {
     /// when the list becomes empty).
     func removeChannel(_ id: UUID) {
         guard let index = channels.firstIndex(where: { $0.id == id }) else { return }
+        let cfg = channelConfig(of: channels[index])
+        registerUndo(
+            undo: { [weak self] in self?.restoreChannel(cfg, at: index) },
+            redo: { [weak self] in self?.removeChannel(id) })
         channels[index].stop()
         channels.remove(at: index)
         TallyStore.shared.clear(id)   // don't leak the channel's tally entry
@@ -529,18 +680,24 @@ final class BridgeModel: ObservableObject {
     /// (connections, which outputs run, the PVW/PGM buses) is NOT captured — only the
     /// layout the operator built.  See `BridgeProfile`.
     func snapshotProfile() -> BridgeProfile {
-        let channelConfigs = channels.map { ch in
-            BridgeProfile.ChannelConfig(
-                id: ch.id, name: ch.name, kind: ch.kind.rawValue,
-                captureDeviceID: ch.captureDeviceID, delayRaw: ch.delay.rawValue,
-                extraDelayMs: ch.extraDelayMs, previewEnabled: ch.previewEnabled)
-        }
-        let outputConfigs = programOutputs.map { out in
-            BridgeProfile.OutputConfig(
-                kind: out.kind.rawValue, label: out.label, config: out.config,
-                port: (out as? RTSPOutput).map { Int($0.port) })
-        }
-        return BridgeProfile(mode: mode.rawValue, channels: channelConfigs, outputs: outputConfigs)
+        BridgeProfile(mode: mode.rawValue,
+                      channels: channels.map(channelConfig(of:)),
+                      outputs: programOutputs.map(outputConfig(of:)))
+    }
+
+    /// One channel's persisted shape — shared by the profile snapshot and undo records.
+    private func channelConfig(of ch: BridgeChannel) -> BridgeProfile.ChannelConfig {
+        BridgeProfile.ChannelConfig(
+            id: ch.id, name: ch.name, kind: ch.kind.rawValue,
+            captureDeviceID: ch.captureDeviceID, delayRaw: ch.delay.rawValue,
+            extraDelayMs: ch.extraDelayMs, previewEnabled: ch.previewEnabled)
+    }
+
+    /// One output's persisted shape — shared by the profile snapshot and undo records.
+    private func outputConfig(of out: VideoOutput) -> BridgeProfile.OutputConfig {
+        BridgeProfile.OutputConfig(
+            kind: out.kind.rawValue, label: out.label, config: out.config,
+            port: (out as? RTSPOutput).map { Int($0.port) })
     }
 
     /// Replace the ENTIRE setup with a saved profile: tear down the current channels +
@@ -548,6 +705,7 @@ final class BridgeModel: ObservableObject {
     /// slots (no live connection — the iPhone reconnects by the preserved id); outputs
     /// come back OFF (a restored output must not auto-publish).
     func applyProfile(_ profile: BridgeProfile) {
+        clearUndoHistory()   // different world — old records reference dead channels
         // Silence the per-didSet tally broadcasts while the buses churn through the rebuild
         // (previewID/programID/mode/selectedID each fire on the way); we sync ONCE at the
         // end with the final state in place.
@@ -561,8 +719,10 @@ final class BridgeModel: ObservableObject {
         programOutputs = []
         previewID = nil; programID = nil; selectedID = nil
 
-        // 2. Mode (before rebuilding so the tally/routing didSets see the right mode).
-        mode = AppMode(rawValue: profile.mode) ?? .multiview
+        // 2. Mode — ALWAYS multiview (Solo is removed from the UI; a profile saved by an
+        //    older build may still say "solo", which would strand the app in a view that
+        //    no longer exists).
+        mode = .multiview
 
         // 3. Rebuild channels — preserve ids so a previously-paired phone reconnects to
         //    the same slot.  Settings are set BEFORE start() so the receiver's init reads
@@ -589,6 +749,13 @@ final class BridgeModel: ObservableObject {
             configureOutput(output)
             programOutputs.append(output)
         }
+        // The always-on OBS Plugin card must exist even when restoring a profile saved
+        // before it did (configureOutput starts its reconnect loop).
+        if !programOutputs.contains(where: { $0.kind == .obs }) {
+            let relay = AirliveRelayOutput(label: OutputKind.obs.displayName)
+            configureOutput(relay)
+            programOutputs.insert(relay, at: 0)   // pinned at the TOP, same as seedDefaultOutputs
+        }
 
         routeProgram()       // wire the program tap across the new channels
         pushChannelOrder()   // advertise positions
@@ -597,6 +764,239 @@ final class BridgeModel: ObservableObject {
         // single-sync discipline).
         suppressTallySync = false
         if mode == .multiview { syncMultiviewTally() }
+    }
+
+    /// Reset to a first-launch setup: no channels, the full default output surface, OFF.
+    /// (Menu "New Profile" — the caller confirms first when a show is built.)
+    func newProfile() {
+        clearUndoHistory()   // different world — old records reference dead channels
+        suppressTallySync = true
+        for channel in channels { channel.stop() }
+        channels.forEach { TallyStore.shared.clear($0.id) }
+        channels = []
+        for output in programOutputs { output.stop() }
+        programOutputs = []
+        previewID = nil; programID = nil; selectedID = nil
+        seedDefaultOutputs()
+        routeProgram()
+        suppressTallySync = false
+        profileName = "Default"
+        profileURL = nil
+    }
+
+    // MARK: - Undo / Redo (⌘Z / ⇧⌘Z — config actions only)
+    //
+    // Covers what an operator can fat-finger: add / remove / reorder / rename of
+    // channels and outputs.  LIVE switching (CUT, tally, output on/off) is
+    // deliberately NOT undoable — "undo" mid-show must never change what's on air.
+
+    private struct ConfigAction {
+        let undoAction: () -> Void
+        let redoAction: () -> Void
+    }
+    @Published private var undoStack: [ConfigAction] = []
+    @Published private var redoStack: [ConfigAction] = []
+    var canUndo: Bool { !undoStack.isEmpty }
+    var canRedo: Bool { !redoStack.isEmpty }
+    /// True while undo()/redo() replays an action — the replayed mutations must not
+    /// register themselves as fresh undo records.
+    private var isReplayingUndo = false
+    private static let undoDepth = 50
+
+    private func registerUndo(undo: @escaping () -> Void, redo: @escaping () -> Void) {
+        guard !isReplayingUndo else { return }
+        undoStack.append(ConfigAction(undoAction: undo, redoAction: redo))
+        if undoStack.count > Self.undoDepth { undoStack.removeFirst() }
+        redoStack.removeAll()   // a fresh action forks history — the redo branch dies
+    }
+
+    func undo() {
+        guard let action = undoStack.popLast() else { return }
+        isReplayingUndo = true; action.undoAction(); isReplayingUndo = false
+        redoStack.append(action)
+    }
+
+    func redo() {
+        guard let action = redoStack.popLast() else { return }
+        isReplayingUndo = true; action.redoAction(); isReplayingUndo = false
+        undoStack.append(action)
+    }
+
+    /// History is per-setup: a loaded/new profile is a different world — undoing
+    /// across the boundary would replay actions against channels that no longer exist.
+    private func clearUndoHistory() {
+        undoStack.removeAll(); redoStack.removeAll()
+    }
+
+    /// Rename with undo (the rail's name field commits through here).
+    func renameChannel(_ id: UUID, to newName: String) {
+        guard let channel = channels.first(where: { $0.id == id }),
+              channel.name != newName else { return }
+        let old = channel.name
+        registerUndo(
+            undo: { [weak self] in self?.channels.first { $0.id == id }?.rename(old) },
+            redo: { [weak self] in self?.channels.first { $0.id == id }?.rename(newName) })
+        channel.rename(newName)
+    }
+
+    /// Output rename with undo.  Nudges `objectWillChange` because `VideoOutput`
+    /// isn't observable (same pattern as the card's on/off toggle).
+    func renameOutput(_ output: VideoOutput, to newLabel: String) {
+        let old = output.label
+        guard old != newLabel else { return }
+        registerUndo(
+            undo: { [weak self] in output.label = old; self?.objectWillChange.send() },
+            redo: { [weak self] in output.label = newLabel; self?.objectWillChange.send() })
+        output.label = newLabel
+        objectWillChange.send()
+    }
+
+    /// Transport-config edit (SRT destination) with undo.
+    func setOutputConfig(_ output: VideoOutput, to newConfig: String) {
+        let old = output.config
+        guard old != newConfig else { return }
+        registerUndo(
+            undo: { [weak self] in output.config = old; self?.objectWillChange.send() },
+            redo: { [weak self] in output.config = newConfig; self?.objectWillChange.send() })
+        output.config = newConfig
+        objectWillChange.send()
+    }
+
+    /// Rebuild one channel from its config (undo of a remove / redo of an add).
+    /// Same recipe as `applyProfile`'s loop; the preserved id means a previously
+    /// paired phone reconnects to the restored slot.
+    @discardableResult
+    private func restoreChannel(_ cfg: BridgeProfile.ChannelConfig, at index: Int? = nil) -> BridgeChannel {
+        let channel = BridgeChannel(
+            id: cfg.id, name: cfg.name,
+            kind: ChannelKind(rawValue: cfg.kind) ?? .airlive,
+            captureDeviceID: cfg.captureDeviceID,
+            delay: LatencyPreset(rawValue: cfg.delayRaw) ?? .normal)
+        channel.extraDelayMs = cfg.extraDelayMs
+        channel.previewEnabled = cfg.previewEnabled
+        wireConnectivity(channel)
+        let at = min(index ?? channels.count, channels.count)
+        channels.insert(channel, at: at)
+        channel.start(order: at)
+        applyAuth(to: channel)
+        if previewID == nil { previewID = channel.id }
+        routeProgram()
+        pushChannelOrder()
+        return channel
+    }
+
+    /// Rebuild one output from its config, OFF (undo of a remove / redo of an add).
+    /// Returns nil for an OBS relay when one already exists — only one loopback slot.
+    @discardableResult
+    private func restoreOutput(_ cfg: BridgeProfile.OutputConfig, at index: Int? = nil) -> VideoOutput? {
+        if cfg.kind == OutputKind.obs.rawValue,
+           programOutputs.contains(where: { $0.kind == .obs }) { return nil }
+        guard let output = makeOutput(from: cfg) else { return nil }
+        configureOutput(output)
+        programOutputs.insert(output, at: min(index ?? programOutputs.count, programOutputs.count))
+        routeProgram()
+        return output
+    }
+
+    /// Restore a saved channel order (undo/redo of a ▲/▼ move).
+    private func reorderChannels(_ order: [UUID]) {
+        channels.sort {
+            (order.firstIndex(of: $0.id) ?? 0) < (order.firstIndex(of: $1.id) ?? 0)
+        }
+        pushChannelOrder()
+    }
+
+    /// Restore a saved output order (undo/redo of a ▲/▼ move).
+    private func reorderOutputs(_ order: [UUID]) {
+        programOutputs.sort {
+            (order.firstIndex(of: $0.id) ?? 0) < (order.firstIndex(of: $1.id) ?? 0)
+        }
+    }
+
+    // MARK: - Session autosave (everything as you left it, crash-safe)
+    //
+    // The whole layout (channels + names + order + delays + outputs) persists WITHOUT the
+    // operator ever touching the Profiles menu: a debounced snapshot goes to Application
+    // Support on every config change, and the next launch restores it via `applyProfile`
+    // — which by design brings channels back as fresh receiver slots (phones reconnect)
+    // and outputs back OFF (nothing auto-publishes after a reboot).  Named profiles stay
+    // a separate, explicit act; this is just "the app remembers the room".
+
+    /// `~/Library/Application Support/Airlive Bridge/LastSession.airliveprofile`.
+    private static var autosaveURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Airlive Bridge", isDirectory: true)
+            .appendingPathComponent("LastSession.\(BridgeProfileDocument.fileExtension)")
+    }
+
+    private var autosaveCancellables = Set<AnyCancellable>()
+    private var autosaveWork: DispatchWorkItem?
+    private var lastAutosavedData: Data?
+
+    /// Model-level changes (add/remove/reorder channel or output, rename, selection…)
+    /// all pass through `objectWillChange`; per-channel changes are wired in
+    /// `wireConnectivity`.  2 s debounce + snapshot diff keeps this thermally free.
+    private func wireAutosave() {
+        objectWillChange
+            .sink { [weak self] _ in self?.scheduleAutosave() }
+            .store(in: &autosaveCancellables)
+    }
+
+    private func scheduleAutosave() {
+        autosaveWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.autosaveNow() }
+        autosaveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: work)
+    }
+
+    /// Write the current snapshot if it differs from the last write (main thread).
+    /// Also called directly from `applicationWillTerminate` so a quit right after a
+    /// change never loses it.
+    func autosaveNow() {
+        var encoder: JSONEncoder { let e = JSONEncoder(); e.outputFormatting = [.sortedKeys]; return e }
+        guard let data = try? encoder.encode(snapshotProfile()), data != lastAutosavedData else { return }
+        do {
+            let url = Self.autosaveURL
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            try data.write(to: url, options: .atomic)
+            lastAutosavedData = data
+        } catch {
+            print("[Bridge] ⚠️ session autosave failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Launch-time restore of the autosaved session.  Returns false ONLY on a true
+    /// first launch (no session file) — the caller then seeds the starter channels.
+    /// A corrupt file still counts as "not first launch": the operator HAD a setup,
+    /// so don't paper over its loss with fresh demo channels.
+    @discardableResult
+    private func restoreLastSession() -> Bool {
+        let isFirstLaunch = !FileManager.default.fileExists(atPath: Self.autosaveURL.path)
+        if !isFirstLaunch {
+            do { applyProfile(try BridgeProfile.read(from: Self.autosaveURL)) }
+            catch {
+                print("[Bridge] ⚠️ couldn't restore the last session: \(error.localizedDescription)")
+            }
+        }
+        profileName = UserDefaults.standard.string(forKey: "bridge.profileName") ?? "Default"
+        if let path = UserDefaults.standard.string(forKey: "bridge.profileURL"),
+           FileManager.default.fileExists(atPath: path) {
+            profileURL = URL(fileURLWithPath: path)
+        }
+        return !isFirstLaunch
+    }
+
+    /// First launch: open with the three source kinds already created, so a new
+    /// operator sees a working room instead of an empty rail (the no-onboarding
+    /// decision — the UI explains itself, the starter channels show the options).
+    private func seedFirstLaunchChannels() {
+        addChannel()                                    // Cam 1 — Airlive Camera
+        addChannel(kind: .airplay)                      // Cam 2 — Screen Mirroring
+        addChannel(kind: .screenMirroringPlusControl)   // Cam 3 (Control)
+        selectedID = channels.first?.id
+        previewID = channels.first?.id
+        clearUndoHistory()   // the seed isn't an operator action — ⌘Z must not strip the defaults
     }
 
     /// Reconstruct a `VideoOutput` from a saved config (OFF — the caller never starts it).
@@ -617,13 +1017,24 @@ final class BridgeModel: ObservableObject {
 
     // MARK: - Private
 
-    /// "Camera N" using the lowest free index, so removing CAM 2 and re-adding reuses
-    /// "Camera 2" rather than ever-increasing numbers.  All kinds are cameras (a combined
-    /// channel is a camera with both video + control).
-    private func defaultChannelName() -> String {
+    /// "Cam N" using the lowest free index, so removing Cam 2 and re-adding reuses
+    /// "Cam 2" rather than ever-increasing numbers.  The combined kind gets a
+    /// "(Control)" suffix — this name is what the PHONE operator sees in the Airlive
+    /// app's receiver list, and on a combined channel that Airlive link is
+    /// control-only (video rides AirPlay), so the name must say so up front.
+    /// The base number is unique ACROSS suffixes (no "Cam 3" + "Cam 3 (Control)").
+    private func defaultChannelName(kind: ChannelKind) -> String {
         let used = Set(channels.map(\.name))
+        let suffix = kind == .screenMirroringPlusControl ? " (Control)" : ""
         var n = 1
-        while used.contains("Camera \(n)") { n += 1 }
-        return "Camera \(n)"
+        while used.contains("Cam \(n)") || used.contains("Cam \(n) (Control)") { n += 1 }
+        return "Cam \(n)\(suffix)"
     }
+}
+
+/// Mutable box so an undo record can keep pointing at the CURRENT instance across
+/// remove→restore cycles (a restored output is a fresh object with a fresh id).
+private final class Ref<T> {
+    var value: T
+    init(_ value: T) { self.value = value }
 }

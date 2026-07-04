@@ -56,6 +56,18 @@ public:
     return item;
   }
 
+  // Drop everything queued (returns how many).  Used when a compressed-domain
+  // drop already broke the H.264 reference chain: every frame still queued
+  // decodes to garbage, so the producer purges and waits for the next sync point.
+  auto clear() -> size_t
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    size_t n = q_.size();
+    while (!q_.empty())
+      q_.pop();
+    return n;
+  }
+
   // Signal shutdown: subsequent pop() calls return nullopt once drained,
   // and pending pop()s waiting on the condvar wake up.
   auto close() -> void
