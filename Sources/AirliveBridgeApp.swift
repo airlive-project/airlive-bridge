@@ -10,6 +10,12 @@
 
 import SwiftUI
 import AppKit   // NSSavePanel / NSOpenPanel / NSAlert for profile load / save
+// NOTE: Sparkle is still LINKED (SPM) + the release tooling (package.sh signing,
+// docs/RELEASE.md) is in place, but the updater is NOT instantiated yet: starting it
+// with the placeholder EdDSA key threw an alarming "updater failed to start" alert.
+// Re-wire SPUStandardUpdaterController + CheckForUpdatesView once the real key + a
+// hosted appcast exist (blocked on the paid Apple Developer Program).  Until then the
+// "Check for Updates…" menu uses the gentle manual Updater (Updater.swift).
 
 /// Quit guard: closing the app mid-take kills every camera stream and the program feed
 /// (OBS/NDI/RTSP/SRT go dark) — too destructive for a stray ⌘Q.  If any channel is live,
@@ -79,6 +85,23 @@ struct AirliveBridgeApp: App {
         // persistence doesn't need this menu at all: the session autosaves continuously
         // and restores on launch (see BridgeModel "Session autosave").
         .commands {
+            // Custom About panel: HIDE the build number so it reads "Version 1.0.0",
+            // not "1.0.0 (1)".  The build number (CFBundleVersion) must keep
+            // incrementing for Sparkle's compare, but it's noise in the UI — passing
+            // an empty `.version` drops the parenthetical from the standard panel.
+            CommandGroup(replacing: .appInfo) {
+                Button("About Airlive Bridge") {
+                    NSApplication.shared.orderFrontStandardAboutPanel(
+                        options: [NSApplication.AboutPanelOptionKey.version: ""])
+                }
+            }
+            // "Check for Updates…" right under About.  Gentle manual check for now
+            // (see Updater.swift) — only interrupts with a real available update,
+            // never an error.  Switches to Sparkle's seamless updater once the
+            // backend is live.
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { Updater.checkForUpdates(userInitiated: true) }
+            }
             // Our own Undo/Redo (⌘Z / ⇧⌘Z) — the model keeps a config-action history
             // (add/remove/reorder/rename of channels + outputs; never live switching).
             // While a text field is being edited its OWN undo wins, so typing ⌘Z in a

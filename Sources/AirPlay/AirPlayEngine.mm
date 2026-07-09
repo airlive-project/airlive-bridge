@@ -37,6 +37,7 @@
 #import <os/log.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstring>
 #include <ctime>
@@ -268,15 +269,19 @@ public:
 
   // True when the Annex-B payload carries an SPS (7) or IDR (5) NALU — the only
   // packets that can (re)start a broken reference chain.
+  // Bounds: the smallest detectable unit is a 3-byte start code + 1 header byte
+  // (outer `i + 3 < len`); the 4-byte branch needs one more (`i + 4 < len`).
+  // A one-byte-too-strict guard here shipped once and made the minimal IDR
+  // packet {00 00 00 01 65} invisible — the freeze-until-sync never healed.
   static bool containsSyncNalu(const uint8_t *d, size_t len)
   {
     size_t i = 0;
-    while (i + 4 < len)
+    while (i + 3 < len)
     {
       size_t hdr = 0;
       if (d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 1)
         hdr = i + 3;
-      else if (i + 5 < len && d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 0 && d[i + 3] == 1)
+      else if (i + 4 < len && d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 0 && d[i + 3] == 1)
         hdr = i + 4;
       if (hdr != 0)
       {
@@ -315,21 +320,26 @@ public:
     pkt.pts = data->ntp_time_remote;
     pkt.nal_count = data->nal_count;
 
-    const size_t dropped = self->videoQueue_.push(std::move(pkt));
-    if (dropped > 0)
+    // Overflow policy decided INSIDE the queue's single critical section (a
+    // separate push-then-clear pair let the decoder thread pop the just-pushed
+    // broken-chain frame in between → one corrupted frame instead of a clean
+    // freeze): sync item → purge all + restart at it; non-sync → purge all
+    // including the item and go blind until the next SPS/IDR.
+    const auto result = self->videoQueue_.pushOrPurge(std::move(pkt), sync);
+    if (result.dropped > 0)
     {
-      self->videoDropCount_ += dropped;
-      // The dropped frame broke the chain for everything behind it.  If the packet
-      // we just queued is itself a sync point the stream heals right there (≤2
-      // stale frames flash by); otherwise purge the now-garbage queue and go blind
-      // until the next SPS/IDR — a short freeze instead of seconds of smear.
-      if (!sync)
+      self->videoDropCount_ += result.dropped;
+      if (result.purgedNonSync)
       {
-        self->videoDropCount_ += self->videoQueue_.clear();
         self->needIdr_.store(true, std::memory_order_relaxed);
         os_log_error(ap_log(),
                      "video queue overflow — purged, freezing until next IDR (dropped total %llu)",
                      static_cast<unsigned long long>(self->videoDropCount_.load()));
+      }
+      else
+      {
+        os_log(ap_log(), "video queue overflow — restarted cleanly at a sync point (%zu dropped)",
+               result.dropped);
       }
     }
   }
@@ -491,16 +501,32 @@ private:
         }
       }
 
-      std::lock_guard<std::mutex> lk(serverMutex_);
-      if (!running_)
-        continue; // stop() is in progress / done
-      os_log(ap_log(), "restart worker: restarting AirPlay server%{public}s",
-             doNameChange ? " (name change)" : "");
-      stopServerLocked();
-      if (doNameChange)
-        serverName_ = nameForRestart;
-      if (startServerLocked(serverName_) != 0)
-        os_log_error(ap_log(), "restart worker: start failed");
+      bool startFailed = false;
+      {
+        std::lock_guard<std::mutex> lk(serverMutex_);
+        if (!running_)
+          continue; // stop() is in progress / done
+        os_log(ap_log(), "restart worker: restarting AirPlay server%{public}s",
+               doNameChange ? " (name change)" : "");
+        stopServerLocked();
+        if (doNameChange)
+          serverName_ = nameForRestart;
+        startFailed = (startServerLocked(serverName_) != 0);
+      }
+      if (startFailed)
+      {
+        // A failed (re)start must NOT strand the channel dead until an app relaunch —
+        // the causes are transient (port momentarily held, mDNS hiccup).  Re-arm after
+        // 5 s from THIS worker thread (never a detached thread — it could outlive the
+        // engine); serverMutex_ is already released so stop() can't be blocked, and
+        // the wait aborts early when stop() signals exit.
+        os_log_error(ap_log(), "restart worker: start failed — retrying in 5 s");
+        std::unique_lock<std::mutex> rlk(restartMutex_);
+        restartCv_.wait_for(rlk, std::chrono::seconds(5),
+                            [this] { return restartWorkerExit_.load(); });
+        if (!restartWorkerExit_.load())
+          needsRestart_ = true;   // loop back to the top and try again
+      }
     }
   }
 

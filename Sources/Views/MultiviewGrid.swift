@@ -62,37 +62,62 @@ struct MultiviewGrid: View {
     }
 
     /// Quick lens picker for the STAGED (Preview) camera — pick the look before you
-    /// cut it to air.  Shown ONLY once the camera has reported ITS ladder (no invented
-    /// default buttons for a camera that hasn't said what it can do); capped at 6 —
-    /// the deepest iPhone ladder and the Z X C V B N shortcut row.
+    /// cut it to air.  Delegates to `LensQuickRow`, which has its OWN `@ObservedObject`
+    /// on the preview channel so it repaints the INSTANT that channel changes.
     @ViewBuilder
     private var lensQuickRow: some View {
-        if let preview = model.previewChannel(),
-           let lenses = preview.remote?.availableLenses, !lenses.isEmpty {
-            HStack(spacing: Spacing.xs) {
-                ForEach(Array(lenses.prefix(6).enumerated()), id: \.element) { pair in
-                    Button { preview.send(.setLens(pair.element)) } label: {
-                        HStack(spacing: 3) {
-                            Text(pair.element)
-                                .font(.system(size: 11, weight: .medium))
-                            if shortcuts.showHints {
-                                Text(shortcuts.bindings.chord(
-                                        for: ShortcutAction(kind: .lens, index: pair.offset)).display)
-                                    .font(.system(size: 9, weight: .medium))
-                                    .foregroundColor(Theme.textFaint.opacity(0.7))
-                            }
-                        }
-                        .frame(height: 26)
-                        .padding(.horizontal, Spacing.sm)
-                    }
-                    .bridgeButton(selected: preview.remote?.lens == pair.element)
-                    .disabled(!preview.remoteControlConnected || !preview.remoteControlAllowed)
-                }
-            }
-            .opacity((preview.remoteControlConnected && preview.remoteControlAllowed) ? 1 : 0.4)
+        if let preview = model.previewChannel() {
+            LensQuickRow(channel: preview)
         } else {
             Text("Stage a camera to pick its lens")
                 .font(.system(size: 11)).foregroundColor(Theme.textFaint)
+        }
+    }
+
+    /// Its OWN `@ObservedObject channel` is the whole point: the row repaints the
+    /// INSTANT that channel publishes — the optimistic `pendingLens` on tap (blue moves
+    /// on the same frame you click) and the camera's reported `remote` ladder / lens.
+    /// As a plain computed property on MultiviewGrid it only repainted on a MODEL-level
+    /// publish (≈ the debounced autosave tick), so the blue highlight lagged the camera
+    /// by seconds and the ladder took ~5 s to appear on connect — a pure re-render bug
+    /// that three rounds of model-side reconcile "fixes" never touched.  Shown ONLY once
+    /// the camera reports ITS ladder (no invented default buttons for a camera that
+    /// hasn't said what it can do); capped at 6 — the deepest iPhone ladder and the
+    /// Z X C V B N shortcut row.
+    private struct LensQuickRow: View {
+        @ObservedObject var channel: BridgeChannel
+        @EnvironmentObject var shortcuts: ShortcutCenter
+
+        var body: some View {
+            if let lenses = channel.remote?.availableLenses, !lenses.isEmpty {
+                HStack(spacing: Spacing.xs) {
+                    ForEach(Array(lenses.prefix(6).enumerated()), id: \.element) { pair in
+                        let isSel = channel.selectedLens == pair.element
+                        Button { channel.selectLens(pair.element) } label: {
+                            HStack(spacing: 3) {
+                                Text(pair.element)
+                                    .font(.system(size: 11, weight: .medium))
+                                if shortcuts.showHints {
+                                    Text(shortcuts.bindings.chord(
+                                            for: ShortcutAction(kind: .lens, index: pair.offset)).display)
+                                        .font(.system(size: 9, weight: .medium))
+                                        // White-on-fill so the key hint stays legible on the BLUE
+                                        // selected tile (textFaint vanished there); brighter when active.
+                                        .foregroundColor(.white.opacity(isSel ? 0.85 : 0.45))
+                                }
+                            }
+                            .frame(height: 26)
+                            .padding(.horizontal, Spacing.sm)
+                        }
+                        .bridgeButton(selected: isSel)
+                        .disabled(!channel.remoteControlConnected || !channel.remoteControlAllowed)
+                    }
+                }
+                .opacity((channel.remoteControlConnected && channel.remoteControlAllowed) ? 1 : 0.4)
+            } else {
+                Text("Stage a camera to pick its lens")
+                    .font(.system(size: 11)).foregroundColor(Theme.textFaint)
+            }
         }
     }
 
@@ -161,9 +186,18 @@ struct MultiviewGrid: View {
     // MARK: Preview + Program (the two big windows)
     // Studio colours: PREVIEW = broadcast green, PROGRAM = broadcast red.
 
+    /// Tap-to-focus on the STAGED (preview) camera — the one the control panel drives.  Gated on the
+    /// camera's "focusPoint" cap (legacy cameras no-op).  `pt` is already normalised to the native
+    /// landscape frame (MirrorVideoView inverted its own rotation/letterbox).
+    private func focusPreview(_ pt: CGPoint) {
+        guard let c = model.previewChannel(), c.hasCap("focusPoint") else { return }
+        c.send(.setFocusPoint(x: Float(pt.x), y: Float(pt.y)))
+    }
+
     private var bigRow: some View {
         HStack(spacing: 0) {   // panes touch; green PVW edge meets red PGM edge
-            BigPane(title: "PREVIEW", accent: Theme.previewGreen, channel: model.previewChannel())
+            BigPane(title: "PREVIEW", accent: Theme.previewGreen, channel: model.previewChannel(),
+                    onTapPoint: focusPreview)
             BigPane(title: "PROGRAM", accent: Theme.accentRed, channel: model.programChannel())
         }
     }
@@ -175,7 +209,7 @@ struct MultiviewGrid: View {
         if let preview = model.previewChannel() {
             // Lens lives in the quick-row above the panes here — hide the panel's LENS card.
             // For a Screen-Mirroring tile this leads with the "Remote control" dropdown.
-            CameraControlSection(channel: preview, showLens: false)
+            CameraControlSection(channel: preview)
         }
     }
 
@@ -244,11 +278,13 @@ private struct BigPane: View {
     let title: String
     let accent: Color
     let channel: BridgeChannel?
+    /// Tap-to-focus, wired ONLY on the PREVIEW pane (the camera the control panel drives).
+    var onTapPoint: ((CGPoint) -> Void)? = nil
 
     var body: some View {
         Group {
             if let channel {
-                LivePane(channel: channel, showName: false)
+                LivePane(channel: channel, showName: false, onTapPoint: onTapPoint)
             } else {
                 placeholder
             }
@@ -290,6 +326,7 @@ private func bottomChip(_ text: String, color: Color = .white) -> some View {
 private struct LivePane: View {
     @ObservedObject var channel: BridgeChannel
     var showName: Bool = true
+    var onTapPoint: ((CGPoint) -> Void)? = nil
 
     var body: some View {
         // Video lives in an OVERLAY over a SIZED black Rectangle — the proven Studio
@@ -307,7 +344,7 @@ private struct LivePane: View {
                     if !channel.videoActive {
                         controlOnly
                     } else if channel.previewEnabled {
-                        MirrorVideoView(channel: channel)
+                        MirrorVideoView(channel: channel, onTapPoint: onTapPoint)
                         if channel.latestFrame == nil { offline }
                     } else {
                         offline
@@ -429,7 +466,11 @@ struct MultiviewWall: View {
     private var grid: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
-                BigPane(title: "PREVIEW", accent: Theme.previewGreen, channel: preview)
+                BigPane(title: "PREVIEW", accent: Theme.previewGreen, channel: preview,
+                        onTapPoint: { pt in
+                            guard preview?.hasCap("focusPoint") == true else { return }
+                            preview?.send(.setFocusPoint(x: Float(pt.x), y: Float(pt.y)))
+                        })
                 BigPane(title: "PROGRAM", accent: Theme.accentRed, channel: program)
             }
             thumbnails

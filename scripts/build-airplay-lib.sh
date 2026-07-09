@@ -52,6 +52,61 @@ open(path, "w").write(src.replace(old, new, 1))
 print("  patched raop_handlers.h: /info features -> 0x1E:5A7FFFF7 (rotation contract)")
 EOF
 
+# ── AIRLIVE PATCH #2 — mirror-thread self-join + socket double-close ──
+# On an unsupported-codec negotiation (a type-0x01 video packet with an empty
+# payload — H.265/4K mirror we didn't advertise, or a hostile LAN client), the
+# mirror thread runs its OWN teardown from inside itself:
+#   raop_rtp_mirror_thread -> raop_rtp_mirror_stop -> THREAD_JOIN(thread_mirror)
+# i.e. pthread_join(pthread_self()) -> EDEADLK (ignored), AND mirror_data_sock is
+# closed twice (once at the call site, once inside stop()) — the second close can
+# hit a REUSED fd belonging to another connection.  Fix, minimally + safely:
+#   • make raop_rtp_mirror_stop() self-join-safe (skip the join when we ARE the
+#     mirror thread — the owner's later teardown reaps it),
+#   • drop the redundant pre-close so stop() closes the socket exactly once.
+# (Residual: a self-terminating mirror thread is still left un-joined — an
+# upstream-UxPlay characteristic of every peer-initiated disconnect, not unique
+# to this branch; deeper join-ownership surgery is deferred pending an on-device
+# A/B, per the AirPlay measurement doctrine.)
+echo "▶︎ Applying Airlive patch #2 to the staged copy (mirror self-join / double-close)…"
+python3 - "$STAGE/lib/raop_rtp_mirror.c" <<'EOF'
+import sys
+path = sys.argv[1]
+src = open(path).read()
+
+old_join = "    /* Join the thread */\n    THREAD_JOIN(raop_rtp_mirror->thread_mirror);"
+new_join = ("    /* Join the thread — but NEVER self-join.  The unsupported-codec path calls\n"
+            "     * raop_rtp_mirror_stop() from within raop_rtp_mirror_thread itself, so\n"
+            "     * pthread_join(pthread_self()) would fail EDEADLK.  Skip it when we ARE the\n"
+            "     * mirror thread; the owning thread's later teardown reaps it. (AIRLIVE) */\n"
+            "    if (!pthread_equal(pthread_self(), raop_rtp_mirror->thread_mirror)) {\n"
+            "        THREAD_JOIN(raop_rtp_mirror->thread_mirror);\n"
+            "    }")
+
+old_uc = ("    if (unsupported_codec) {\n"
+          "        CLOSESOCKET(raop_rtp_mirror->mirror_data_sock);\n"
+          "        raop_rtp_mirror_stop(raop_rtp_mirror);\n"
+          "        raop_rtp_mirror->callbacks.video_reset(raop_rtp_mirror->callbacks.cls, RESET_TYPE_RTP_SHUTDOWN);\n"
+          "    }")
+new_uc = ("    if (unsupported_codec) {\n"
+          "        /* AIRLIVE: do NOT pre-close mirror_data_sock here — raop_rtp_mirror_stop()\n"
+          "         * closes it exactly once.  The pre-close left the fd non-negative, so stop()\n"
+          "         * double-closed it (a reused fd could be closed out from under another\n"
+          "         * connection).  stop() is self-join-safe now (see pthread_equal guard). */\n"
+          "        raop_rtp_mirror_stop(raop_rtp_mirror);\n"
+          "        raop_rtp_mirror->callbacks.video_reset(raop_rtp_mirror->callbacks.cls, RESET_TYPE_RTP_SHUTDOWN);\n"
+          "    }")
+
+for label, old, new in (("self-join guard", old_join, new_join),
+                        ("double-close", old_uc, new_uc)):
+    if old not in src:
+        sys.exit("AIRLIVE PATCH #2 FAILED: '%s' anchor not found in raop_rtp_mirror.c "
+                 "(upstream changed?) — re-derive before building" % label)
+    src = src.replace(old, new, 1)
+
+open(path, "w").write(src)
+print("  patched raop_rtp_mirror.c: self-join guard + single socket close")
+EOF
+
 echo "▶︎ Configuring (lib only, macOS 13 target)…"
 # Match the app's deployment target so the .a objects don't warn ("built for
 # newer macOS 26 than 13"). (Homebrew libcrypto/libplist stay at their own minos.)

@@ -28,13 +28,26 @@ private typealias srt_close_t         = @convention(c) (Int32) -> Int32
 private final class SRTRuntime {
     static let shared = SRTRuntime()
 
-    let available: Bool
-    let createSocket: srt_create_socket_t
-    let connect: srt_connect_t
-    let send: srt_send_t
-    let close: srt_close_t
+    // Resolved on first successful load; safe stubs until then.  Written once under
+    // `lock`, then read-only (uses happen only after `loadIfNeeded()` returned true).
+    private(set) var available = false
+    private(set) var createSocket: srt_create_socket_t = { -1 }
+    private(set) var connect: srt_connect_t = { _, _, _ in -1 }
+    private(set) var send: srt_send_t = { _, _, _ in -1 }
+    private(set) var close: srt_close_t = { _ in -1 }
 
-    private init() {
+    private var didStartup = false
+    private let lock = NSLock()
+
+    private init() {}   // NO eager load — the dlopen lives in loadIfNeeded (retryable).
+
+    /// (Re)attempt to dlopen libsrt + resolve symbols if not already loaded.  A cheap
+    /// no-op once loaded.  RETRYABLE (load is here, not in `init`) so "brew install
+    /// srt, THEN toggle SRT on" works WITHOUT restarting the app.
+    @discardableResult
+    func loadIfNeeded() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if available { return true }
         guard let handle = SRTRuntime.open(),
               let startup = dlsym(handle, "srt_startup").map({ unsafeBitCast($0, to: srt_startup_t.self) }),
               let create  = dlsym(handle, "srt_create_socket").map({ unsafeBitCast($0, to: srt_create_socket_t.self) }),
@@ -42,18 +55,16 @@ private final class SRTRuntime {
               let snd     = dlsym(handle, "srt_send").map({ unsafeBitCast($0, to: srt_send_t.self) }),
               let cls     = dlsym(handle, "srt_close").map({ unsafeBitCast($0, to: srt_close_t.self) })
         else {
-            available = false
-            createSocket = { -1 }; connect = { _, _, _ in -1 }
-            send = { _, _, _ in -1 }; close = { _ in -1 }
             print("""
             [SRTOutput] libsrt not found — SRT output disabled. Install it with \
             `brew install srt` (or set AIRLIVE_LIBSRT to the dylib path).
             """)
-            return
+            return false
         }
-        _ = startup()
-        available = true
+        if !didStartup { _ = startup(); didStartup = true }   // srt_startup once per process
         createSocket = create; connect = conn; send = snd; close = cls
+        available = true
+        return true
     }
 
     private static func open() -> UnsafeMutableRawPointer? {
@@ -108,6 +119,19 @@ final class SRTOutput: VideoOutput {
         liveLock.unlock()
         if changed { DispatchQueue.main.async { [weak self] in self?.onConnectionChanged?() } }
     }
+
+    /// Card-visible failure (see VideoOutput.lastError).  Main-confined; reuses
+    /// `onConnectionChanged` as the re-render nudge so no extra plumbing is needed.
+    private(set) var lastError: String?
+    private func reportError(_ message: String?) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.lastError != message else { return }
+            self.lastError = message
+            self.onConnectionChanged?()
+        }
+    }
+
+    func clearError() { reportError(nil) }
 
     private let queue = DispatchQueue(label: "studio.airlive.bridge.srt", qos: .userInitiated)
     private var sock: Int32 = SRT_INVALID_SOCK
@@ -203,18 +227,24 @@ final class SRTOutput: VideoOutput {
     }
 
     private func connect(to dest: String) {
-        guard SRTRuntime.shared.available else { isLive = false; return }
+        guard SRTRuntime.shared.loadIfNeeded() else {   // RETRIES the dlopen — picks up libsrt installed since launch
+            reportError("SRT runtime isn't available — install it with `brew install srt`")
+            isLive = false; return
+        }
         guard let (host, port) = Self.parse(dest) else {
             if lastInvalidDestLogged != dest {   // once per distinct value, not per retry
                 lastInvalidDestLogged = dest
                 print("[SRTOutput \(label)] ❌ invalid destination '\(dest)' — expected srt://host:port")
             }
+            reportError("Invalid destination — expected srt://host:port")
             isLive = false; return
         }
         lastInvalidDestLogged = nil
         let s = SRTRuntime.shared.createSocket()
         guard s != SRT_INVALID_SOCK else {
-            print("[SRTOutput \(label)] ❌ create_socket failed"); isLive = false; return
+            print("[SRTOutput \(label)] ❌ create_socket failed")
+            reportError("SRT socket creation failed")
+            isLive = false; return
         }
 
         var hints = addrinfo(ai_flags: 0, ai_family: AF_INET, ai_socktype: SOCK_DGRAM,
@@ -222,6 +252,7 @@ final class SRTOutput: VideoOutput {
         var res: UnsafeMutablePointer<addrinfo>?
         guard getaddrinfo(host, String(port), &hints, &res) == 0, let info = res else {
             print("[SRTOutput \(label)] ❌ can't resolve \(host)")
+            reportError("Can't resolve “\(host)”")
             _ = SRTRuntime.shared.close(s); isLive = false; return
         }
         defer { freeaddrinfo(res) }
@@ -229,11 +260,13 @@ final class SRTOutput: VideoOutput {
         let rc = SRTRuntime.shared.connect(s, info.pointee.ai_addr, Int32(info.pointee.ai_addrlen))
         guard rc != -1 else {
             print("[SRTOutput \(label)] ❌ connect to \(host):\(port) failed")
+            reportError("\(host):\(port) isn't answering")
             _ = SRTRuntime.shared.close(s); isLive = false; return
         }
         sock = s
         isLive = true
         setConnected(true)
+        reportError(nil)   // connected — clear any stale failure
         print("[SRTOutput \(label)] ✅ SRT caller connected to \(host):\(port)")
         DispatchQueue.main.async { [weak self] in self?.onReady?() }   // model forces one IDR
     }

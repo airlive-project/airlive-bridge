@@ -91,6 +91,12 @@ final class BridgeChannel: ObservableObject, Identifiable {
     /// a fixed 16:9 box.  Updated only when it actually changes (never per frame).
     @Published var displayAspect: Double = 16.0 / 9.0
     private var _lastAspect: Double = 16.0 / 9.0
+    /// Guards the `_lastAspect` compare-and-set.  `updateDisplayAspect` runs off main
+    /// on the receiver's present thread; a combined "Screen Mirroring + Control" channel
+    /// has TWO receivers (AirPlay video + control-side ARLV) that can both call
+    /// `publishFrame`, so the read-compare-write must be atomic — same reasoning as
+    /// `rotationLock` above.
+    private let aspectLock = NSLock()
 
     /// Receiver entry point: store the latest frame and notify mirrors.  Called on
     /// the receiver's present thread (OFF main) so a busy main thread can never
@@ -109,14 +115,55 @@ final class BridgeChannel: ObservableObject, Identifiable {
         let h = Double(CVPixelBufferGetHeight(buffer))
         guard w > 0, h > 0 else { return }
         let aspect = (outputRotation % 180 != 0) ? h / w : w / h
-        if abs(aspect - _lastAspect) < 0.001 { return }
+        aspectLock.lock()
+        if abs(aspect - _lastAspect) < 0.001 { aspectLock.unlock(); return }
         _lastAspect = aspect
+        aspectLock.unlock()
         DispatchQueue.main.async { [weak self] in self?.displayAspect = aspect }
     }
 
     /// The camera's last-reported state (ISO, lens, fps, …).  Drives the remote
     /// control UI.  nil until the first `.control` snapshot arrives.
-    @Published var remote: StateSnapshot?
+    @Published var remote: StateSnapshot? {
+        didSet {
+            // STICKY optimistic-lens reconcile.  Keep showing the operator's pick until EITHER the
+            // camera confirms it, OR the camera moves to a genuinely DIFFERENT lens (changed on the
+            // phone).  Do NOT drop it on a mere stale readback: some cameras keep reporting the old
+            // lens for a beat after a switch, so a timeout-revert lit the OLD tile again even though
+            // the video already changed — the "clicked 0.5×, top still shows 1×" bug.  No timeout.
+            guard let p = pendingLens else { return }
+            let newLens = remote?.lens
+            if newLens == p {
+                pendingLens = nil                 // confirmed → the camera drives the highlight again
+            } else if newLens != oldValue?.lens {
+                pendingLens = nil                 // camera jumped to a DIFFERENT lens (phone) → follow it
+            }
+            // else: lens unchanged and ≠ our pick → command still in flight → keep showing the pick
+        }
+    }
+
+    // ── Peer protocol caps (from the camera's hello) ─────────────────────────────
+    /// Capability strings the connected camera declared in its `hello` (e.g. "lut",
+    /// "stabilization", "colorSpace", "focusPoint", "exposurePoint").  New-surface pickers gate
+    /// on these — no flag (legacy camera) → that picker is hidden.  Cleared on disconnect.
+    @Published var peerCaps: [String] = []
+    func hasCap(_ c: String) -> Bool { peerCaps.contains(c) }
+
+    // ── Optimistic lens selection ─────────────────────────────────────────────────
+    /// Set the INSTANT the operator taps a lens tile (or hits its shortcut) so the blue highlight
+    /// moves immediately on the Mac — instead of waiting the network round-trip for the camera's
+    /// confirming `StateSnapshot`.  Sticky (see `remote.didSet`): the pick holds until the camera
+    /// confirms it or genuinely switches to another lens.  nil → `remote.lens` drives the highlight.
+    @Published var pendingLens: String?
+
+    /// The lens the UI highlights: the optimistic pick if one is in flight, else the camera truth.
+    var selectedLens: String? { pendingLens ?? remote?.lens }
+
+    /// Tap/shortcut a lens: highlight it instantly (optimistic) AND send the command.
+    func selectLens(_ label: String) {
+        pendingLens = label
+        send(.setLens(label))
+    }
 
     // ── Delivery-mode / operator-gate accessors (read off `remote`; the camera is
     //    the source of truth — see docs/DELIVERY-MODE-DESIGN.md).  A nil snapshot

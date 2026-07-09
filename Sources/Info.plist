@@ -21,7 +21,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
 	<key>NSBonjourServices</key>
@@ -35,5 +35,11 @@
 	<string>Airlive Bridge captures video from connected HDMI / USB capture devices.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Airlive Bridge discovers Airlive Camera streams and publishes NDI on your local network.</string>
+	<key>SUEnableAutomaticChecks</key>
+	<false/>
+	<key>SUFeedURL</key>
+	<string>https://airlive.studio/bridge/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>REPLACE_WITH_generate_keys_OUTPUT=</string>
 </dict>
 </plist>

@@ -85,6 +85,12 @@ public final class PacketParser {
 
     public init() {}
 
+    /// Drop any buffered bytes.  MUST be called when the connection feeding the
+    /// parser changes (commit / takeover): the buffer is per-stream state, and
+    /// leftover bytes from a dead connection would be parsed as a prefix of the
+    /// next connection's stream and desync its framing.
+    public func reset() { buffer.removeAll(keepingCapacity: true) }
+
     public func append(_ data: Data) -> [AirlivePacket] {
         buffer.append(data)
         var packets: [AirlivePacket] = []
@@ -101,18 +107,27 @@ public final class PacketParser {
             // (drop a byte) rather than mis-framing its payload as ours.
             guard h[4] == AirlivePacket.protocolVersion else { buffer.removeFirst(); continue }
 
+            let length = Int(UInt32(h[6]) << 24 | UInt32(h[7]) << 16 | UInt32(h[8]) << 8 | UInt32(h[9]))
+            // Reject an absurd length (corrupt/desynced header) — never wait forever for
+            // bytes that aren't coming.  Checked BEFORE the type so the unknown-type skip
+            // below can only trust a SANE total.
+            guard length <= AirlivePacket.maxPayloadLength else { buffer.removeFirst(); continue }
+            let total = AirlivePacket.headerSize + length
+
             guard let type = AirlivePacket.PacketType(rawValue: h[5]) else {
-                buffer.removeFirst(); continue
+                // FORWARD-COMPAT (PROTOCOL-COMPAT-SPEC §3): valid magic+version + sane length
+                // but a packet type from a NEWER peer → skip the WHOLE packet, not one byte.
+                // One-byte resync walked the parser THROUGH the unknown packet's payload, where
+                // any embedded "ARLV" bytes mis-framed as packets.  New packet types stay gated
+                // on the hello caps (never sent to peers that didn't advertise them); this skip
+                // degrades a gating bug to "ignored", not "corrupted stream".
+                if buffer.count >= total { buffer.removeFirst(total); continue }
+                break   // whole packet not here yet — skip it on a later append
             }
 
-            let length = Int(UInt32(h[6]) << 24 | UInt32(h[7]) << 16 | UInt32(h[8]) << 8 | UInt32(h[9]))
-            // Reject an absurd length (corrupt/desynced header) — never wait
-            // forever for bytes that aren't coming.
-            guard length <= AirlivePacket.maxPayloadLength else { buffer.removeFirst(); continue }
             let timestamp = Int64(h[10]) << 56 | Int64(h[11]) << 48 | Int64(h[12]) << 40 | Int64(h[13]) << 32
                           | Int64(h[14]) << 24 | Int64(h[15]) << 16 | Int64(h[16]) << 8  | Int64(h[17])
 
-            let total = AirlivePacket.headerSize + length
             guard buffer.count >= total else { break }
 
             let s = buffer.index(buffer.startIndex, offsetBy: AirlivePacket.headerSize)
@@ -122,7 +137,65 @@ public final class PacketParser {
             buffer.removeFirst(total)
         }
 
+        // Invariant backstop (parity with the OBS plugin + AirliveCore parser).  With the loop
+        // above this is UNREACHABLE: every `break` requires buffer.count < total ≤ header +
+        // maxPayloadLength < 2×max.  It exists so a FUTURE edit that accidentally lets the buffer
+        // grow degrades to a loud drop-and-resync instead of holding tens of MB.
+        if buffer.count > 2 * AirlivePacket.maxPayloadLength {
+            print("[PacketParser] ⚠️ buffer exceeded \(2 * AirlivePacket.maxPayloadLength) bytes without a parsable packet — dropping buffered data to resync (invariant breach — investigate)")
+            buffer.removeAll(keepingCapacity: false)
+        }
+
         return packets
+    }
+}
+
+// MARK: - Protocol generation (hello)
+
+/// The PROTOCOL GENERATION ladder — see docs/PROTOCOL-COMPAT-SPEC.md.  Distinct from
+/// `AirlivePacket.protocolVersion` (the FRAMING epoch, which never bumps): the generation
+/// counts additive protocol surface — +1 per release that adds verbs/fields/types/TXT keys.
+/// Used ONLY for the update-prompt UX (`peer.proto < my.minProto` → "please update"); feature
+/// availability is decided by hello `caps`, never by comparing these.  MIRRORS AirliveCore.
+public enum AirliveProto {
+    /// Generation this build speaks.  1 = everything pre-hello; 2 = hello.
+    public static let generation = 2
+    /// Oldest peer generation this build fully supports.  Starts at 1 and stays 1 indefinitely
+    /// (the skew promise); raising it is a DEPRECATION needing the spec's announced window.
+    public static let minGeneration = 1
+}
+
+/// One-shot per-connection introduction (PROTOCOL-COMPAT-SPEC §2): who the peer is, which
+/// protocol generation it speaks, and — the part that matters — which FEATURES (`caps`) it
+/// supports.  New protocol surface is used only when BOTH sides advertised the cap; the version
+/// ints exist only for the update-prompt UX.  A peer that never sends one is a LEGACY build:
+/// `proto=1, caps=[]`.  MIRRORS AirliveCore byte-for-byte.
+public struct HelloMessage: Codable, Equatable, Sendable {
+    public var app: String = ""            // "camera" | "studio" | "bridge" | "obs"
+    public var appVersion: String = ""     // display/logs ONLY — never compared
+    public var proto: Int = 1
+    public var minProto: Int = 1
+    public var caps: [String] = []
+
+    public init(app: String, appVersion: String,
+                proto: Int = AirliveProto.generation,
+                minProto: Int = AirliveProto.minGeneration,
+                caps: [String] = []) {
+        self.app = app
+        self.appVersion = appVersion
+        self.proto = proto
+        self.minProto = minProto
+        self.caps = caps
+    }
+
+    // Tolerant reader — any subset of keys decodes to defaults (a sparse hello never throws).
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        app        = try c.decodeIfPresent(String.self,   forKey: .app) ?? ""
+        appVersion = try c.decodeIfPresent(String.self,   forKey: .appVersion) ?? ""
+        proto      = try c.decodeIfPresent(Int.self,      forKey: .proto) ?? 1
+        minProto   = try c.decodeIfPresent(Int.self,      forKey: .minProto) ?? 1
+        caps       = try c.decodeIfPresent([String].self, forKey: .caps) ?? []
     }
 }
 
@@ -142,18 +215,48 @@ public struct DeviceCapabilities: Codable, Equatable, Sendable {
     public var wbTintMin: Float = -150
     public var wbTintMax: Float = 150
     /// fps options for the CURRENT (codec × colourSpace × resolution), e.g. [24, 25, 30, 50, 60].
+    /// NOTE: [Int] collapses NTSC fractional rates (29.97→30, 23.98→24, 59.94→60); a receiver
+    /// that must offer exact NTSC reads `supportedFpsExact` instead.
     public var supportedFps: [Int] = []
-    /// Resolutions THIS device supports for the current codec+colourSpace ("HD" / "4K").
+    /// Resolutions THIS device supports for the current codec+colourSpace ("1080" / "4K").
     public var resolutions: [String] = []
     /// Codecs available in the current colour space ("H.264" / "HEVC" / "ProRes 422").
     public var codecs: [String] = []
+    /// EV-bias (exposure-compensation) bounds, device-read.  Fallback ±2.
+    public var evBiasMin: Float = -2
+    public var evBiasMax: Float = 2
+    /// EXACT fps options as Float, including NTSC 23.98 / 29.97 / 59.94 that `supportedFps`
+    /// ([Int]) rounds away.  A capability-driven remote picker needing broadcast NTSC reads
+    /// this; empty from an older sender.
+    public var supportedFpsExact: [Float] = []
+    /// LUT names the operator marked for QUICK ACCESS (the eye-toggled subset the on-device menu
+    /// shows — NOT the full imported library), so a remote picker mirrors what the operator
+    /// curated.  The `setLUT` verb already applies any name; this is the list to pick from.
+    /// Empty from an older sender.
+    public var availableLuts: [String] = []
+    /// Max zoom factor of the active format (`videoMaxZoomFactor`), so a remote zoom ladder
+    /// matches THIS device instead of a guessed 1–10.  `0` = not provided (older sender) →
+    /// the receiver uses its own fallback.
+    public var zoomMax: Float = 0
+    /// Stabilization levels pickable remotely — "Standard" / "High".  Never "Off": disabling
+    /// stabilization while `activeFormat` changes wedges the iOS 26 / iPhone 15+ daemon
+    /// (-17281).  Empty from an older sender.
+    public var stabilizations: [String] = []
+    /// Colour spaces pickable at the CURRENT codec+resolution (device-read, the same list the
+    /// camera's own Settings picker shows) — exact rawValues "Rec.709" / "P3 D65" /
+    /// "Rec.2020 HLG" / "Apple Log" for `setColorSpace`.  Empty from an older sender.
+    public var colorSpaces: [String] = []
 
     public init(isoMin: Float = 25, isoMax: Float = 3200,
                 shutterMinDenom: Float = 24, shutterMaxDenom: Float = 8000,
                 wbTempMin: Float = 2000, wbTempMax: Float = 10000,
                 wbTintMin: Float = -150, wbTintMax: Float = 150,
                 supportedFps: [Int] = [], resolutions: [String] = [],
-                codecs: [String] = []) {
+                codecs: [String] = [],
+                evBiasMin: Float = -2, evBiasMax: Float = 2,
+                supportedFpsExact: [Float] = [],
+                availableLuts: [String] = [], zoomMax: Float = 0,
+                stabilizations: [String] = [], colorSpaces: [String] = []) {
         self.isoMin = isoMin; self.isoMax = isoMax
         self.shutterMinDenom = shutterMinDenom; self.shutterMaxDenom = shutterMaxDenom
         self.wbTempMin = wbTempMin; self.wbTempMax = wbTempMax
@@ -161,6 +264,12 @@ public struct DeviceCapabilities: Codable, Equatable, Sendable {
         self.supportedFps = supportedFps
         self.resolutions = resolutions
         self.codecs = codecs
+        self.evBiasMin = evBiasMin; self.evBiasMax = evBiasMax
+        self.supportedFpsExact = supportedFpsExact
+        self.availableLuts = availableLuts
+        self.zoomMax = zoomMax
+        self.stabilizations = stabilizations
+        self.colorSpaces = colorSpaces
     }
 
     // Custom decoder so a PARTIAL `capabilities` object (any subset of keys, from an older/newer
@@ -180,6 +289,13 @@ public struct DeviceCapabilities: Codable, Equatable, Sendable {
         supportedFps    = try c.decodeIfPresent([Int].self,    forKey: .supportedFps) ?? []
         resolutions     = try c.decodeIfPresent([String].self, forKey: .resolutions) ?? []
         codecs          = try c.decodeIfPresent([String].self, forKey: .codecs) ?? []
+        evBiasMin       = try c.decodeIfPresent(Float.self,    forKey: .evBiasMin) ?? -2
+        evBiasMax       = try c.decodeIfPresent(Float.self,    forKey: .evBiasMax) ?? 2
+        supportedFpsExact = try c.decodeIfPresent([Float].self, forKey: .supportedFpsExact) ?? []
+        availableLuts   = try c.decodeIfPresent([String].self, forKey: .availableLuts) ?? []
+        zoomMax         = try c.decodeIfPresent(Float.self,   forKey: .zoomMax) ?? 0
+        stabilizations  = try c.decodeIfPresent([String].self, forKey: .stabilizations) ?? []
+        colorSpaces     = try c.decodeIfPresent([String].self, forKey: .colorSpaces) ?? []
     }
 }
 
@@ -201,7 +317,8 @@ public struct StateSnapshot: Codable, Equatable, Sendable {
     public var exposureAuto: Bool
     public var whiteBalanceAuto: Bool
     public var resolution: String          // "1080" / "4K"
-    public var colorSpace: String          // "Apple Log" / "Rec.709" / "HLG BT.2020" / "P3 D65"
+    public var colorSpace: String          // EXACT raw: "Apple Log" / "Rec.709" / "P3 D65" / "Rec.2020 HLG"
+                                           // (NOT "HLG BT.2020" — old lying comment; camera sends ColorSpaceMode.rawValue)
     public var lutName: String?
     public var lutEnabled: Bool
     public var isoCompensation: Bool
@@ -243,6 +360,16 @@ public struct StateSnapshot: Codable, Equatable, Sendable {
     /// hardcoded per-model tables.  Additive: a STORED default keeps an OLD sender (no
     /// `capabilities` key) decodable.  See docs/REMOTE-CONTROL-CAPABILITIES-HANDOFF.md.
     public var capabilities: DeviceCapabilities = .init()
+    /// Current record-master codec ("H.264" / "HEVC" / "ProRes 422") — additive so Bridge can
+    /// highlight / round-trip the ACTIVE codec, not just the OPTIONS in `capabilities.codecs`.
+    /// "" from an older sender (decodeIfPresent below).
+    public var codec: String = ""
+    /// Current exposure-compensation (EV bias) applied to auto-exposure; bounds are in
+    /// `capabilities.evBiasMin/Max`.  Additive; 0 from an older sender.
+    public var exposureBias: Float = 0
+    /// Current video-stabilization level ("Standard" / "High") — readback so a remote controller
+    /// shows the active mode; options in `capabilities.stabilizations`.  "" from an older sender.
+    public var stabilization: String = ""
 
     public init(iso: Float, shutterDenom: Float, wbKelvin: Float, tint: Float,
                 lens: String?, zoom: Float, focusAuto: Bool, focusPosition: Float,
@@ -253,7 +380,9 @@ public struct StateSnapshot: Codable, Equatable, Sendable {
                 outputRotation: Int = 0,
                 videoActive: Bool = true, deviceName: String = "",
                 remoteControlAllowed: Bool = true, tallyEnabled: Bool = true,
-                capabilities: DeviceCapabilities = .init()) {
+                capabilities: DeviceCapabilities = .init(),
+                codec: String = "", exposureBias: Float = 0,
+                stabilization: String = "") {
         self.iso = iso
         self.shutterDenom = shutterDenom
         self.wbKelvin = wbKelvin
@@ -278,6 +407,9 @@ public struct StateSnapshot: Codable, Equatable, Sendable {
         self.remoteControlAllowed = remoteControlAllowed
         self.tallyEnabled = tallyEnabled
         self.capabilities = capabilities
+        self.codec = codec
+        self.exposureBias = exposureBias
+        self.stabilization = stabilization
     }
 
     // Custom decoder — a STORED DEFAULT is NOT enough: Swift's synthesized Decodable calls
@@ -311,6 +443,9 @@ public struct StateSnapshot: Codable, Equatable, Sendable {
         remoteControlAllowed = try c.decodeIfPresent(Bool.self,   forKey: .remoteControlAllowed) ?? true
         tallyEnabled         = try c.decodeIfPresent(Bool.self,   forKey: .tallyEnabled) ?? true
         capabilities         = try c.decodeIfPresent(DeviceCapabilities.self, forKey: .capabilities) ?? .init()
+        codec                = try c.decodeIfPresent(String.self, forKey: .codec) ?? ""
+        exposureBias         = try c.decodeIfPresent(Float.self,  forKey: .exposureBias) ?? 0
+        stabilization        = try c.decodeIfPresent(String.self, forKey: .stabilization) ?? ""
     }
 
     /// The human label for this control link: the operator-set `deviceName`, falling
@@ -345,6 +480,14 @@ public struct ControlMessage: Codable, Sendable {
     public var stringValue: String?
     public var boolValue: Bool?
     public var lutName: String?
+    /// One-shot per-connection introduction (type == "hello") — additive: old peers decode a
+    /// message with this key fine (unknown JSON keys ignored) and hit `default: break`.
+    public var hello: HelloMessage?
+    /// Normalised point payload for tap-to-focus / tap-to-expose verbs (`setFocusPoint` /
+    /// `setExposurePoint`) — additive, same old-peer tolerance as `hello`.  See the
+    /// constructors for the coordinate space.
+    public var pointX: Float?
+    public var pointY: Float?
 
     public init(type: String,
                 state: StateSnapshot? = nil,
@@ -352,7 +495,10 @@ public struct ControlMessage: Codable, Sendable {
                 intValue: Int? = nil,
                 stringValue: String? = nil,
                 boolValue: Bool? = nil,
-                lutName: String? = nil) {
+                lutName: String? = nil,
+                hello: HelloMessage? = nil,
+                pointX: Float? = nil,
+                pointY: Float? = nil) {
         self.type = type
         self.state = state
         self.floatValue = floatValue
@@ -360,12 +506,25 @@ public struct ControlMessage: Codable, Sendable {
         self.stringValue = stringValue
         self.boolValue = boolValue
         self.lutName = lutName
+        self.hello = hello
+        self.pointX = pointX
+        self.pointY = pointY
     }
 
     // MARK: Convenience constructors
 
     public static func state(_ s: StateSnapshot) -> ControlMessage {
         ControlMessage(type: "state", state: s)
+    }
+    /// One-shot introduction, first control message of a connection (receiver → camera right
+    /// after accept/auth).  MIRRORS AirliveCore.
+    public static func hello(_ h: HelloMessage) -> ControlMessage {
+        ControlMessage(type: "hello", hello: h)
+    }
+    /// Exposure compensation (EV bias) for auto-exposure — biases the AE target brighter/darker.
+    /// Bounds are advertised in `capabilities.evBiasMin/Max`.
+    public static func setExposureBias(_ v: Float) -> ControlMessage {
+        ControlMessage(type: "setExposureBias", floatValue: v)
     }
     public static func setISO(_ v: Float) -> ControlMessage {
         ControlMessage(type: "setISO", floatValue: v)
@@ -394,6 +553,11 @@ public struct ControlMessage: Codable, Sendable {
     public static func setFPS(_ v: Int) -> ControlMessage {
         ControlMessage(type: "setFPS", intValue: v)
     }
+    /// Fractional NTSC rates (23.98 / 29.97 / 59.94) ride `floatValue` — the camera's "setFPS"
+    /// handler reads floatValue FIRST and falls back to intValue for integer rates.
+    public static func setFPS(exact v: Float) -> ControlMessage {
+        ControlMessage(type: "setFPS", floatValue: v)
+    }
     public static func setExposureAuto(_ v: Bool) -> ControlMessage {
         ControlMessage(type: "setExposureAuto", boolValue: v)
     }
@@ -408,6 +572,33 @@ public struct ControlMessage: Codable, Sendable {
     }
     public static func setIsoCompensation(_ v: Bool) -> ControlMessage {
         ControlMessage(type: "setIsoCompensation", boolValue: v)
+    }
+    /// Video-stabilization level — "Standard" or "High" (NOT "Cinematic"/"Off"; "High" maps to
+    /// .cinematic camera-side, unknown strings are silently ignored).  A runtime connection-
+    /// property change on the camera (no format reconfigure) → safe mid-take.
+    public static func setStabilization(_ v: String) -> ControlMessage {
+        ControlMessage(type: "setStabilization", stringValue: v)
+    }
+    /// Capture colour space — EXACT `StateSnapshot.colorSpace` rawValues: "Rec.709" / "P3 D65" /
+    /// "Rec.2020 HLG" / "Apple Log" (options in `capabilities.colorSpaces`).  ⚠️ Full device
+    /// reconfigure on the camera (the -17281-guarded path) — REFUSED mid-take like
+    /// `setResolution`/`setFPS`; the camera re-broadcasts unchanged state → UI must snap back.
+    public static func setColorSpace(_ v: String) -> ControlMessage {
+        ControlMessage(type: "setColorSpace", stringValue: v)
+    }
+    /// Tap-to-focus at a normalised image point.  COORDINATE SPACE: Apple's
+    /// `focusPointOfInterest` convention — (0,0) top-left … (1,1) bottom-right of the SENSOR
+    /// frame in its native LANDSCAPE orientation (the same frame the wire ships;
+    /// `outputRotation` is presentation-only, so a receiver showing a rotated feed must map its
+    /// tap back through that rotation BEFORE sending).  Camera clamps to 0…1; focus retargets
+    /// and stays auto, exposure retargets ONLY while exposure is auto (local-tap semantics).
+    public static func setFocusPoint(x: Float, y: Float) -> ControlMessage {
+        ControlMessage(type: "setFocusPoint", pointX: x, pointY: y)
+    }
+    /// Tap-to-expose (AE point of interest) — same coordinate space and clamping as
+    /// `setFocusPoint`.  REFUSED while exposure is MANUAL (camera re-syncs state).
+    public static func setExposurePoint(x: Float, y: Float) -> ControlMessage {
+        ControlMessage(type: "setExposurePoint", pointX: x, pointY: y)
     }
     /// Tally cue for the iPhone's on-screen "you are LIVE / staged" bar.
     /// Values: `"none"`, `"preview"`, `"program"` — iPhone renders a

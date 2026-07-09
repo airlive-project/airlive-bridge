@@ -151,6 +151,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
     private var decompressionFormat: CMVideoFormatDescription?
     private var lastDecodeErrorLog: TimeInterval = 0
     private var didLogFirstFrame = false // one-shot preview diagnostic
+    private var didLogFirstState = false // one-shot control-state diagnostic (lens list arrival)
 
     // ── Receiver-password auth (challenge-response) ───────────────────────
     // Queue-confined (every field below is read/written only on `queue`).  See
@@ -164,6 +165,12 @@ final class BridgeChannelReceiver: ChannelReceiver {
     /// successful-verify branch (or immediately when auth is off).  The "challenge
     /// sent, not yet verified" boolean of the spec is `challengeNonce != nil`.
     private var authorized = false
+    /// The camera's one-shot `hello` (PROTOCOL-COMPAT-SPEC §2).  nil = legacy peer
+    /// (`proto=1, caps=[]`) — a camera that predates the hello verb never sends one.
+    /// Snapshotted ONCE per connection (same discipline as `wireIsLive`); cleared on
+    /// disconnect.  Gate any NEW verb/packet type on `peerCaps(...)`, never on version
+    /// compares — the ints exist only for the update-prompt UX.  Queue-confined.
+    private var peerHello: HelloMessage?
     /// The single outstanding challenge nonce; non-nil ⇒ awaiting `authResponse`.
     /// Consumed (niled) on verify so a nonce is strictly single-use.
     private var challengeNonce: Data?
@@ -415,7 +422,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
     /// Studio/OBS ones; everything else groups + identifies exactly as Studio.
     private func txtRecord(occupied: Bool) -> NWTXTRecord {
         var r = NWTXTRecord()
-        r["v"]    = "1"
+        r["v"]    = "1"                                  // TXT-format version (txtvers) — stays 1
         r["role"] = "bridge"
         r["did"]  = identity.did
         r["dev"]  = identity.dev
@@ -423,6 +430,8 @@ final class BridgeChannelReceiver: ChannelReceiver {
         r["src"]  = src
         r["ord"]  = String(order)   // operator's Bridge order → iPhone sorts by this
         r["busy"] = occupied ? "1" : "0"
+        r["pv"]   = String(AirliveProto.generation)      // protocol generation — the camera can
+        r["mpv"]  = String(AirliveProto.minGeneration)   // annotate/grey this row BEFORE connecting
         return r
     }
 
@@ -535,6 +544,9 @@ final class BridgeChannelReceiver: ChannelReceiver {
             other.cancel()
         }
         pendingConnections.removeAll()
+        parser.reset()                            // fresh stream → drop any bytes a prior
+                                                  // or superseded connection left buffered
+                                                  // (desync guard; the parser is per-stream)
         receive(from: conn)
         // Auth ON → challenge first; the slot is NOT marked busy and the channel
         // is NOT surfaced as connected until the camera authorizes (STREAM-AUTH
@@ -580,18 +592,20 @@ final class BridgeChannelReceiver: ChannelReceiver {
 
     private func receive(from conn: NWConnection) {
         conn.receive(minimumIncompleteLength: 1, maximumLength: 131_072) { [weak self, weak conn] data, _, isDone, error in
-            guard let self else { return }
-            if let data, let conn {
+            guard let self, let conn else { return }
+            // Identity guard FIRST — before the shared, stateful PacketParser is ever
+            // touched.  Only the COMMITTED connection may feed it: a stale dual-stack
+            // loser or a superseded (taken-over) connection can have an in-flight
+            // receive land AFTER a new connection committed; appending its bytes would
+            // corrupt the new stream's framing.  (The identity check used to live only
+            // in handle() — too late: parser.append had already eaten the bytes.)
+            guard conn === self.connection else { return }
+            if let data {
                 for packet in self.parser.append(data) { self.handle(packet, from: conn) }
             }
             if !isDone && error == nil {
-                if let conn { self.receive(from: conn) }
+                self.receive(from: conn)
             } else {
-                // Only trip disconnect if THIS receive belonged to the CURRENT
-                // connection — a stale dual-stack loser's in-flight receive can
-                // fire isDone=true after the winner went `.ready`, and without
-                // the identity guard it would flush the live stream.
-                guard let conn, conn === self.connection else { return }
                 let reason = error.map { "receive error \($0)" } ?? "peer closed (FIN)"
                 self.handleDisconnect(conn, reason: reason)
             }
@@ -688,6 +702,14 @@ final class BridgeChannelReceiver: ChannelReceiver {
         cancelAuthStallTimer()
         updateOccupancyAdvertisement(occupied: true)
         publishConnected(true)
+        // One-shot hello — FIRST control message of the connection (PROTOCOL-COMPAT-SPEC
+        // §2: receiver sends hello immediately after accept/auth).  An old camera hits
+        // `default: break` and ignores it — harmless.  caps = the protocol surface this
+        // build actually implements; new verbs/types are gated on the PEER's caps.
+        send(.hello(HelloMessage(
+            app: "bridge",
+            appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
+            caps: ["auth", "deliveryMode", "rotation", "capabilities", "tally", "updateRequired"])))
         // Set the delivery mode EXPLICITLY on every ARLV connect, so the camera's sticky
         // `lastDeliveryControlOnly` can't leak across channels with different intent:
         //   • combined channel's control side → control-only (video comes via AirPlay);
@@ -713,11 +735,24 @@ final class BridgeChannelReceiver: ChannelReceiver {
     /// per-packet main hop is just a pointer handoff.
     private func forwardProgramFormat(_ payload: Data) {
         guard isProgramSource else { return }   // H1: no main hop for a non-program channel
-        DispatchQueue.main.async { [weak self] in self?.channel?.onProgramFormat?(payload) }
+        forwardDelayed { [weak self] in self?.channel?.onProgramFormat?(payload) }
     }
     private func forwardProgramSample(_ payload: Data, _ timestampMicros: Int64) {
         guard isProgramSource else { return }   // H1: no main hop for a non-program channel
-        DispatchQueue.main.async { [weak self] in self?.channel?.onProgramSample?(payload, timestampMicros) }
+        forwardDelayed { [weak self] in self?.channel?.onProgramSample?(payload, timestampMicros) }
+    }
+    /// Hand a passthrough payload (raw SPS/PPS or H.264) to the main-thread relay taps
+    /// (OBS / RTSP / SRT), DELAYED by the SAME `bufferSeconds` the decoded jitter ring
+    /// uses — so the passthrough outputs stay aligned with the preview + NDI/HDMI the
+    /// operator sees (the whole point of the per-channel delay, which previously only
+    /// reached the DECODED path).  bufferSeconds == 0 (the default "Lowest" preset with
+    /// no extra ms) → immediate delivery, so default latency to OBS is unchanged.  Order
+    /// is preserved (serial `queue`, constant delta); a mid-stream delay change can
+    /// briefly reorder until the next IDR — the same tolerance the decoded ring has.
+    private func forwardDelayed(_ body: @escaping () -> Void) {
+        let deliver = { DispatchQueue.main.async(execute: body) }
+        let d = bufferSeconds   // queue-confined; forward* callers run on `queue`
+        if d <= 0 { deliver() } else { queue.asyncAfter(deadline: .now() + d, execute: deliver) }
     }
 
     /// Reject this connection: send the failure result, then close gracefully so
@@ -750,6 +785,11 @@ final class BridgeChannelReceiver: ChannelReceiver {
         authorized = false
         challengeNonce = nil
         pendingFormatPayload = nil
+        peerHello = nil          // next connection re-introduces itself (or is legacy)
+        didLogFirstState = false // re-log the lens list on the next connection's first state
+        // Clear the channel-surfaced caps too: the NEXT camera may be a different (older) build,
+        // and stale flags would leave pickers visible for verbs it can't handle.
+        DispatchQueue.main.async { [weak self] in self?.channel?.peerCaps = [] }
         cancelAuthStallTimer()
     }
 
@@ -826,7 +866,31 @@ final class BridgeChannelReceiver: ChannelReceiver {
         guard let msg = ControlMessage.decode(from: payload) else { return }
         switch msg.type {
         case "state":
-            if let snap = msg.state { publishRemote(snap) }
+            if let snap = msg.state {
+                if !didLogFirstState {
+                    didLogFirstState = true
+                    print("[BridgeReceiver \(src)] 📷 first state — lenses=\(snap.availableLenses) lens=\(snap.lens ?? "-") fps=\(snap.fps) codec=\(snap.codec)")
+                }
+                publishRemote(snap)
+            }
+        case "hello":
+            // Camera's one-shot introduction (first control message, before the state
+            // snapshot).  Snapshot ONCE; ignore mid-connection re-hellos (spec §3).
+            guard peerHello == nil, let h = msg.hello else { break }
+            peerHello = h
+            // Surface the camera's caps on the channel (main-confined @Published) so the control
+            // panel can GATE new-surface pickers ("lut" / "stabilization" / "colorSpace" / …) —
+            // a legacy camera without the flag simply doesn't get that picker.
+            DispatchQueue.main.async { [weak self] in self?.channel?.peerCaps = h.caps }
+            print("[BridgeReceiver \(src)] 👋 hello: \(h.app) \(h.appVersion) proto=\(h.proto) minProto=\(h.minProto) caps=\(h.caps)")
+            // Update-prompt detection (spec §6) — evaluated ONCE at hello, loud log only
+            // for now (panel wired to Check-for-Updates later, per §7 rollout).
+            if h.proto < AirliveProto.minGeneration {
+                print("[BridgeReceiver \(src)] ⚠️ camera proto \(h.proto) < our minProto \(AirliveProto.minGeneration) — camera app needs an update")
+            }
+            if AirliveProto.generation < h.minProto {
+                print("[BridgeReceiver \(src)] ⚠️ our proto \(AirliveProto.generation) < camera minProto \(h.minProto) — THIS Bridge needs an update (Check for Updates…)")
+            }
         default:
             // Bridge is the COMMAND sender for set-verbs, not the receiver —
             // ignore unknown inbound control messages.
@@ -1012,9 +1076,21 @@ final class BridgeChannelReceiver: ChannelReceiver {
             }
             decompressionSession = nil
 
+            // Decode to NV12 (raw YCbCr) — same output the AirPlay decoder uses, so
+            // BOTH sources present through one identical display regime (NV12 +
+            // sRGB tags + sRGB window pin; see ingestDecoded).  Also skips VT's
+            // YUV→RGB conversion at decode (RGB output bakes a transfer curve into
+            // the pixels; NV12 keeps the wire's raw values for the zero-copy
+            // CALayer preview).  The pipeline already handles NV12 everywhere
+            // (AirPlay produces it); NDI's bgraBufferLocked converts on demand —
+            // if NDI-heavy sessions ever matter, measure that convert before
+            // switching anything.  (The 2026-07-06 overcooked wire itself was a
+            // CAMERA bake bug — receivers were innocent; see
+            // airlive/docs/WIRE-COLOR-RECEIVER-DIAGNOSIS.md.)
             let outputAttrs: [String: Any] = [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
                 kCVPixelBufferIOSurfacePropertiesKey as String: [:] as CFDictionary,
+                kCVPixelBufferMetalCompatibilityKey as String: true,
             ]
             var callback = VTDecompressionOutputCallbackRecord(
                 decompressionOutputCallback: { (refCon, _, status, _, imageBuffer, pts, _) in
@@ -1039,6 +1115,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
             }
             decompressionSession = newSession
             decompressionFormat  = format
+
             // Low-latency scheduling hint — bias VideoToolbox toward prompt decode (the AirPlay
             // decoder sets this too; the direct-wire ARLV path was missing it). Thermally near-neutral
             // on the Mac (a scheduler hint, adds no work), most useful at 5-camera scale.
@@ -1087,6 +1164,25 @@ final class BridgeChannelReceiver: ChannelReceiver {
     /// hop); buffered mode arms a one-shot.  Called on the VT decode-callback
     /// thread.
     private func ingestDecoded(_ buffer: CVPixelBuffer, playout: TimeInterval) {
+        // WYSIWYS presentation tags: stamp the decoded frame with the SAME colour
+        // regime the phone's monitor and the AirPlay path use — sRGB transfer,
+        // 709 primaries/matrix, sRGB CGColorSpace — so Core Animation composites
+        // the monitoring proxy AS-IS (paired with the sRGB window pin in
+        // MirrorVideoView).  This is presentation hygiene, not a value transform:
+        // the wire's VALUES are already exactly the operator's preview (the
+        // 2026-07-06 "overcooked wire" was a CAMERA bake bug — identity-LUT
+        // texel-center stretch — proven by a per-hop pixel probe; receivers were
+        // innocent.  Post-mortem: airlive/docs/WIRE-COLOR-RECEIVER-DIAGNOSIS.md).
+        // Zero per-pixel work — dictionary attachments only.  NDI is unaffected
+        // (it converts/copies pixels, tag-agnostic).
+        CVBufferSetAttachment(buffer, kCVImageBufferColorPrimariesKey,
+                              kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldPropagate)
+        CVBufferSetAttachment(buffer, kCVImageBufferTransferFunctionKey,
+                              kCVImageBufferTransferFunction_sRGB, .shouldPropagate)
+        CVBufferSetAttachment(buffer, kCVImageBufferYCbCrMatrixKey,
+                              kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate)
+        CVBufferSetAttachment(buffer, kCVImageBufferCGColorSpaceKey,
+                              CGColorSpace(name: CGColorSpace.sRGB)!, .shouldPropagate)
         pixelBufferLock.lock()
         frameRing.append((buffer, playout))
         if frameRing.count > maxRingFrames {
@@ -1153,13 +1249,16 @@ final class BridgeChannelReceiver: ChannelReceiver {
         let needGateFlip = !didFlipSignalGate
         if needGateFlip { didFlipSignalGate = true }
         guard isPgm || needGateFlip else { return }
+        let srcName = src                                 // captured on `queue`; `src` is
+                                                          // queue-confined — never read it
+                                                          // from the main hop below (race)
 
         DispatchQueue.main.async { [weak self] in
             guard let self, let channel = self.channel else { return }
             if needGateFlip {
                 if !self.didLogFirstFrame {
                     self.didLogFirstFrame = true
-                    print("[BridgeReceiver \(self.src)] ✅ first frame presented")
+                    print("[BridgeReceiver \(srcName)] ✅ first frame presented")
                 }
                 // Flip the published "no signal" gate on the first frame only (guarded —
                 // never a per-frame published write).

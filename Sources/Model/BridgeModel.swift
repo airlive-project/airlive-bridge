@@ -42,6 +42,7 @@ final class BridgeModel: ObservableObject {
         didSet { UserDefaults.standard.set(profileURL?.path, forKey: "bridge.profileURL") }
     }
 
+
     /// Currently-selected channel's id (drives the center zone), or nil when
     /// none is selected.  In Solo mode the selected camera IS the program source.
     @Published var selectedID: UUID? { didSet { if mode == .solo { routeProgram() } } }
@@ -191,8 +192,15 @@ final class BridgeModel: ObservableObject {
     private func pushBlackFrame() {
         guard let black = blackProgramFrame else { return }
         let now = DispatchTime.now().uptimeNanoseconds
-        feedProgram(black, timeNs: now)            // NDI (decoded frames)
-        programEncoder.encode(black, timeNs: now)  // OBS/RTSP/SRT (H.264)
+        feedProgram(black, timeNs: now)            // NDI/HDMI — isLive-gated inside (no-op when none live)
+        // Thermal: the 1080p hardware H.264 encode is the expensive part — run it ONLY
+        // when a passthrough consumer (connected OBS / PLAYING RTSP / connected SRT) is
+        // actually there.  An idle Bridge (no outputs, OBS not connected) must not burn a
+        // 30 fps encode for nobody (CLAUDE.md "no work for nobody").  Checked per tick, so
+        // it starts automatically the moment a consumer connects — no re-arm needed.
+        if hasLivePassthroughConsumer() {
+            programEncoder.encode(black, timeNs: now)  // OBS/RTSP/SRT (H.264)
+        }
     }
 
     /// Clear every channel's tally (UI + the camera's LED) — used when leaving multiview, so a
@@ -214,9 +222,11 @@ final class BridgeModel: ObservableObject {
             guard let self, let channel else { return }
             self.handleConnectivityChange(channel)
         }
-        channel.objectWillChange
+        // Keyed by channel id (NOT stored in the grow-forever set): the entry dies
+        // with the channel in removeChannel / the profile teardown, so a long session
+        // of add/remove cycles can't accumulate dead subscriptions.
+        channelAutosaveSubs[channel.id] = channel.objectWillChange
             .sink { [weak self] _ in self?.scheduleAutosave() }
-            .store(in: &autosaveCancellables)
     }
 
     /// One-shot request to take the detached Multiview Wall window fullscreen (set by
@@ -278,7 +288,7 @@ final class BridgeModel: ObservableObject {
         guard let channel = target,
               let lenses = channel.remote?.availableLenses,
               index >= 0, index < lenses.count else { return }
-        channel.send(.setLens(lenses[index]))
+        channel.selectLens(lenses[index])   // optimistic — highlight moves instantly, keyboard too
     }
 
     // MARK: - Program bus (the single output path)
@@ -305,6 +315,7 @@ final class BridgeModel: ObservableObject {
         let defaults: [VideoOutput] = [
             AirliveRelayOutput(label: OutputKind.obs.displayName),   // OBS Plugin pinned at the TOP
             NDIOutput(label: OutputKind.ndi.displayName),
+            HDMIOutput(label: OutputKind.hdmi.displayName),
             RTSPOutput(label: OutputKind.rtsp.displayName, port: 8554),
             SRTOutput(label: OutputKind.srt.displayName),
         ]
@@ -335,6 +346,13 @@ final class BridgeModel: ObservableObject {
         }
         if let rtsp = output as? RTSPOutput {
             rtsp.onPlay = { [weak self] in self?.requestKeyframeForProgram(force: true) }
+            rtsp.onStateChanged = { [weak self] in self?.objectWillChange.send() }   // lastError → card
+        }
+        if let ndi = output as? NDIOutput {
+            ndi.onStateChanged = { [weak self] in self?.objectWillChange.send() }    // lastError → card
+        }
+        if let hdmi = output as? HDMIOutput {
+            hdmi.onStateChanged = { [weak self] in self?.objectWillChange.send() }   // lastError → card
         }
         // An output added mid-stream starts with the CURRENT program SPS/PPS (the camera won't
         // resend them — once per connection), so its first decoded frame is the forced IDR above.
@@ -647,6 +665,7 @@ final class BridgeModel: ObservableObject {
             redo: { [weak self] in self?.removeChannel(id) })
         channels[index].stop()
         channels.remove(at: index)
+        channelAutosaveSubs.removeValue(forKey: id)   // its autosave sub dies with it
         TallyStore.shared.clear(id)   // don't leak the channel's tally entry
 
 
@@ -715,6 +734,7 @@ final class BridgeModel: ObservableObject {
         for channel in channels { channel.stop() }
         channels.forEach { TallyStore.shared.clear($0.id) }
         channels = []
+        channelAutosaveSubs.removeAll()
         for output in programOutputs { output.stop() }
         programOutputs = []
         previewID = nil; programID = nil; selectedID = nil
@@ -745,7 +765,18 @@ final class BridgeModel: ObservableObject {
 
         // 4. Rebuild outputs — all OFF (operator toggles them on).
         for cfg in profile.outputs {
-            guard let output = makeOutput(from: cfg) else { continue }
+            // Only ONE OBS relay is possible (a single loopback slot 127.0.0.1:47788) —
+            // a hand-edited / older-build profile with two .obs entries would restore as
+            // two relays both hammering that slot.  Skip the duplicate (same guard
+            // restoreOutput uses); the post-loop block guarantees exactly one exists.
+            if cfg.kind == OutputKind.obs.rawValue,
+               programOutputs.contains(where: { $0.kind == .obs }) { continue }
+            guard let output = makeOutput(from: cfg) else {
+                // No silent shrinkage: a profile from a newer build (or with .vcam)
+                // must SAY that a card didn't come back, not just be missing it.
+                print("[Bridge] ⚠️ profile output kind '\(cfg.kind)' isn't available in this build — skipped")
+                continue
+            }
             configureOutput(output)
             programOutputs.append(output)
         }
@@ -774,6 +805,7 @@ final class BridgeModel: ObservableObject {
         for channel in channels { channel.stop() }
         channels.forEach { TallyStore.shared.clear($0.id) }
         channels = []
+        channelAutosaveSubs.removeAll()
         for output in programOutputs { output.stop() }
         programOutputs = []
         previewID = nil; programID = nil; selectedID = nil
@@ -841,25 +873,53 @@ final class BridgeModel: ObservableObject {
 
     /// Output rename with undo.  Nudges `objectWillChange` because `VideoOutput`
     /// isn't observable (same pattern as the card's on/off toggle).
+    /// Replay goes through an ID LOOKUP, never the captured instance: a
+    /// remove→undo cycle replaces the object, and mutating the old orphan would
+    /// silently change nothing on screen.  Lookup miss → honest no-op.
     func renameOutput(_ output: VideoOutput, to newLabel: String) {
         let old = output.label
+        // Re-assert the uniqueness `defaultName` guarantees at add-time: two outputs of
+        // the SAME kind with the SAME label collide downstream (two NDI senders under one
+        // p_ndi_name → receivers see one flapping source).  Suffix a clash to " 2", " 3"…
+        let newLabel = uniqueOutputLabel(newLabel, kind: output.kind, excluding: output.id)
         guard old != newLabel else { return }
+        let id = output.id
         registerUndo(
-            undo: { [weak self] in output.label = old; self?.objectWillChange.send() },
-            redo: { [weak self] in output.label = newLabel; self?.objectWillChange.send() })
+            undo: { [weak self] in self?.applyToOutput(id) { $0.label = old } },
+            redo: { [weak self] in self?.applyToOutput(id) { $0.label = newLabel } })
         output.label = newLabel
         objectWillChange.send()
     }
 
-    /// Transport-config edit (SRT destination) with undo.
+    /// Transport-config edit (SRT destination) with undo.  Same id-lookup replay
+    /// as `renameOutput`.
     func setOutputConfig(_ output: VideoOutput, to newConfig: String) {
         let old = output.config
         guard old != newConfig else { return }
+        let id = output.id
         registerUndo(
-            undo: { [weak self] in output.config = old; self?.objectWillChange.send() },
-            redo: { [weak self] in output.config = newConfig; self?.objectWillChange.send() })
+            undo: { [weak self] in self?.applyToOutput(id) { $0.config = old } },
+            redo: { [weak self] in self?.applyToOutput(id) { $0.config = newConfig } })
         output.config = newConfig
         objectWillChange.send()
+    }
+
+    /// Undo-replay helper: mutate the CURRENT instance behind an output id.
+    private func applyToOutput(_ id: UUID, _ mutate: (VideoOutput) -> Void) {
+        guard let out = programOutputs.first(where: { $0.id == id }) else { return }
+        mutate(out)
+        objectWillChange.send()
+    }
+
+    /// A label unique among outputs of the same kind (NDI/SRT/… source names must not
+    /// collide).  Returns `base` if free, else "base 2", "base 3"…  `excluding` skips
+    /// the output being renamed so re-committing its own name is a no-op.
+    private func uniqueOutputLabel(_ base: String, kind: OutputKind, excluding id: UUID) -> String {
+        let taken = Set(programOutputs.filter { $0.kind == kind && $0.id != id }.map(\.label))
+        if !taken.contains(base) { return base }
+        var n = 2
+        while taken.contains("\(base) \(n)") { n += 1 }
+        return "\(base) \(n)"
     }
 
     /// Rebuild one channel from its config (undo of a remove / redo of an add).
@@ -867,8 +927,13 @@ final class BridgeModel: ObservableObject {
     /// paired phone reconnects to the restored slot.
     @discardableResult
     private func restoreChannel(_ cfg: BridgeProfile.ChannelConfig, at index: Int? = nil) -> BridgeChannel {
+        // A same-named channel may have taken the slot since the remove (names are
+        // what the PHONE lists) — two identical entries in the Airlive receiver
+        // list would be indistinguishable, so suffix the restored one.
+        var name = cfg.name
+        if channels.contains(where: { $0.name == name }) { name += " (restored)" }
         let channel = BridgeChannel(
-            id: cfg.id, name: cfg.name,
+            id: cfg.id, name: name,
             kind: ChannelKind(rawValue: cfg.kind) ?? .airlive,
             captureDeviceID: cfg.captureDeviceID,
             delay: LatencyPreset(rawValue: cfg.delayRaw) ?? .normal)
@@ -930,6 +995,8 @@ final class BridgeModel: ObservableObject {
     }
 
     private var autosaveCancellables = Set<AnyCancellable>()
+    /// Per-channel autosave subscriptions — removed with their channel (see wireConnectivity).
+    private var channelAutosaveSubs: [UUID: AnyCancellable] = [:]
     private var autosaveWork: DispatchWorkItem?
     private var lastAutosavedData: Data?
 
@@ -974,7 +1041,16 @@ final class BridgeModel: ObservableObject {
     private func restoreLastSession() -> Bool {
         let isFirstLaunch = !FileManager.default.fileExists(atPath: Self.autosaveURL.path)
         if !isFirstLaunch {
-            do { applyProfile(try BridgeProfile.read(from: Self.autosaveURL)) }
+            do {
+                let profile = try BridgeProfile.read(from: Self.autosaveURL)
+                applyProfile(profile)
+                if profile.channels.isEmpty {
+                    // Valid file, zero channels: either the operator really cleared
+                    // everything, or an autosave raced a wipe before a crash.  Say so —
+                    // a silently empty Bridge reads as data loss.
+                    print("[Bridge] restored session has NO channels — if that's unexpected, check Profiles ▸ Open")
+                }
+            }
             catch {
                 print("[Bridge] ⚠️ couldn't restore the last session: \(error.localizedDescription)")
             }
@@ -1008,6 +1084,7 @@ final class BridgeModel: ObservableObject {
         case .ndi:  output = NDIOutput(label: cfg.label)
         case .obs:  output = AirliveRelayOutput(label: cfg.label)
         case .rtsp: output = RTSPOutput(label: cfg.label, port: UInt16(cfg.port ?? 8554))
+        case .hdmi: output = HDMIOutput(label: cfg.label)
         case .srt:  output = SRTOutput(label: cfg.label)
         case .vcam: output = nil                       // not implemented
         }

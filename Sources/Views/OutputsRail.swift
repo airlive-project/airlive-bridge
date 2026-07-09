@@ -196,6 +196,7 @@ private func addProgramOutput(_ kind: OutputKind, to model: BridgeModel) {
     switch kind {
     case .ndi:  model.addProgramOutput(NDIOutput(label: name))
     case .obs:  model.addProgramOutput(AirliveRelayOutput(label: name))
+    case .hdmi: model.addProgramOutput(HDMIOutput(label: name))
     case .rtsp: model.addProgramOutput(RTSPOutput(label: name, port: nextRTSPPort(model)))
     case .srt:  model.addProgramOutput(SRTOutput(label: name))
     case .vcam: break   // Virtual Camera is "soon"
@@ -328,6 +329,12 @@ private struct OutputCard: View {
 
     @State private var refresh = 0
     @State private var confirmingDelete = false
+    /// Flashes the SRT destination field red for ~2 s when the operator tries to
+    /// turn SRT on with no destination — otherwise the click just does nothing.
+    @State private var flashConfigError = false
+    /// Persisted: once the operator ✕-dismisses the "Get Plugin for OBS" line it
+    /// stays hidden (there's exactly one OBS card, so a global flag is correct).
+    @AppStorage("bridge.obsPluginLinkDismissed") private var pluginLinkDismissed = false
 
     /// Same template as the channel cards: TOP = On/Off chip · protocol tag ··· trash;
     /// BOTTOM = ▲/▼ chip · editable name.  The On/Off chip and the ▲/▼ chip share one
@@ -341,10 +348,31 @@ private struct OutputCard: View {
             VStack(alignment: .leading, spacing: Spacing.sm) {
                 if output.kind == .obs {
                     obsRow(live: live)
+                    // Not connected → a dismissable "Get Plugin for OBS ↗" line under a
+                    // divider (the operator who forgot the plugin has a way forward; the ✕
+                    // hides it for good once they've got it).  Connected → nothing extra.
+                    if !live && !pluginLinkDismissed {
+                        Divider().overlay(Theme.stroke)
+                        pluginLinkRow
+                    }
+                } else if output.kind == .hdmi {
+                    // HDMI Out: toggle · tag ··· trash on top; ▲/▼ · display picker below
+                    // (no editable name — the "name" is which screen it fills).
+                    topRow(live: live)
+                    HStack(spacing: Spacing.sm) {
+                        reorderArrows
+                        displayPicker
+                    }
+                    // "Connect a second display…" / "display disconnected" in red on the card.
+                    if let error = output.lastError { errorRow(error) }
                 } else {
                     topRow(live: live)
                     bottomRow
                     secondRow
+                    // Transport failure, in red ON THE CARD — a failed toggle must
+                    // never look identical to a never-clicked one (the reason used
+                    // to live only in Console).  Cleared by the next success.
+                    if let error = output.lastError { errorRow(error) }
                 }
             }
         }
@@ -403,6 +431,116 @@ private struct OutputCard: View {
                            : "Launch OBS and add the \"OBS Airlive Bridge\" source — connects automatically")
             Spacer(minLength: Spacing.xs)
             trashButton
+        }
+    }
+
+    /// HDMI Out display chooser — a flat dropdown (styled like the name field) that
+    /// lists the connected screens; picking one moves the projector there live.
+    private var displayPicker: some View {
+        let screens = NSScreen.screens
+        // resolveScreen returns nil when there's no external display (config empty/stale)
+        // — show "No display" then, honestly.
+        let current: NSScreen? = (output as? HDMIOutput).flatMap { HDMIOutput.resolveScreen($0.config) }
+        // Screens ALREADY claimed by ANOTHER HDMI output — greyed out so two HDMI outputs
+        // can't stack on one display (a rare setup, but a confusing one).
+        let claimed = Set(model.programOutputs
+            .compactMap { $0 as? HDMIOutput }
+            .filter { $0.id != output.id }
+            .compactMap { HDMIOutput.resolveScreen($0.config)?.displayID })
+        return Menu {
+            ForEach(Array(screens.enumerated()), id: \.offset) { pair in
+                Button(Self.screenName(pair.element, index: pair.offset)) {
+                    (output as? HDMIOutput)?.setDisplay(String(pair.element.displayID))
+                    refresh += 1
+                    model.objectWillChange.send()
+                }
+                .disabled(claimed.contains(pair.element.displayID))
+            }
+        } label: {
+            HStack(spacing: Spacing.xs) {
+                Text(current.map { Self.screenName($0, index: screens.firstIndex(of: $0) ?? 0) }
+                     ?? "No display")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(Theme.textPrimary)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(Theme.textSecondary)
+            }
+            .padding(.horizontal, Spacing.sm)
+            .frame(maxWidth: .infinity)
+            .frame(height: ControlMetrics.pillHeight)
+            .background(RoundedRectangle(cornerRadius: Radius.control, style: .continuous).fill(Theme.bgApp))
+            .overlay(RoundedRectangle(cornerRadius: Radius.control, style: .continuous).stroke(Theme.stroke, lineWidth: 1))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+    }
+
+    /// A friendly screen label.  `localizedName` is macOS 14+; on 13 fall back to
+    /// "Main display" / "Display N (WxH)" so the picker never shows a blank.
+    private static func screenName(_ screen: NSScreen, index: Int) -> String {
+        if #available(macOS 14.0, *) {
+            let name = screen.localizedName
+            if !name.isEmpty { return name }
+        }
+        if screen == NSScreen.main { return "Main display" }
+        let w = Int(screen.frame.width), h = Int(screen.frame.height)
+        return "Display \(index + 1) (\(w)×\(h))"
+    }
+
+    /// Second line on the OBS card when not connected: link (left) + ✕ dismiss (right).
+    private static let pluginDownloadURL = URL(string: "https://airlive-site.vercel.app/downloads")!
+    private var pluginLinkRow: some View {
+        HStack(spacing: Spacing.sm) {
+            Button {
+                NSWorkspace.shared.open(Self.pluginDownloadURL)
+            } label: {
+                HStack(spacing: 4) {
+                    Text("Get Plugin for OBS")
+                        .font(.system(size: 11, weight: .medium))
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 9, weight: .semibold))
+                }
+                .foregroundColor(Theme.accentBlue)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { NSCursor.pointingHand.set(); if !$0 { NSCursor.arrow.set() } }
+            .help("Opens the download page for the OBS plugin")
+            Spacer(minLength: Spacing.xs)
+            Button { pluginLinkDismissed = true } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(Theme.textSecondary)
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Hide this")
+        }
+    }
+
+    /// A card-visible transport error with a ✕ to dismiss it — so a message doesn't hang forever (e.g.
+    /// HDMI "connect a second display").  A NEW failure re-sets `lastError`, so dismissing hides the
+    /// current line without silencing future ones.
+    private func errorRow(_ error: String) -> some View {
+        HStack(alignment: .top, spacing: Spacing.xs) {
+            Text(error)
+                .font(.system(size: 10))
+                .foregroundColor(Theme.accentRed)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button { output.clearError(); refresh += 1 } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(Theme.textSecondary)
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss")
         }
     }
 
@@ -473,12 +611,26 @@ private struct OutputCard: View {
     }
 
     private var onOffToggle: some View {
-        PowerToggle(state: powerState) {
-            if output.isLive { output.stop() } else { output.start() }
-            refresh += 1
-            // isLive changed but the array didn't — nudge the model so observers re-read.
-            model.objectWillChange.send()
+        PowerToggle(state: powerState) { toggle() }
+    }
+
+    /// Turn the output on/off.  Refuses to start an SRT output with no destination —
+    /// instead of the click silently doing nothing, flash the destination field red
+    /// so the operator sees WHERE the missing input is.
+    private func toggle() {
+        if output.isLive { output.stop() }
+        else {
+            if output.kind == .srt,
+               output.config.trimmingCharacters(in: .whitespaces).isEmpty {
+                flashConfigError = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { flashConfigError = false }
+                return
+            }
+            output.start()
         }
+        refresh += 1
+        // isLive changed but the array didn't — nudge the model so observers re-read.
+        model.objectWillChange.send()
     }
 
     /// A second line ONLY where it carries real information: SRT's destination (the
@@ -495,11 +647,13 @@ private struct OutputCard: View {
     }
 
     /// SRT destination — the shared inline-editable element (monospaced; may be cleared).
+    /// Flashes red when the operator toggles SRT on while it's empty (see `toggle()`).
     private var srtDestinationField: some View {
         InlineEditable(placeholder: output.kind.configFieldExample,
                        value: output.config,
                        font: .system(size: 11).monospaced(),
-                       allowEmpty: true) {
+                       allowEmpty: true,
+                       errorFlash: flashConfigError) {
             model.setOutputConfig(output, to: $0); refresh += 1   // undo + autosave (see nameField)
         }
     }
@@ -538,37 +692,45 @@ private struct OutputCard: View {
 
 // MARK: - Power chip (the card's custom on/off control)
 
-/// Power chip — control AND state indicator in one, sized exactly like the card's
-/// ▲/▼ chip so the two stack in a clean column.  The ⏻ icon in all three states
-/// (approved design): off = neutral chip, grey icon; connecting = spinner; on =
-/// signal-green icon on the deep-green tally fill (the app's quiet live treatment —
-/// bright glyph on a solid dark fill, never a bright filled chip).  Green, not red:
-/// red reads as error/stop on a button.
+/// Custom on/off switch (our own, NOT the system Toggle — AppKit chrome renders
+/// differently across macOS versions and breaks the flat look).  Sized exactly
+/// like the card's ▲/▼ chip so the two stack in a clean column.  Track = accent
+/// blue when on, quiet dark chip when off; white knob slides left↔right; the
+/// connecting phase shows a spinner in place of the knob.
 struct PowerToggle: View {
     enum PowerState { case off, connecting, on }
     let state: PowerState
     let action: () -> Void
 
+    /// Gap between the track edge and the knob.
+    private let inset: CGFloat = 3
+
     var body: some View {
+        let knobSide = ControlMetrics.pillHeight - inset * 2   // square knob, 22 pt
         Button(action: action) {
-            ZStack {
-                RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                    .fill(state == .on ? Theme.tallyPreviewBg : Theme.bgSelected.opacity(0.6))
+            ZStack(alignment: state == .off ? .leading : .trailing) {
+                // Track — button-radius per the corner scale (the knob gets the
+                // smaller control radius, keeping the two curvatures concentric).
+                RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+                    .fill(state == .on ? Theme.accentBlue : Theme.bgSelected)
+                if state != .on {
+                    RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+                        .stroke(Theme.stroke, lineWidth: 1)
+                }
                 switch state {
                 case .connecting:
                     ProgressView()
                         .controlSize(.mini)
-                case .on:
-                    Image(systemName: "power")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(Theme.previewGreen)
-                case .off:
-                    Image(systemName: "power")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(Theme.textSecondary)
+                        .frame(maxWidth: .infinity)   // centered on the track
+                case .on, .off:
+                    RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+                        .fill(Color.white)
+                        .frame(width: knobSide, height: knobSide)
+                        .padding(inset)
                 }
             }
             .frame(width: ControlMetrics.chipWidth, height: ControlMetrics.pillHeight)
+            .animation(.easeInOut(duration: 0.15), value: state == .on)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -585,6 +747,7 @@ private extension OutputKind {
         switch self {
         case .ndi:  return "public"
         case .obs:  return "Add the OBS Airlive Bridge source in OBS"
+        case .hdmi: return "Second screen"
         case .srt:  return "srt://host:port"
         case .rtsp: return "rtsp://0.0.0.0:8554/live/cam"
         case .vcam: return "Airlive Camera"

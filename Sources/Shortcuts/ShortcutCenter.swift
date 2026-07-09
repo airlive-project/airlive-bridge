@@ -34,6 +34,11 @@ final class ShortcutCenter: ObservableObject {
     /// While the Settings recorder is capturing a key, suppress firing so the
     /// captured press doesn't also trigger an action.
     var isRecording = false
+    /// The active binding-chip's cancel action, if any.  Starting a NEW recording
+    /// first calls this so the previous chip finishes cleanly — otherwise a second
+    /// click mid-record leaked the first chip's NSEvent monitor AND let one keypress
+    /// bind two different actions (both monitors fired).
+    var endActiveRecording: (() -> Void)?
 
     /// Master enable.
     @Published var enabled: Bool { didSet { persist(); apply() } }
@@ -197,7 +202,18 @@ final class ShortcutCenter: ObservableObject {
         }
         // Backstop watchdog (a background app may miss activate/wake events).
         watchdog = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
-            if self?.global == true { self?.monitor.ensureRunning() }
+            guard let self, self.global else { return }
+            self.monitor.ensureRunning()
+            // Re-read the Input-Monitoring grant HERE too: in global mode Bridge is
+            // usually NOT frontmost (that's the point), so `didBecomeActive`/`apply()`
+            // may never fire to notice a mid-session revoke.  Publish the change so the
+            // Settings warning ("Needs Input Monitoring") appears without a click, and
+            // the operator learns the keys stopped instead of silently missing cuts.
+            let granted = ShortcutMonitor.hasPermission
+            if granted != self.hasPermission {
+                self.hasPermission = granted
+                self.objectWillChange.send()
+            }
         }
     }
 }

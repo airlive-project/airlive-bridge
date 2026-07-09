@@ -5,6 +5,14 @@ options:
     macOS: "13.0"
   createIntermediateGroups: true
 
+# Sparkle — seamless auto-update framework (download → verify EdDSA → replace in
+# place → relaunch).  Updates are signed with an EdDSA key (private in the Keychain,
+# public in Info.plist SUPublicEDKey); the app checks the appcast at SUFeedURL.
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: "2.9.0"
+
 targets:
   AirliveBridge:
     type: application
@@ -19,6 +27,27 @@ targets:
         # Xcode at build; the window title reads it via CFBundleShortVersionString.
         # MUST live here, not as a hand-edit to the plist (xcodegen wipes those).
         CFBundleShortVersionString: $(MARKETING_VERSION)
+        # Build number Sparkle COMPARES to decide "is there a newer build" (NOT the
+        # marketing string).  Driven by CURRENT_PROJECT_VERSION (settings.base) so it
+        # lives in one place; MUST strictly increment every release and MUST equal the
+        # appcast item's sparkle:version.
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        # --- Sparkle auto-update ---
+        # Appcast feed.  PLACEHOLDER — decide the FINAL permanent host before the first
+        # public release: it's baked into every shipped build and can NEVER change (a
+        # later change orphans older installs).  Tiny XML on the site you own; the big
+        # .dmg is served by GitHub Releases (the enclosure url).
+        SUFeedURL: "https://airlive.studio/bridge/appcast.xml"
+        # base64 Ed25519 PUBLIC key from `generate_keys` (44 chars, ends "=").  The
+        # private key stays in the login Keychain, NEVER committed.  PLACEHOLDER until
+        # generate_keys is run — package.sh REFUSES to ship a release while this is the
+        # placeholder (a build with no real key has no update-trust anchor).
+        SUPublicEDKey: "REPLACE_WITH_generate_keys_OUTPUT="
+        # Silent scheduled background checks: OFF for now (manual "Check for Updates…"
+        # only) — a non-sandboxed, library-validation-disabled tool auto-installing
+        # updates unattended is a high-value target, so we enable background checks
+        # only AFTER the signing pipeline is proven end-to-end (see docs/RELEASE.md).
+        SUEnableAutomaticChecks: false
         # Points the Dock/Finder at the asset-catalog AppIcon.  MUST live here: xcodegen
         # regenerates Sources/Info.plist from these properties, so a hand-edit to the plist
         # is wiped on the next `xcodegen` — which is why the icon never stuck before.
@@ -43,10 +72,14 @@ targets:
       - sdk: VideoToolbox.framework
       - sdk: CoreMedia.framework
       - sdk: CoreVideo.framework
+      - package: Sparkle   # auto-update (see packages: above)
     settings:
       base:
         PRODUCT_NAME: Airlive Bridge
         MARKETING_VERSION: "1.0.0"   # semver: MAJOR.MINOR.PATCH — bump like a real release train
+        # Sparkle's compare key (→ CFBundleVersion).  Strictly increment EVERY release
+        # (1 → 2 → 3 …) and mirror it in the appcast item's sparkle:version.
+        CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.9"
         # Apple Silicon only — the vendored UxPlay/openssl/libplist static libs are arm64.
         # A bare `ARCHS: arm64` gets DROPPED by xcodegen (never lands in the pbxproj), so an

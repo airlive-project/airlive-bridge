@@ -22,15 +22,22 @@ import CoreVideo
 
 struct MirrorVideoView: NSViewRepresentable {
     let channel: BridgeChannel
+    /// Tap-to-focus: called with the NORMALISED point on the NATIVE LANDSCAPE frame — Apple's
+    /// `focusPointOfInterest` convention (0,0 top-left … 1,1 bottom-right).  The Mirror inverts its
+    /// OWN display geometry (resizeAspect letterbox + `outputRotation`), so the caller just sends
+    /// `setFocusPoint`.  nil → the video isn't tappable (thumbnails, program, legacy cameras).
+    var onTapPoint: ((CGPoint) -> Void)? = nil
 
     func makeNSView(context: Context) -> Mirror {
         let view = Mirror()
         view.bind(to: channel)
+        view.setTapHandler(onTapPoint)
         return view
     }
 
     func updateNSView(_ nsView: Mirror, context: Context) {
         nsView.bind(to: channel)
+        nsView.setTapHandler(onTapPoint)
     }
 
     static func dismantleNSView(_ nsView: Mirror, coordinator: ()) {
@@ -47,6 +54,8 @@ struct MirrorVideoView: NSViewRepresentable {
         /// the layer without touching main-only NSView API.
         private var viewSize: CGSize = .zero
         private var currentRotation: Int = 0
+        private var tapHandler: ((CGPoint) -> Void)?
+        private var clickRecognizer: NSClickGestureRecognizer?
 
         override init(frame frameRect: NSRect) {
             super.init(frame: frameRect)
@@ -170,8 +179,98 @@ struct MirrorVideoView: NSViewRepresentable {
             CATransaction.setDisableActions(true)
             contentLayer.contentsScale = scale
             CATransaction.commit()
+            pinWindowToSDRsRGB()
+        }
+
+        // Pin any window hosting live video to sRGB so the sRGB-tagged decoded
+        // buffers composite sRGB→sRGB (identity) — the same presentation regime
+        // as the phone's preview layer (colorspace=sRGB, EDR off) and the AirPlay
+        // path.  Part of the display state the 2026-07-06 wire-colour fix was
+        // verified against; harmless with honest wire values, and it keeps a
+        // wide-gamut/EDR display profile from re-interpreting the monitoring
+        // proxy.  (The wire bug itself was on the CAMERA — identity-LUT texel-
+        // center stretch; see airlive/docs/WIRE-COLOR-RECEIVER-DIAGNOSIS.md.)
+        private func pinWindowToSDRsRGB() {
+            guard let window, window.colorSpace != .sRGB else { return }
+            window.colorSpace = .sRGB
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            pinWindowToSDRsRGB()
         }
 
         deinit { unbind() }
+
+        // MARK: Tap-to-focus
+
+        /// Install / remove the click recogniser as the caller wires or unwires a tap handler.
+        func setTapHandler(_ h: ((CGPoint) -> Void)?) {
+            tapHandler = h
+            if h != nil, clickRecognizer == nil {
+                let r = NSClickGestureRecognizer(target: self, action: #selector(handleClick(_:)))
+                addGestureRecognizer(r)
+                clickRecognizer = r
+            } else if h == nil, let r = clickRecognizer {
+                removeGestureRecognizer(r)
+                clickRecognizer = nil
+            }
+        }
+
+        @objc private func handleClick(_ g: NSClickGestureRecognizer) {
+            guard let tapHandler, let buf = channel?.latestPixelBuffer else { return }
+            let p = g.location(in: self)                    // y-UP (this NSView isn't flipped)
+            let bw = Double(CVPixelBufferGetWidth(buf)), bh = Double(CVPixelBufferGetHeight(buf))
+            guard bounds.width > 0, bounds.height > 0,
+                  let pt = Self.normalizedFocusPoint(tapX: Double(p.x), tapY: Double(p.y),
+                                                     viewW: Double(bounds.width), viewH: Double(bounds.height),
+                                                     bufW: bw, bufH: bh, rotation: currentRotation)
+            else { return }
+            flashReticle(at: p)
+            tapHandler(CGPoint(x: pt.x, y: pt.y))
+        }
+
+        /// Inverse of this view's DISPLAY geometry (resizeAspect letterbox + layer rotate(-rot) in a
+        /// y-UP view) → Apple `focusPointOfInterest` on the NATIVE LANDSCAPE frame: (0,0) top-left …
+        /// (1,1) bottom-right.  Returns nil when the tap fell on a letterbox bar.  Pure + verified by
+        /// hand for rot 0/90/180 (see the /tmp/poi_test derivation).  ⚠️ The final top/bottom flip
+        /// assumes CA shows the buffer upright (image row 0 at high-y) — true here (video isn't
+        /// mirrored); the ONE thing to confirm on device.
+        static func normalizedFocusPoint(tapX: Double, tapY: Double, viewW: Double, viewH: Double,
+                                          bufW: Double, bufH: Double, rotation: Int) -> CGPoint? {
+            guard bufW > 0, bufH > 0 else { return nil }
+            let a = Double(((rotation % 360) + 360) % 360) * .pi / 180      // inverse-rotate by +rot
+            let vrx = tapX - viewW / 2, vry = tapY - viewH / 2              // relative to view centre
+            let ca = cos(a), sa = sin(a)
+            let lrx = vrx * ca - vry * sa, lry = vrx * sa + vry * ca        // local_rel = R(+rot)·view_rel
+            let portrait = (rotation % 180 != 0)
+            let lbw = portrait ? viewH : viewW, lbh = portrait ? viewW : viewH
+            let lx = lrx + lbw / 2, ly = lry + lbh / 2                      // layer-local (y-up, origin BL)
+            let scale = min(lbw / bufW, lbh / bufH)                         // undo resizeAspect (fit)
+            let imgW = bufW * scale, imgH = bufH * scale
+            let u = (lx - (lbw - imgW) / 2) / imgW
+            let v = (ly - (lbh - imgH) / 2) / imgH
+            let eps = 0.03
+            guard u >= -eps, u <= 1 + eps, v >= -eps, v <= 1 + eps else { return nil }   // outside → bar
+            return CGPoint(x: min(1, max(0, u)), y: min(1, max(0, 1 - v)))  // clamp edge FP, flip to top-left
+        }
+
+        /// A brief focus reticle (ring) at the tapped VIEW point — fades + shrinks over ~0.7 s.
+        private func flashReticle(at point: CGPoint) {
+            let side: CGFloat = 44
+            let ring = CAShapeLayer()
+            ring.path = CGPath(ellipseIn: CGRect(x: -side / 2, y: -side / 2, width: side, height: side), transform: nil)
+            ring.position = point
+            ring.fillColor = NSColor.clear.cgColor
+            ring.strokeColor = NSColor(calibratedRed: 1, green: 0.84, blue: 0.04, alpha: 1).cgColor   // accentYellow
+            ring.lineWidth = 2
+            layer?.addSublayer(ring)
+            let fade = CABasicAnimation(keyPath: "opacity"); fade.fromValue = 1; fade.toValue = 0
+            let shrink = CABasicAnimation(keyPath: "transform.scale"); shrink.fromValue = 1.35; shrink.toValue = 1.0
+            let grp = CAAnimationGroup(); grp.animations = [fade, shrink]; grp.duration = 0.7
+            grp.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            ring.add(grp, forKey: nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak ring] in ring?.removeFromSuperlayer() }
+        }
     }
 }

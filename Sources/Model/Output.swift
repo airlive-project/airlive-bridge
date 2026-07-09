@@ -24,6 +24,7 @@ import CoreVideo
 enum OutputKind: String, CaseIterable, Identifiable {
     case ndi
     case obs    // OBS via our ARLV protocol (passthrough relay of the program H.264)
+    case hdmi   // fullscreen program on an external display (HDMI / any second screen)
     case srt
     case rtsp
     case vcam   // macOS Virtual Camera (sink-as-webcam)
@@ -36,6 +37,7 @@ enum OutputKind: String, CaseIterable, Identifiable {
         switch self {
         case .ndi:  return "NDI"
         case .obs:  return "OBS Airlive Bridge"
+        case .hdmi: return "HDMI Out"
         case .srt:  return "SRT"
         case .rtsp: return "RTSP"
         case .vcam: return "Virtual Camera"
@@ -45,7 +47,12 @@ enum OutputKind: String, CaseIterable, Identifiable {
     /// Short tag for the compact output-card badge.  `displayName` can be long
     /// ("OBS Airlive Bridge") and overflows the fixed badge slot — the long name
     /// lives in the card's name field; the badge stays a tight code.
-    var badgeLabel: String { rawValue.uppercased() }   // ndi → "NDI", obs → "OBS", …
+    var badgeLabel: String {
+        switch self {
+        case .hdmi: return "HDMI"          // rawValue "hdmi" is already the tag, but be explicit
+        default:    return rawValue.uppercased()   // ndi → "NDI", obs → "OBS", …
+        }
+    }
 
     /// SF Symbol for the kind badge / add menu.  All chosen names exist on
     /// macOS 13 (no SF5 / macOS-14-only glyphs, no gen-numbered variants) so they
@@ -54,6 +61,7 @@ enum OutputKind: String, CaseIterable, Identifiable {
         switch self {
         case .ndi:  return "antenna.radiowaves.left.and.right"
         case .obs:  return "tv"
+        case .hdmi: return "display"
         case .srt:  return "dot.radiowaves.right"
         case .rtsp: return "network"
         case .vcam: return "video"
@@ -64,7 +72,7 @@ enum OutputKind: String, CaseIterable, Identifiable {
     /// disabled controls on placeholder cards and the add menu — the single
     /// source of truth so the card and the menu can never disagree about which
     /// kinds are real.
-    var isImplemented: Bool { self == .ndi || self == .obs || self == .rtsp || self == .srt }
+    var isImplemented: Bool { self == .ndi || self == .obs || self == .rtsp || self == .srt || self == .hdmi }
 }
 
 /// One downstream re-publishing sink.  Reference type (`AnyObject`) because an
@@ -84,6 +92,12 @@ protocol VideoOutput: AnyObject {
     var kind: OutputKind { get }
     /// True once `start()` has brought the transport up and frames are flowing.
     var isLive: Bool { get }
+
+    /// Last transport failure as an operator-facing one-liner (nil = healthy).
+    /// Set by start/bind/connect failures and CLEARED on the next success — the
+    /// card renders it in red, so a failed toggle never collapses into the same
+    /// silent "off" look as a never-clicked one.
+    var lastError: String? { get }
 
     /// Bring the transport up (open socket / create NDI sender / start encoder).
     func start()
@@ -108,6 +122,10 @@ protocol VideoOutput: AnyObject {
     func awaitFormat()
     func clearLastFormat()
 
+    /// Clear `lastError` — the operator ✕-dismissed the message on the card.  A NEW failure re-sets it,
+    /// so dismissing hides the current line without silencing future ones.  No-op by default.
+    func clearError()
+
     /// Transport-specific config string from the output card's second field — e.g.
     /// the SRT destination `srt://host:port`.  Defaults to a no-op (NDI group / RTSP
     /// path are not wired today); only SRT stores it.
@@ -119,5 +137,7 @@ extension VideoOutput {
     func relaySample(_ payload: Data, timestampMicros: Int64) {}
     func awaitFormat() {}
     func clearLastFormat() {}
+    func clearError() {}
     var config: String { get { "" } set {} }
+    var lastError: String? { nil }
 }

@@ -69,10 +69,21 @@ final class CaptureDeviceReceiver: NSObject, ChannelReceiver, AVCaptureVideoData
 
     private func build() {
         guard !running else { return }
-        guard let device = CaptureDevices.discover().first(where: { deviceID == nil || $0.uniqueID == deviceID })
-            ?? CaptureDevices.discover().first else {
-            print("[Capture] no capture device found"); return
+        // NO fallback to "just any camera": with the configured card unplugged that
+        // silently bound the built-in FaceTime camera — the WRONG picture on air with
+        // zero indication.  Wrong source is worse than no source; stay dark and say why.
+        let devices = CaptureDevices.discover()
+        let device: AVCaptureDevice?
+        if let deviceID {
+            device = devices.first(where: { $0.uniqueID == deviceID })
+            if device == nil {
+                print("[Capture] ❌ configured device \(deviceID) not found — channel stays dark (no fallback to another camera)")
+            }
+        } else {
+            device = devices.first
+            if device == nil { print("[Capture] no capture device found") }
         }
+        guard let device else { return }
         do {
             session.beginConfiguration()
             session.sessionPreset = .high            // capture card's native (1080p/4K) feed

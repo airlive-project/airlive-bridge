@@ -93,57 +93,59 @@ private typealias NDIlib_send_send_video_v2_t = @convention(c) (OpaquePointer?, 
 private final class NDIRuntime {
     static let shared = NDIRuntime()
 
-    let isLoaded: Bool
-    let initialize: NDIlib_initialize_t?
-    let sendCreate: NDIlib_send_create_t_fn?
-    let sendVideo: NDIlib_send_send_video_v2_t?
-    let sendDestroy: NDIlib_send_destroy_t?
+    // Resolved on the first SUCCESSFUL load; nil until then.  Written once under
+    // `lock`, then read-only — so the per-frame `sendVideo` read needs no lock.
+    private(set) var initialize: NDIlib_initialize_t?
+    private(set) var sendCreate: NDIlib_send_create_t_fn?
+    private(set) var sendVideo: NDIlib_send_send_video_v2_t?
+    private(set) var sendDestroy: NDIlib_send_destroy_t?
+    private(set) var isLoaded = false
 
-    private let handle: UnsafeMutableRawPointer?
+    private var handle: UnsafeMutableRawPointer?
     private var didInitialize = false
     private let lock = NSLock()
 
-    private init() {
-        guard let handle = NDIRuntime.openLibrary() else {
-            self.handle = nil
-            self.isLoaded = false
-            self.initialize = nil
-            self.sendCreate = nil
-            self.sendVideo = nil
-            self.sendDestroy = nil
-            return
-        }
-        self.handle = handle
+    private init() {}   // NO eager load — the dlopen lives in loadIfNeeded (retryable).
 
+    /// (Re)attempt to dlopen libndi + resolve its symbols if not already loaded.  A
+    /// cheap no-op once loaded.  RETRYABLE (the load is here, not in `init`) so
+    /// "install the NDI runtime, THEN toggle the output on" works WITHOUT restarting
+    /// the app — a first failed attempt no longer sticks for the whole session.
+    @discardableResult
+    func loadIfNeeded() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return loadLocked()
+    }
+
+    private func loadLocked() -> Bool {   // caller holds `lock`
+        if isLoaded { return true }
+        guard let h = NDIRuntime.openLibrary() else { return false }
         func sym<T>(_ name: String, as type: T.Type) -> T? {
-            guard let raw = dlsym(handle, name) else {
+            guard let raw = dlsym(h, name) else {
                 print("[NDIOutput] libndi loaded but symbol '\(name)' is missing — incompatible runtime.")
                 return nil
             }
             return unsafeBitCast(raw, to: T.self)
         }
-
         let initFn   = sym("NDIlib_initialize",          as: NDIlib_initialize_t.self)
         let createFn = sym("NDIlib_send_create",         as: NDIlib_send_create_t_fn.self)
         let videoFn  = sym("NDIlib_send_send_video_v2",  as: NDIlib_send_send_video_v2_t.self)
         let destFn   = sym("NDIlib_send_destroy",        as: NDIlib_send_destroy_t.self)
-
-        self.initialize  = initFn
-        self.sendCreate  = createFn
-        self.sendVideo   = videoFn
-        self.sendDestroy = destFn
-
-        // All five must resolve (NDIlib_destroy is intentionally not stored —
-        // see class note — but we verify it exists as a sanity check).
-        let destroyOK = dlsym(handle, "NDIlib_destroy") != nil
-        self.isLoaded = initFn != nil && createFn != nil && videoFn != nil && destFn != nil && destroyOK
+        let destroyOK = dlsym(h, "NDIlib_destroy") != nil   // verified, not stored (see class note)
+        guard initFn != nil, createFn != nil, videoFn != nil, destFn != nil, destroyOK else {
+            dlclose(h); return false   // incompatible runtime — leave room for a later retry
+        }
+        handle = h
+        initialize = initFn; sendCreate = createFn; sendVideo = videoFn; sendDestroy = destFn
+        isLoaded = true
+        return true
     }
 
-    /// Call `NDIlib_initialize` at most once for the whole process.  Returns
-    /// false if the runtime refuses (e.g. unsupported CPU) — start() then bails.
+    /// Load-if-needed, then call `NDIlib_initialize` at most once for the process.
+    /// False if the runtime is absent or refuses (e.g. unsupported CPU).
     func ensureInitialized() -> Bool {
         lock.lock(); defer { lock.unlock() }
-        guard isLoaded, let initialize else { return false }
+        guard loadLocked(), let initialize else { return false }
         if didInitialize { return true }
         if initialize() {
             didInitialize = true
@@ -204,6 +206,21 @@ private final class NDIRuntime {
 final class NDIOutput: VideoOutput {
     let id: UUID
     let kind: OutputKind = .ndi
+
+    /// Card-visible failure (see VideoOutput.lastError).  Main-confined.
+    private(set) var lastError: String?
+    /// Fires on MAIN when `lastError` changes — the model nudges objectWillChange
+    /// so the card re-renders (VideoOutput isn't observable).
+    var onStateChanged: (() -> Void)?
+    private func reportError(_ message: String?) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.lastError != message else { return }
+            self.lastError = message
+            self.onStateChanged?()
+        }
+    }
+
+    func clearError() { reportError(nil) }
 
     /// The NDI source name.  Setting it while live recreates the sender.
     var label: String {
@@ -353,13 +370,15 @@ final class NDIOutput: VideoOutput {
 
     private func startSenderLocked() {
         let rt = NDIRuntime.shared
-        guard rt.isLoaded else {
+        guard rt.loadIfNeeded() else {   // RETRIES the dlopen — picks up a runtime installed since launch
             print("[NDIOutput] start('\(label)') skipped — NDI runtime not installed.")
+            reportError("NDI runtime isn\u{2019}t installed — get it from ndi.video")
             _isLive = false
             return
         }
         guard rt.ensureInitialized(), let create = rt.sendCreate else {
             print("[NDIOutput] start('\(label)') failed — NDI runtime did not initialize.")
+            reportError("NDI runtime failed to initialize")
             _isLive = false
             return
         }
@@ -383,11 +402,13 @@ final class NDIOutput: VideoOutput {
 
         guard let created else {
             print("[NDIOutput] NDIlib_send_create returned NULL for '\(label)'.")
+            reportError("NDI sender creation failed")
             _isLive = false
             return
         }
         sender = created
         _isLive = true
+        reportError(nil)   // live — clear any stale failure
         print("[NDIOutput] NDI source '\(label)' is live.")
     }
 

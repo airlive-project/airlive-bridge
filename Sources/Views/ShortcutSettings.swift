@@ -226,9 +226,11 @@ private struct BindingChip: View {
     }
 
     private func start() {
+        shortcuts.endActiveRecording?()   // finish any OTHER chip mid-record first
         recording = true
         heldModifiers = ""
         shortcuts.isRecording = true   // mute the live engines while capturing
+        shortcuts.endActiveRecording = { finish() }
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
             if event.type == .flagsChanged {               // live "⌘+…" build-up
                 var parts: [String] = []
@@ -252,9 +254,11 @@ private struct BindingChip: View {
     }
 
     private func finish() {
+        guard recording else { return }   // ignore a stale onDisappear after another chip took over
         if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
         recording = false
         heldModifiers = ""
         shortcuts.isRecording = false
+        shortcuts.endActiveRecording = nil
     }
 }

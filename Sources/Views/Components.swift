@@ -9,9 +9,8 @@
 // 1 pt low-contrast strokes, depth from brightness steps + borders only.  Two
 // rules this kit enforces that the previous revision violated:
 //
-//   • NO native NSSlider.  `Slider` on macOS draws stray white tick marks under
-//     its track in dark mode; the custom `StyledSlider` here is a track + knob +
-//     drag gesture with nothing else, so there is no AppKit chrome to leak.
+//   • NO native NSSlider.  Manual values use `ParamStrip` (a bounded value tape you
+//     scrub), not a slider — no AppKit chrome to leak stray tick marks in dark mode.
 //   • EQUAL-width segments.  `SegmentedBar` lays its segments out with
 //     `frame(maxWidth: .infinity)` inside one HStack, so they share the row
 //     evenly and can never overflow it — the old `.segmented` Picker rendered
@@ -22,9 +21,9 @@
 //
 //   Card { … }                         rounded panel container
 //   SectionLabel(text:)                small uppercase muted caption (no rule)
-//   PillToggle(title:isOn:onChange:)   clear on/off pill (accent fill when on)
 //   SegmentedBar(selection:options:)   equal-width segmented control
-//   StyledSlider(value:in:step:onChange:)  custom dark slider, no tick artifacts
+//   ParamStrip(…)                      one control row: label · value · chips · slim scrub tape
+//   ControlSection(title:auto:…) { … } titled card grouping rows, one section-level AUTO
 //   QuickTile(title:subtitle:selected:action:)  card-style quick-select tile
 //   TileRow(items:) { … }              evenly-spaced row of tiles
 //
@@ -32,8 +31,6 @@
 //   .cardSurface() / .panelSurface()   card surface modifier (alias kept)
 //   .bridgeButton(selected:accent:)    standard inline button look
 //   StatusPill / ConnectionDot         LIVE/OFF pill + connection dot
-//   SliderRow(…)                       label + readback + StyledSlider row
-//   AutoToggle(…)                      AE/AWB/AF toggle (wraps PillToggle)
 // ─────────────────────────────────────────────────────────────────────────────
 
 import SwiftUI
@@ -56,6 +53,9 @@ struct InlineEditable: View {
     let value: String
     var font: Font = .system(size: 13, weight: .medium)
     var allowEmpty: Bool = false
+    /// When true, the field's stroke goes red — a caller flashes this to explain
+    /// why an action was refused (e.g. toggling SRT on with no destination).
+    var errorFlash: Bool = false
     let onCommit: (String) -> Void
 
     @State private var editing = false
@@ -91,8 +91,12 @@ struct InlineEditable: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                .stroke(editing ? Theme.accentBlue : Theme.stroke, lineWidth: 1)
+                .stroke(errorFlash ? Theme.accentRed : (editing ? Theme.accentBlue : Theme.stroke),
+                        lineWidth: errorFlash ? 1.5 : 1)
         )
+        // The red flashes ON instantly (the refusal must register) and FADES OUT
+        // smoothly (0.35 s ease-out) when the caller clears it — never a hard snap.
+        .animation(.easeOut(duration: 0.35), value: errorFlash)
     }
 
     private func begin() {
@@ -181,61 +185,6 @@ struct SectionLabel: View {
     }
 }
 
-// MARK: - Pill toggle (clear on/off)
-
-/// A clear on/off pill with an obvious active state.  ON = accent fill + white
-/// text; OFF = quiet outlined neutral chip.  Used for AE / AWB / AF and the
-/// ISO-compensation toggle.  `accent` defaults to blue; tally-style callers can
-/// pass red / yellow.
-///
-/// The whole pill is one tap target (`contentShape`), so the padded area around
-/// the label is live, not just the glyph.
-struct PillToggle: View {
-    let title: String
-    @Binding var isOn: Bool
-    var accent: Color = Theme.accentBlue
-    /// Text colour when on — pass a dark colour for light accents (yellow!),
-    /// where white text would be the worst contrast. Defaults to white (blue/red).
-    var onText: Color = .white
-    /// Called with the new value after the toggle flips — the moment to send a
-    /// control command (commit, not per-keystroke).
-    var onChange: (Bool) -> Void = { _ in }
-
-    @State private var hovering = false
-
-    var body: some View {
-        Button {
-            isOn.toggle()
-            onChange(isOn)
-        } label: {
-            Text(title)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(isOn ? onText : Theme.textSecondary)
-                .frame(maxWidth: .infinity)
-                .frame(height: ControlMetrics.pillHeight)
-                .background(
-                    RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                        .fill(fill)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                        .stroke(isOn ? Color.clear : Theme.stroke, lineWidth: 1)
-                )
-                .contentShape(RoundedRectangle(cornerRadius: Radius.control,
-                                               style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: isOn)
-        .animation(.easeOut(duration: 0.12), value: hovering)
-    }
-
-    private var fill: Color {
-        if isOn { return accent }
-        return hovering ? Theme.bgHover : Theme.bgSelected.opacity(0.6)
-    }
-}
-
 // MARK: - Segmented bar (equal-width segments)
 
 /// A clean segmented control whose segments are EQUAL width and never overflow
@@ -297,90 +246,6 @@ struct SegmentedBar<Option: Hashable & Identifiable>: View {
         }
         .buttonStyle(.plain)
         .animation(.easeOut(duration: 0.12), value: isSelected)
-    }
-}
-
-// MARK: - Styled slider (custom, no tick-mark artifacts)
-
-/// A custom horizontal slider: filled track + round knob, nothing else.  Renders
-/// cleanly on macOS in dark mode — there is NO native NSSlider involved, so none
-/// of the stray white tick lines AppKit draws under `Slider` in a dark theme.
-///
-/// Binds to a `Double` with `min...max` and an optional `step`.  `onChange` (if
-/// supplied) fires on the editing-END (mouse-up) only — a drag sends ONE value,
-/// not one per pixel — matching the cheap-control-packet rule.
-struct StyledSlider: View {
-    @Binding var value: Double
-    let range: ClosedRange<Double>
-    var step: Double = 0
-    var tint: Color = Theme.accentBlue
-    /// Called once when the drag ends, with the final (stepped) value.
-    var onChange: (Double) -> Void = { _ in }
-
-    @State private var dragging = false
-
-    var body: some View {
-        GeometryReader { geo in
-            let knob = ControlMetrics.sliderKnob
-            let usable = max(0, geo.size.width - knob)
-            let fraction = normalizedFraction()
-            let knobX = usable * fraction
-
-            ZStack(alignment: .leading) {
-                // Empty track — full width, centred vertically.
-                Capsule()
-                    .fill(Theme.bgApp)
-                    .overlay(Capsule().stroke(Theme.stroke, lineWidth: 1))
-                    .frame(height: ControlMetrics.sliderTrack)
-
-                // Filled portion up to the knob centre.
-                Capsule()
-                    .fill(tint)
-                    .frame(width: knobX + knob / 2, height: ControlMetrics.sliderTrack)
-
-                // Knob.
-                Circle()
-                    .fill(Theme.textPrimary)
-                    .overlay(Circle().stroke(tint, lineWidth: dragging ? 2 : 1))
-                    .frame(width: knob, height: knob)
-                    .offset(x: knobX)
-                    .shadow(color: .black.opacity(0.35), radius: 2, y: 1)
-            }
-            .frame(maxHeight: .infinity, alignment: .center)
-            .contentShape(Rectangle())   // whole row is draggable, not just the knob
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { g in
-                        dragging = true
-                        update(toX: g.location.x, usable: usable, knob: knob)
-                    }
-                    .onEnded { _ in
-                        dragging = false
-                        onChange(value)
-                    }
-            )
-        }
-        .frame(height: ControlMetrics.sliderKnob)   // GeometryReader needs a height
-    }
-
-    /// Where the knob sits, 0...1, clamped.
-    private func normalizedFraction() -> Double {
-        let span = range.upperBound - range.lowerBound
-        guard span > 0 else { return 0 }
-        return min(1, max(0, (value - range.lowerBound) / span))
-    }
-
-    /// Translate a drag x-position into a (stepped, clamped) value.
-    private func update(toX x: CGFloat, usable: CGFloat, knob: CGFloat) {
-        guard usable > 0 else { return }
-        let clampedX = min(max(0, x - knob / 2), usable)
-        let fraction = Double(clampedX / usable)
-        let span = range.upperBound - range.lowerBound
-        var raw = range.lowerBound + fraction * span
-        if step > 0 {
-            raw = (raw / step).rounded() * step
-        }
-        value = min(range.upperBound, max(range.lowerBound, raw))
     }
 }
 
@@ -574,91 +439,253 @@ struct ConnectionDot: View {
     }
 }
 
-// MARK: - Labelled slider row
+// MARK: - Parameter strip (one control row: label · value · chips · slim scrub tape)
 
-/// One manual-control row: a leading label, a trailing read-back value, and a
-/// `StyledSlider` underneath.  Greys out + disables when `enabled` is false (the
-/// AE / AWB / AF auto modes drive this — manual sliders go inert while auto is
-/// on).
-///
-/// The slider commits on editing-END via `onCommit` — a drag sends ONE packet,
-/// not one per pixel (cheap-control-packet rule).
-struct SliderRow: View {
+/// One parameter ROW inside a `ControlSection`: the label, the big current VALUE (the hero — yellow
+/// while its section reads AUTO), optional quick-pick CHIPS, and a slim scrub tape below.  The tape's
+/// marker sits at the value's position in the ladder, so far-left = the floor and far-right = the
+/// ceiling (the "can I still go lower?" question, answered visually).  Dragging the tape scrubs the
+/// real stops; the chips jump to standard values; both drop out of AUTO on touch.
+struct ParamStrip: View {
     let label: String
-    let valueText: String
+    let values: [Double]                 // ascending ladder — the whole reachable range
     @Binding var value: Double
-    let range: ClosedRange<Double>
-    var step: Double = 0
-    /// How much the ◀ / ▶ stepper arrows add or subtract per click.  0 falls
-    /// back to `step` (or 1/20 of the range when there's no step), so callers
-    /// only set this when the arrows should jump in coarser units than the drag.
-    var arrowStep: Double = 0
-    var enabled: Bool = true
-    /// Called once when the operator finishes dragging (mouse-up) OR taps an
-    /// arrow, with the final value — the moment to send a control command.
+    let display: (Double) -> String
+    /// The section's AUTO state — colours the value yellow while auto reads live.
+    var auto: Bool = false
+    /// Quick-pick presets (standard stops).  Empty → no chips (Tint / Focus / Zoom).
+    var presets: [Double] = []
+    /// Custom chip tap — WB presets set temperature AND tint together (the phone's lighting pairs).
+    /// nil → tapping a chip just jumps this strip to that value.
+    var onPresetTap: ((Double) -> Void)? = nil
+    /// Custom chip active-check — WB: highlighted only when BOTH temp and tint match the pair.
+    /// nil → active when the strip's value equals the preset.
+    var presetActive: ((Double) -> Bool)? = nil
+    /// Touching the tape / a chip while AUTO is on drops the section to manual.
+    var onExitAuto: (() -> Void)? = nil
     var onCommit: (Double) -> Void
 
-    private var stepAmount: Double {
-        if arrowStep > 0 { return arrowStep }
-        if step > 0 { return step }
-        return Swift.max((range.upperBound - range.lowerBound) / 20, 0.01)
+    @State private var dragging = false
+
+    static let rowHeight: CGFloat = 46
+
+    /// Nearest ladder index to the current value (value can be off-ladder while AUTO reads live).
+    private var selIdx: Int {
+        var best = 0, bestD = Double.infinity
+        for (i, v) in values.enumerated() where abs(v - value) < bestD { bestD = abs(v - value); best = i }
+        return best
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Spacing.xs) {
-            HStack {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(label)
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(enabled ? Theme.textPrimary : Theme.textFaint)
-                Spacer()
-                Text(valueText)
-                    .font(.system(size: 12, weight: .regular).monospacedDigit())
-                    .foregroundColor(enabled ? Theme.textSecondary : Theme.textFaint)
+                    .foregroundColor(Theme.textSecondary)
+                Text(display(value))
+                    .font(.system(size: 19, weight: .medium).monospacedDigit())
+                    .foregroundColor(auto ? Theme.accentYellow : Theme.textPrimary)
+                Spacer(minLength: 8)
+                if !presets.isEmpty { presetChips }
             }
-            HStack(spacing: Spacing.sm) {
-                arrow("chevron.left") { adjust(by: -stepAmount) }
-                StyledSlider(value: $value,
-                             range: range,
-                             step: step,
-                             onChange: { v in if enabled { onCommit(v) } })
-                    .allowsHitTesting(enabled)
-                arrow("chevron.right") { adjust(by: stepAmount) }
-            }
+            slimTape
         }
-        .opacity(enabled ? 1 : 0.45)
+        .frame(height: Self.rowHeight)
     }
 
-    /// A compact stepper-arrow button flanking the slider.
-    private func arrow(_ system: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: system)
-                .font(.system(size: 11, weight: .bold))
-                .frame(width: 26, height: ControlMetrics.sliderKnob)
+    /// Quick-pick chips (standard stops).  Tap to jump; the active one glows yellow.
+    private var presetChips: some View {
+        HStack(spacing: 5) {
+            ForEach(presets, id: \.self) { p in
+                let active = presetActive?(p) ?? (abs(value - p) < 0.0001)
+                Button { if let onPresetTap { onPresetTap(p); tick() } else { jump(to: p) } } label: {
+                    Text(display(p))
+                        .font(.system(size: 11, weight: .medium).monospacedDigit())
+                        .foregroundColor(active ? Theme.accentYellow : Theme.textSecondary)
+                        .padding(.horizontal, 9)
+                        .frame(height: 24)
+                        .background(RoundedRectangle(cornerRadius: 7).fill(Theme.bgHover))
+                        .overlay(RoundedRectangle(cornerRadius: 7)
+                            .stroke(active ? Theme.accentYellow.opacity(0.6) : Theme.strokeDivider, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+            }
         }
-        .bridgeButton(corner: Radius.control)
-        .disabled(!enabled)
     }
 
-    /// Step the value by `delta`, clamped to the range, and commit it.
-    private func adjust(by delta: Double) {
-        guard enabled else { return }
-        let next = Swift.min(range.upperBound, Swift.max(range.lowerBound, value + delta))
-        value = next
-        onCommit(next)
+    /// Slim scrub tape: even ticks + a yellow marker at the value's position in the ladder.  Drag to
+    /// scrub (snaps to stops); left edge = the floor, right edge = the ceiling.
+    private var slimTape: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let frac = values.count > 1 ? CGFloat(selIdx) / CGFloat(values.count - 1) : 0
+            ZStack(alignment: .leading) {
+                Canvas { ctx, size in
+                    let midY = size.height / 2
+                    var x: CGFloat = 0
+                    while x <= size.width {
+                        ctx.fill(Path(CGRect(x: x, y: midY - 3, width: 1, height: 6)),
+                                 with: .color(Theme.strokeDivider.opacity(0.6)))
+                        x += 13
+                    }
+                }
+                Capsule()
+                    .fill(Theme.accentYellow)
+                    .frame(width: 3, height: 15)
+                    .offset(x: Swift.max(0, Swift.min(w - 3, frac * w)))
+            }
+            .frame(height: 15)
+            .contentShape(Rectangle())
+            .onHover { inside in if inside { NSCursor.openHand.push() } else { NSCursor.pop() } }
+            .gesture(scrub(width: w))
+        }
+        .frame(height: 15)
+    }
+
+    /// Ladder value at finger x.  Used by BOTH onChanged and onEnded so the COMMITTED value comes from
+    /// the GESTURE, never from a `value` that a mid-drag re-seed may have clobbered (the seed-vs-drag
+    /// race — a 1 Hz / post-commit snapshot landing in the sliver before mouse-up).
+    private func valueAt(x: CGFloat, width w: CGFloat) -> Double {
+        guard w > 0, values.count > 1 else { return value }
+        let frac = Double(Swift.min(w, Swift.max(0, x)) / w)
+        let idx = Swift.min(values.count - 1, Swift.max(0, Int((frac * Double(values.count - 1)).rounded())))
+        return values[idx]
+    }
+
+    private func scrub(width w: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { g in
+                guard w > 0, values.count > 1 else { return }
+                if !dragging { dragging = true; if auto { onExitAuto?() } }
+                let next = valueAt(x: g.location.x, width: w)
+                if next != value { value = next; tick() }
+            }
+            .onEnded { g in
+                guard dragging else { return }
+                dragging = false
+                let final = valueAt(x: g.location.x, width: w)   // from the gesture, not a reseeded `value`
+                value = final
+                onCommit(final)
+            }
+    }
+
+    /// Tap a chip → jump there (dropping out of auto), commit once.
+    private func jump(to v: Double) {
+        if auto { onExitAuto?() }
+        value = v
+        onCommit(v)
+        tick()
+    }
+
+    private func tick() {
+        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
     }
 }
 
-// MARK: - Auto toggle (AE / AWB / AF)
+// MARK: - Control section (titled card with one optional section-level AUTO)
 
-/// A compact auto toggle for exposure / white-balance / focus, wrapping
-/// `PillToggle`.  ON = accent (auto active); OFF = quiet neutral (manual).
-/// Signature kept stable for CameraControlPanel.
-struct AutoToggle: View {
+/// A titled section card grouping related parameter rows.  The header carries the section's ONE AUTO
+/// toggle — exposure-auto governs ISO + Shutter, WB-auto governs Temp + Tint, focus-auto governs Focus
+/// — so AUTO lives ONCE per section, not once per row (which is how the camera's auto modes actually
+/// work).  `onAuto` nil → no AUTO (the Look section).
+struct ControlSection<Content: View>: View {
     let title: String
-    @Binding var isAuto: Bool
-    var onChange: (Bool) -> Void
+    var auto: Bool = false
+    var onAuto: ((Bool) -> Void)? = nil
+    /// Optional compact control shown in the header, LEFT of the AUTO toggle (e.g. EV compensation).
+    var accessory: AnyView? = nil
+    @ViewBuilder var content: () -> Content
 
     var body: some View {
-        PillToggle(title: title, isOn: $isAuto, onChange: onChange)
+        Card(padding: Spacing.sm) {
+            VStack(alignment: .leading, spacing: Spacing.sm) {
+                HStack(spacing: Spacing.sm) {
+                    Text(title.uppercased())
+                        .font(.system(size: 11, weight: .medium)).tracking(0.6)
+                        .foregroundColor(Theme.textFaint)
+                    Spacer()
+                    if let accessory { accessory }
+                    if let onAuto { autoToggle(onAuto) }
+                }
+                content()
+            }
+        }
+    }
+
+    private func autoToggle(_ action: @escaping (Bool) -> Void) -> some View {
+        Button { action(!auto) } label: {
+            Text("AUTO")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(auto ? Theme.accentYellow : Theme.textSecondary)
+                .padding(.horizontal, 11).frame(height: 24)
+                .background(RoundedRectangle(cornerRadius: 7).fill(auto ? Theme.accentYellow.opacity(0.16) : Theme.bgHover))
+                .overlay(RoundedRectangle(cornerRadius: 7).stroke(auto ? Theme.accentYellow.opacity(0.55) : .clear, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Compact draggable value (a value you scrub, NOT a slider)
+
+/// A small `label · value` pill you DRAG to scrub in `step` units — no track, no tape.  Used for EV
+/// compensation beside the Exposure AUTO: it mirrors the phone's value and lets you nudge it.  Grab
+/// cursor + per-step haptic; commits on release (one control packet, not one per pixel).
+struct CompactValueDrag: View {
+    let label: String
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    var step: Double = 0.1
+    let display: (Double) -> String
+    /// Value goes accent-yellow when this is true (e.g. EV ≠ 0) — else quiet.
+    var accent: Bool = false
+    /// ACTIVE → sits IN a box at full opacity (reads "live").  INACTIVE → no box, semi-transparent —
+    /// still editable (you can pre-set it), but signalled as not-currently-doing-anything.  For EV:
+    /// active while auto-exposure is ON (EV biases the auto target); dimmed in manual.
+    var active: Bool = true
+    var onCommit: (Double) -> Void
+
+    @State private var dragStart: Double?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(label).font(.system(size: 10, weight: .medium)).foregroundColor(Theme.textFaint)
+            Text(display(value))
+                .font(.system(size: 13, weight: .medium).monospacedDigit())
+                .foregroundColor(accent ? Theme.accentYellow : Theme.textSecondary)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 24)
+        .background(RoundedRectangle(cornerRadius: 7).fill(active ? Theme.bgHover : Color.clear))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(active ? Theme.strokeDivider : Color.clear, lineWidth: 1))
+        .opacity(active ? 1 : 0.45)
+        .contentShape(Rectangle())
+        .onHover { inside in if inside { NSCursor.openHand.push() } else { NSCursor.pop() } }
+        .gesture(
+            DragGesture(minimumDistance: 2)
+                .onChanged { g in
+                    if dragStart == nil { dragStart = value }
+                    let next = valueFrom(start: dragStart ?? value, translationWidth: g.translation.width)
+                    if abs(next - value) > step / 2 {
+                        value = next
+                        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+                    }
+                }
+                // Commit the value computed from the GESTURE (frozen `dragStart` + final translation),
+                // never a `value` a mid-drag re-seed may have clobbered (the seed-vs-drag race).
+                .onEnded { g in
+                    guard let start = dragStart else { return }
+                    dragStart = nil
+                    let final = valueFrom(start: start, translationWidth: g.translation.width)
+                    value = final
+                    onCommit(final)
+                }
+        )
+    }
+
+    /// Value after dragging `dx` points from a frozen `start` — one step per ~10 pt; snapped + clamped.
+    private func valueFrom(start: Double, translationWidth dx: CGFloat) -> Double {
+        let raw = start + Double(dx) / 10 * step
+        let snapped = (raw / step).rounded() * step
+        return Swift.min(range.upperBound, Swift.max(range.lowerBound, snapped))
     }
 }

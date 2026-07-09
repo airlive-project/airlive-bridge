@@ -44,6 +44,11 @@ final class RTSPOutput: VideoOutput {
     /// Fires on MAIN when a client starts PLAYING — the model forces one IDR so the new viewer
     /// decodes immediately instead of waiting out the camera's 6–10 s GOP.
     var onPlay: (() -> Void)?
+    /// Card-visible failure (see VideoOutput.lastError).  Main-confined.
+    private(set) var lastError: String?
+    /// Fires on MAIN when `lastError` changes — the model nudges objectWillChange
+    /// so the card re-renders (VideoOutput isn't observable).
+    var onStateChanged: (() -> Void)?
     let port: UInt16
 
     private let queue = DispatchQueue(label: "studio.airlive.bridge.rtsp", qos: .userInitiated)
@@ -135,6 +140,10 @@ final class RTSPOutput: VideoOutput {
 
     // MARK: - Listener (queue-confined)
 
+    /// Anonymous LAN clients get no auth by product design — so cap how many can
+    /// hold sessions at once (bounds the RTP fan-out) instead.
+    private static let maxClients = 16
+
     private func startListener() {
         let tcp = NWProtocolTCP.Options(); tcp.noDelay = true
         let params = NWParameters(tls: nil, tcp: tcp)
@@ -144,21 +153,38 @@ final class RTSPOutput: VideoOutput {
             l = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!)
         } catch {
             print("[RTSP \(label)] ❌ listen on \(port) failed: \(error)")
+            reportError("Port \(port) is busy — quit the app holding it, then toggle again")
             isLive = false
             return
         }
         l.newConnectionHandler = { [weak self] conn in
             guard let self else { return }
+            guard self.clients.count < Self.maxClients else { conn.cancel(); return }
             let client = RTSPClient(connection: conn, queue: self.queue, owner: self)
             self.clients.append(client)
             client.start()
         }
         l.stateUpdateHandler = { [weak self] state in
-            if case .ready = state { print("[RTSP \(self?.label ?? "")] ✅ rtsp://…:\(self?.port ?? 0)/program") }
+            if case .ready = state {
+                print("[RTSP \(self?.label ?? "")] ✅ rtsp://…:\(self?.port ?? 0)/program")
+                self?.reportError(nil)   // bound successfully — clear any stale failure
+            }
         }
         l.start(queue: queue)
         listener = l
     }
+
+    /// Publish/clear the card-visible failure line (main-confined; `onStateChanged`
+    /// nudges the model so the card re-renders).
+    private func reportError(_ message: String?) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.lastError != message else { return }
+            self.lastError = message
+            self.onStateChanged?()
+        }
+    }
+
+    func clearError() { reportError(nil) }
 
     /// Remove a client that closed (called on `queue` by the client).
     fileprivate func remove(_ client: RTSPClient) {
@@ -279,12 +305,21 @@ private final class RTSPClient {
         owner?.remove(self)
     }
 
+    /// Requests we serve are a few hundred bytes of headers; anything past this
+    /// without a terminator is a garbage/hostile client — drop it instead of
+    /// buffering its bytes forever (the RTSP port is open to the LAN by design).
+    private static let maxRequestBytes = 8 * 1024
+
     private func receive() {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, isDone, error in
             guard let self else { return }
             if let data, !data.isEmpty {
                 self.requestBuffer.append(data)
                 self.drainRequests()
+                if self.requestBuffer.count > Self.maxRequestBytes {
+                    print("[RTSP] request exceeded \(Self.maxRequestBytes) B without a terminator — dropping client")
+                    self.close(); self.handleClosed(); return
+                }
             }
             if isDone || error != nil { self.handleClosed(); return }
             self.receive()
