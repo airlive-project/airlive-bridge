@@ -298,6 +298,14 @@ final class NDIOutput: VideoOutput {
         lock.lock(); defer { lock.unlock() }
         destroySenderLocked()
         _isLive = false
+        // Drop the BGRA conversion pool (~25 MB of IOSurfaces at 1080p) — it only ever exists
+        // for a non-BGRA source (rare: the Studio decoder emits BGRA), and a stopped output
+        // shouldn't keep it warm.  Safe under `lock` (all pool access is lock-held in deliver's
+        // convert); conversionDestinationLocked lazily rebuilds on next use.  The CIContext
+        // deliberately STAYS cached (50–200 ms rebuild — see bgraBufferLocked).
+        conversionPool = nil
+        poolWidth = 0
+        poolHeight = 0
     }
 
     /// Publish one decoded frame.  No-op when not live.  Called on MAIN (the program tap) but

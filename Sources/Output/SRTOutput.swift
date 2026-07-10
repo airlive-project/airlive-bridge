@@ -201,9 +201,38 @@ final class SRTOutput: VideoOutput {
         }
     }
 
+    /// Bounded-backlog guard for `relaySample`.  We set NO socket options (only startup/create/
+    /// connect/send/close are resolved), so libsrt defaults hold: `srt_send` is BLOCKING
+    /// (SRTO_SNDSYN), but live-mode's sender-side too-late drop (SRTO_TLPKTDROP, ~1 s floor)
+    /// time-caps the send buffer, so a single-digit-Mbps wire should never fill the ~8192-packet
+    /// SNDBUF and block chronically.  "Should" is libsrt's promise, not ours — and the blocking
+    /// srt_connect (~3 s) / dead-peer (~5 s SRTO_PEERIDLETIMEO) windows DO stall `queue`
+    /// transiently while samples keep arriving, each enqueue retaining a full payload.  So:
+    /// count enqueued samples (shares `liveLock`, the file's trivial-contention pattern) and
+    /// DROP the newest past ~2 s at 30 fps — one-shot log per episode, not per sample.  Dropped
+    /// access units corrupt decode only until the next keyframe, the same self-heal as the
+    /// awaitingFormat / forced-IDR machinery after a CUT.
+    private var pendingSamples = 0
+    private var backlogDropping = false
+    private static let maxPendingSamples = 60   // ~2 s of samples at 30 fps
+
     func relaySample(_ payload: Data, timestampMicros: Int64) {
+        liveLock.lock()
+        if pendingSamples >= Self.maxPendingSamples {
+            let firstDrop = !backlogDropping
+            backlogDropping = true
+            liveLock.unlock()   // `label` takes liveLock — must not print while holding it
+            if firstDrop {
+                print("[SRTOutput \(label)] ⚠️ send backlog > \(Self.maxPendingSamples) samples — dropping newest until it drains")
+            }
+            return
+        }
+        pendingSamples += 1
+        liveLock.unlock()
         queue.async { [weak self] in
-            guard let self, !self.awaitingFormat, self.isLive, self.sock != SRT_INVALID_SOCK else { return }
+            guard let self else { return }
+            self.drainPendingSample()
+            guard !self.awaitingFormat, self.isLive, self.sock != SRT_INVALID_SOCK else { return }
             let nals = H264NAL.nalUnits(fromAVCC: payload)
             guard !nals.isEmpty else { return }
             let keyframe = nals.contains { H264NAL.type(of: $0) == 5 }
@@ -212,6 +241,17 @@ final class SRTOutput: VideoOutput {
                                     isKeyframe: keyframe)
             self.transmit(ts)
         }
+    }
+
+    /// Queue-side half of the backlog guard: decrement as each enqueued sample starts, and emit
+    /// the matching one-shot "recovered" line once the backlog drains below half the threshold.
+    private func drainPendingSample() {
+        liveLock.lock()
+        pendingSamples -= 1
+        let recovered = backlogDropping && pendingSamples < Self.maxPendingSamples / 2
+        if recovered { backlogDropping = false }
+        liveLock.unlock()
+        if recovered { print("[SRTOutput \(label)] ✅ send backlog drained — resuming samples") }
     }
 
     // MARK: - Queue-confined
