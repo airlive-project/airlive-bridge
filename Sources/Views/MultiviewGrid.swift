@@ -38,7 +38,8 @@ struct MultiviewGrid: View {
                 .overlay(Rectangle().strokeBorder(Theme.stroke, lineWidth: 1))
                 cameraControl
             }
-            .padding(Spacing.lg)
+            .padding(.horizontal, Spacing.lg).padding(.bottom, Spacing.lg)
+            .padding(.top, Spacing.md)          // 12 — match the rail headers' top so the bars line up
         }
     }
 
@@ -106,7 +107,7 @@ struct MultiviewGrid: View {
                                         .foregroundColor(.white.opacity(isSel ? 0.85 : 0.45))
                                 }
                             }
-                            .frame(height: 26)
+                            .frame(height: 22)
                             .padding(.horizontal, Spacing.sm)
                         }
                         .bridgeButton(selected: isSel)
@@ -138,7 +139,7 @@ struct MultiviewGrid: View {
                         .foregroundColor(Theme.textFaint.opacity(0.7))
                 }
             }
-            .frame(height: 26)
+            .frame(height: 22)
             .padding(.horizontal, Spacing.sm)
         }
         .bridgeButton()
@@ -162,7 +163,7 @@ struct MultiviewGrid: View {
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
                 Text("Full-Screen").font(.system(size: 11, weight: .medium))
             }
-            .frame(height: 26)
+            .frame(height: 22)
             .padding(.horizontal, Spacing.sm)
         }
         .bridgeButton()
@@ -176,7 +177,7 @@ struct MultiviewGrid: View {
                 Image(systemName: "rectangle.on.rectangle")
                 Text("Detach").font(.system(size: 11, weight: .medium))
             }
-            .frame(height: 26)
+            .frame(height: 22)
             .padding(.horizontal, Spacing.sm)
         }
         .bridgeButton()

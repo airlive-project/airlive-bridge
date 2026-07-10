@@ -36,6 +36,9 @@ struct ContentView: View {
         // columns (the mode-bar divider moved into the title bar with the switch).
         .overlay(Rectangle().frame(height: 1).foregroundColor(Theme.stroke),
                  alignment: .top)
+        // Our own dropdown lists render here (window root) so they sit above everything and use OUR
+        // corner radius / shadow — not the system `.popover` chrome.  One host for the whole app.
+        .overlay(DropdownOverlay())
         .preferredColorScheme(.dark)
         // No toolbar items: the Solo ⇄ Multiview switch was REMOVED for launch
         // (2026-07-03) — Multiview is the only mode; Solo needs a real per-channel

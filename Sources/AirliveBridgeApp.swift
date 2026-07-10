@@ -58,7 +58,13 @@ struct AirliveBridgeApp: App {
     }
 
     var body: some Scene {
-        WindowGroup {
+        // Single `Window`, NOT `WindowGroup`: Bridge's main is ONE control surface.  WindowGroup adds
+        // a ⌘N "New Window" that opens a duplicate ContentView — and that mounts a SECOND
+        // `DropdownOverlay` observing the shared `DropdownPresenter`, so opening a list in one window
+        // lit the other window's full-window scrim and swallowed its next click.  One window ⇒ one
+        // overlay ⇒ no cross-window input capture.  A single `Window` reopens on Dock-activate after a
+        // close, so nothing is lost.  (The Multiview Wall + Shortcuts are still their own scenes.)
+        Window("Airlive Bridge", id: "bridge-main") {
             ContentView()
                 .environmentObject(model)
                 .environmentObject(shortcuts)

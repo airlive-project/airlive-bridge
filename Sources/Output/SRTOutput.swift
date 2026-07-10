@@ -86,7 +86,14 @@ private let srtPayloadSize = 1316
 
 final class SRTOutput: VideoOutput {
     let id = UUID()
-    var label: String
+    /// Lock-backed: renamed on main (BridgeModel.renameOutput) while `queue` reads it for log lines —
+    /// a plain `var label: String` races the String's CoW buffer across threads.  Shares `liveLock`
+    /// with `isLive`/`isConnected` (same trivial-contention pattern).
+    var label: String {
+        get { liveLock.lock(); defer { liveLock.unlock() }; return _label }
+        set { liveLock.lock(); _label = newValue; liveLock.unlock() }
+    }
+    private var _label: String
     let kind: OutputKind = .srt
     var config: String = ""        // destination: srt://host:port
 
@@ -145,7 +152,7 @@ final class SRTOutput: VideoOutput {
     private var awaitingFormat = false
     private var awaitToken = 0
 
-    init(label: String) { self.label = label }
+    init(label: String) { self._label = label }
 
     func start() {
         guard !isLive else { return }

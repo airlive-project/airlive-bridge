@@ -102,20 +102,17 @@ struct OutputsRail: View {
             // "+" (semi-transparent box, right edge — replaces the old count) opens a
             // menu of output TYPES: NDI adds a real output; SRT / RTSP / Virtual
             // Camera show as "soon" (disabled).
-            Menu {
-                // OBS is offered only while absent — there is exactly one local plugin to feed,
-                // so a second instance could never connect (single loopback slot).
+            MenuButton(rows: {
+                // OBS is offered only while absent — one local plugin to feed (single loopback slot).
                 let hasOBS = model.programOutputs.contains { $0.kind == .obs }
-                ForEach(OutputKind.allCases.filter { $0 != .obs || !hasOBS }) { kind in
-                    Button {
-                        if kind.isImplemented { addProgramOutput(kind, to: model) }
-                    } label: {
-                        Label(kind.isImplemented ? kind.displayName : "\(kind.displayName) — soon",
-                              systemImage: kind.symbolName)
-                    }
-                    .disabled(!kind.isImplemented)
+                return OutputKind.allCases.filter { $0 != .obs || !hasOBS }.map { kind in
+                    DropdownRow(id: kind.displayName,
+                                label: kind.isImplemented ? kind.displayName : "\(kind.displayName) — soon",
+                                icon: kind.symbolName,
+                                isDisabled: !kind.isImplemented,
+                                action: { if kind.isImplemented { addProgramOutput(kind, to: model) } })
                 }
-            } label: {
+            }) {
                 // Match the Channels "+" exactly (boxed: fill + 1pt stroke).
                 Image(systemName: "plus")
                     .font(.system(size: 11, weight: .bold))
@@ -130,9 +127,6 @@ struct OutputsRail: View {
                             .stroke(Theme.stroke, lineWidth: 1)
                     )
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
             .help("Add a program output")
             collapseChevron("chevron.right")   // collapse this column
         }
@@ -447,35 +441,40 @@ private struct OutputCard: View {
             .compactMap { $0 as? HDMIOutput }
             .filter { $0.id != output.id }
             .compactMap { HDMIOutput.resolveScreen($0.config)?.displayID })
-        return Menu {
-            ForEach(Array(screens.enumerated()), id: \.offset) { pair in
-                Button(Self.screenName(pair.element, index: pair.offset)) {
-                    (output as? HDMIOutput)?.setDisplay(String(pair.element.displayID))
-                    refresh += 1
-                    model.objectWillChange.send()
-                }
-                .disabled(claimed.contains(pair.element.displayID))
-            }
-        } label: {
-            HStack(spacing: Spacing.xs) {
-                Text(current.map { Self.screenName($0, index: screens.firstIndex(of: $0) ?? 0) }
-                     ?? "No display")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(Theme.textPrimary)
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundColor(Theme.textSecondary)
-            }
-            .padding(.horizontal, Spacing.sm)
-            .frame(maxWidth: .infinity)
-            .frame(height: ControlMetrics.pillHeight)
-            .background(RoundedRectangle(cornerRadius: Radius.control, style: .continuous).fill(Theme.bgApp))
-            .overlay(RoundedRectangle(cornerRadius: Radius.control, style: .continuous).stroke(Theme.stroke, lineWidth: 1))
+        // Our Dropdown keys by the label STRING, so labels must be 1:1 with screens — two identical
+        // monitors share `localizedName` and would collide (the 2nd row un-selectable, its check
+        // ambiguous).  Build unique labels keyed by the stable CGDirectDisplayID (which the MODEL
+        // already uses via setDisplay/resolveScreen); a name collision gets a " (2)" suffix.
+        let labelByID = Self.uniqueScreenLabels(screens)
+        let named = screens.map { (label: labelByID[$0.displayID] ?? "Display", screen: $0) }
+        let currentLabel = current.flatMap { labelByID[$0.displayID] }
+        return Dropdown(items: named.map(\.label),
+                        selection: currentLabel,
+                        displayText: currentLabel ?? "No display",
+                        isPlaceholder: currentLabel == nil,
+                        disabledItems: Set(named.filter { claimed.contains($0.screen.displayID) }.map(\.label)),
+                        triggerHeight: ControlMetrics.pillHeight) { picked in
+            guard let screen = named.first(where: { $0.label == picked })?.screen else { return }
+            (output as? HDMIOutput)?.setDisplay(String(screen.displayID))
+            refresh += 1
+            model.objectWillChange.send()
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
+    }
+
+    /// A DISTINCT label for every screen, keyed by CGDirectDisplayID.  `screenName` alone collides
+    /// for two identical-model monitors (same `localizedName`); a collision gets a " (2)", " (3)" …
+    /// suffix so the Dropdown's string keys stay 1:1 with screens.  The model still keys by the
+    /// stable displayID, so a label reshuffle across renders never corrupts the stored selection.
+    private static func uniqueScreenLabels(_ screens: [NSScreen]) -> [CGDirectDisplayID: String] {
+        var counts: [String: Int] = [:]
+        var result: [CGDirectDisplayID: String] = [:]
+        for (i, screen) in screens.enumerated() {
+            let base = screenName(screen, index: i)
+            let n = (counts[base] ?? 0) + 1
+            counts[base] = n
+            result[screen.displayID] = n == 1 ? base : "\(base) (\(n))"
+        }
+        return result
     }
 
     /// A friendly screen label.  `localizedName` is macOS 14+; on 13 fall back to

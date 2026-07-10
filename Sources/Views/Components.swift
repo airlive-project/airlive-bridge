@@ -594,6 +594,10 @@ struct ControlSection<Content: View>: View {
     var onAuto: ((Bool) -> Void)? = nil
     /// Optional compact control shown in the header, LEFT of the AUTO toggle (e.g. EV compensation).
     var accessory: AnyView? = nil
+    /// Stretch the card to fill its offered height — set on both cards of a two-column row (with the
+    /// row `.fixedSize(vertical:)` + each section `.frame(maxHeight:.infinity)`) so their bottoms line
+    /// up even when one has more rows or a taller header (AUTO) than the other.
+    var fillHeight: Bool = false
     @ViewBuilder var content: () -> Content
 
     var body: some View {
@@ -609,6 +613,7 @@ struct ControlSection<Content: View>: View {
                 }
                 content()
             }
+            .frame(maxWidth: .infinity, maxHeight: fillHeight ? .infinity : nil, alignment: .topLeading)
         }
     }
 

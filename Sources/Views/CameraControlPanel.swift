@@ -171,13 +171,15 @@ struct CameraControlPanel: View {
             // Titled SECTIONS, one AUTO each, in two columns.  Exposure-auto governs ISO+Shutter, WB-auto
             // governs Temp+Tint, focus-auto governs Focus.  Look has no auto.
             HStack(alignment: .top, spacing: Spacing.md) {
-                exposureSection.frame(maxWidth: .infinity)
-                whiteBalanceSection.frame(maxWidth: .infinity)
+                exposureSection.frame(maxWidth: .infinity, maxHeight: .infinity)
+                whiteBalanceSection.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .fixedSize(horizontal: false, vertical: true)     // equal-height the pair → aligned bottoms
             HStack(alignment: .top, spacing: Spacing.md) {
-                focusSection.frame(maxWidth: .infinity)
-                lookSection.frame(maxWidth: .infinity)
+                focusSection.frame(maxWidth: .infinity, maxHeight: .infinity)
+                lookSection.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .fixedSize(horizontal: false, vertical: true)
             HStack(alignment: .top, spacing: Spacing.md) {
                 // Stabilization shows only when the camera supports it (it affects the pictured video);
                 // otherwise Output delay takes the whole row.  fps / resolution were removed — they only
@@ -209,7 +211,7 @@ struct CameraControlPanel: View {
     private var exposureSection: some View {
         ControlSection(title: "Exposure", auto: exposureAuto,
                        onAuto: { on in exposureAuto = on; channel.send(.setExposureAuto(on)) },
-                       accessory: AnyView(evControl)) {
+                       accessory: AnyView(evControl), fillHeight: true) {
             VStack(spacing: Spacing.sm) {
                 ParamStrip(label: "ISO", values: isoLadder, value: $iso, display: { "\(Int($0))" },
                            auto: exposureAuto, presets: isoPresets, onExitAuto: exitExposureAuto) { v in
@@ -225,7 +227,8 @@ struct CameraControlPanel: View {
 
     private var whiteBalanceSection: some View {
         ControlSection(title: "White balance", auto: whiteBalanceAuto,
-                       onAuto: { on in whiteBalanceAuto = on; channel.send(.setWhiteBalanceAuto(on)) }) {
+                       onAuto: { on in whiteBalanceAuto = on; channel.send(.setWhiteBalanceAuto(on)) },
+                       fillHeight: true) {
             VStack(spacing: Spacing.sm) {
                 ParamStrip(label: "Temperature", values: tempLadder, value: $wbKelvin, display: { "\(Int($0))K" },
                            auto: whiteBalanceAuto, presets: tempPresets,
@@ -252,7 +255,8 @@ struct CameraControlPanel: View {
 
     private var focusSection: some View {
         ControlSection(title: "Focus", auto: focusAuto,
-                       onAuto: { on in focusAuto = on; channel.send(.setFocusAuto(on)) }) {
+                       onAuto: { on in focusAuto = on; channel.send(.setFocusAuto(on)) },
+                       fillHeight: true) {
             VStack(spacing: Spacing.sm) {
                 ParamStrip(label: "Focus", values: Self.focusLadder, value: $focus, display: { String(format: "%.3f", $0) },
                            auto: focusAuto, onExitAuto: exitFocusAuto) { v in
@@ -267,7 +271,7 @@ struct CameraControlPanel: View {
     }
 
     private var lookSection: some View {
-        ControlSection(title: "Look") {
+        ControlSection(title: "Look", fillHeight: true) {
             VStack(alignment: .leading, spacing: Spacing.sm) {
                 // ISO compensation — label left, on/off toggle far right (aligns with the LUT toggle).
                 lookToggleRow("ISO compensation", isOn: isoCompensation) {
@@ -278,7 +282,7 @@ struct CameraControlPanel: View {
                 // NOT gated on a "colorSpace" cap (this camera advertises its spaces via `capabilities`,
                 // not a separate flag).  Readback-driven: a camera that refuses just re-broadcasts the
                 // unchanged value.  No toggle → an equal-width spacer keeps its box aligned with the LUT.
-                lookBoxRow(label: "Colour space",
+                lookBoxRow(label: "Color space",
                            value: channel.remote?.colorSpace ?? "—", isPlaceholder: false,
                            options: colorSpaceOptions, enabled: !colorSpaceOptions.isEmpty, toggle: nil) { v in
                     channel.send(.setColorSpace(v))   // EXACT raws (a wrong spelling silently no-ops)
@@ -309,46 +313,26 @@ struct CameraControlPanel: View {
         .frame(height: Self.lookRowHeight)
     }
 
-    /// Look row = fixed label + a FULL-WIDTH boxed dropdown (value left-aligned, chevron right) + a
-    /// trailing on/off toggle (or an equal-width spacer so every box lines up).  This is the reference
-    /// card style: the box spans the block, so different names never shift the control's position.
+    /// Look row = fixed label + our shared `Dropdown` (full-width boxed trigger + styled popover list,
+    /// NOT the native NSMenu) + a trailing on/off toggle (or an equal-width spacer so the boxes line up).
     private func lookBoxRow(label: String, value: String, isPlaceholder: Bool, options: [String],
                             enabled: Bool, toggle: AnyView?, onPick: @escaping (String) -> Void) -> some View {
         HStack(spacing: Spacing.sm) {
             Text(label).font(.system(size: 13, weight: .medium)).foregroundColor(Theme.textPrimary)
                 .frame(width: Self.lookLabelWidth, alignment: .leading)
-            // Menu whose LABEL *is* the full box.  `.buttonStyle(.plain)` (NOT `.borderlessButton`) is
-            // what BOTH stretches the label to full width AND keeps it clickable — verified by rendering
-            // the layout.  borderlessButton content-sized the label (collapsed / uneven boxes); an
-            // invisible overlay-Menu rendered the box but never received the click.
-            Menu {
-                ForEach(options, id: \.self) { o in Button(o) { onPick(o) } }
-            } label: {
-                HStack(spacing: Spacing.xs) {
-                    Text(value)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(isPlaceholder ? Theme.textFaint : Theme.textPrimary)
-                        .lineLimit(1)
-                    Spacer(minLength: 0)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundColor(Theme.textSecondary)
-                }
-                .padding(.horizontal, Spacing.sm)
-                .frame(maxWidth: .infinity)
-                .frame(height: Self.lookRowHeight)
-                .background(RoundedRectangle(cornerRadius: Radius.button, style: .continuous).fill(Theme.bgSelected))
-                .overlay(RoundedRectangle(cornerRadius: Radius.button, style: .continuous).stroke(Theme.strokeDivider, lineWidth: 1))
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .menuIndicator(.hidden)
-            .disabled(!enabled)
+                .opacity(enabled ? 1 : 0.5)         // match the Dropdown's own disabled dim (below)
+            Dropdown(items: options,
+                     selection: options.contains(value) ? value : nil,
+                     displayText: value,
+                     isPlaceholder: isPlaceholder,
+                     isEnabled: enabled,
+                     onSelect: onPick)
             // Toggle slot (= PowerToggle width): the LUT's on/off, or an empty spacer for Colour space,
-            // so both boxes end at the same x.
+            // so both boxes end at the same x.  Dim it with the label so a disabled row reads uniformly
+            // greyed (the Dropdown self-dims; without this the label + knob stayed full-bright).
             ZStack { if let toggle { toggle } }.frame(width: ControlMetrics.chipWidth)
+                .opacity(enabled ? 1 : 0.5)
         }
-        .opacity(enabled ? 1 : 0.5)
     }
 
     /// Preview-LUT: a full-width boxed dropdown (matching Colour space) + on/off toggle.  A new camera
@@ -388,42 +372,15 @@ struct CameraControlPanel: View {
     /// runtime connection-property change the camera applies mid-take, and it DOES affect the
     /// stabilized picture the wire carries.  EXACT raws "Standard"/"High" from `caps.stabilizations`.
     private var stabilizationSection: some View {
-        ControlSection(title: "Stabilization") {
-            HStack(spacing: Spacing.sm) {
-                formatMenu(title: "Mode",
-                           value: stabSel.isEmpty ? (channel.remote?.stabilization ?? "—") : stabSel,
-                           options: caps.stabilizations, display: { $0 }) { v in
-                    stabSel = v
-                    channel.send(.setStabilization(v))
-                }
-                .help("Video stabilization — Standard / High (safe mid-take)")
-                Spacer()
+        let cur = stabSel.isEmpty ? (channel.remote?.stabilization ?? "—") : stabSel
+        return ControlSection(title: "Stabilization") {
+            Dropdown(items: caps.stabilizations,
+                     selection: caps.stabilizations.contains(cur) ? cur : nil,
+                     displayText: cur, isPlaceholder: cur == "—") { v in
+                stabSel = v
+                channel.send(.setStabilization(v))     // EXACT raws "Standard"/"High" from caps
             }
         }
-    }
-
-    /// One format dropdown chip — same look as the LUT dropdown (chip + chevron, menu on click).
-    /// Generic over the option type (Double fps, String resolution) so the chip style lives ONCE.
-    private func formatMenu<T: Hashable>(title: String, value: String, options: [T],
-                                         display: @escaping (T) -> String,
-                                         onPick: @escaping (T) -> Void) -> some View {
-        Menu {
-            ForEach(options, id: \.self) { o in
-                Button(display(o)) { onPick(o) }
-            }
-        } label: {
-            HStack(spacing: 6) {
-                Text(title).font(.system(size: 10, weight: .medium)).foregroundColor(Theme.textFaint)
-                Text(value).font(.system(size: 12, weight: .medium).monospacedDigit()).foregroundColor(Theme.textSecondary)
-                Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold)).foregroundColor(Theme.textFaint)
-            }
-            .padding(.horizontal, 9).frame(height: 24)
-            .background(RoundedRectangle(cornerRadius: 7).fill(Theme.bgHover))
-            .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.strokeDivider, lineWidth: 1))
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
     }
 
     // MARK: Output delay (jitter-buffer latency) — per channel, in BOTH modes

@@ -249,6 +249,13 @@ final class NDIOutput: VideoOutput {
     // mid-send.  Also guards `_isLive` (the public `isLive` accessor takes it).
     private let lock = NSLock()
 
+    // Serializes ONLY the actual SDK `sendVideo` call against sender teardown (stop/rename), so the
+    // send can run OUTSIDE `lock`.  Rationale: `sendVideo` can block on a slow/backed-up NDI receiver;
+    // holding `lock` across it would stall a main-thread `send()` that only needs `lock` to check
+    // state.  `sender` is read/written only under this lock; deliver() re-reads it here so a teardown
+    // landing mid-convert skips the send cleanly instead of using a freed handle (UAF).
+    private let senderLock = NSLock()
+
     // The program tap calls `send` on MAIN (BridgeModel.feedProgram); the BGRA convert +
     // synchronous SDK send must NOT block main per frame.  Hand them to this serial queue.
     // `sendInFlight` drops a frame while one is still being sent, so a slow/stalled NDI
@@ -335,11 +342,14 @@ final class NDIOutput: VideoOutput {
 
     /// The actual convert + SDK send, off main on `sendQueue`.
     private func deliver(_ pixelBuffer: CVPixelBuffer, timeNs: UInt64) {
-        lock.lock(); defer { lock.unlock() }
-        guard _isLive, let sender, let sendVideo = NDIRuntime.shared.sendVideo else { return }
-
+        // Convert under `lock` (the BGRA pool + CIContext are lock-guarded), then RELEASE `lock`
+        // before the SDK send.  The send goes out under `senderLock` instead — a slow receiver
+        // blocking `sendVideo` must never hold `lock` and stall a main-thread send() checking state.
+        lock.lock()
+        guard _isLive, NDIRuntime.shared.sendVideo != nil else { lock.unlock(); return }
         let outBuffer = bgraBufferLocked(from: pixelBuffer)
-        guard let outBuffer else { return }
+        lock.unlock()
+        guard let outBuffer, let sendVideo = NDIRuntime.shared.sendVideo else { return }
 
         CVPixelBufferLockBaseAddress(outBuffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(outBuffer, .readOnly) }
@@ -361,8 +371,13 @@ final class NDIOutput: VideoOutput {
         // Let the SDK synthesize a monotonic broadcast timecode for the receiver.
         frame.timecode = kNDISendTimecodeSynthesize
 
-        // send_send_video_v2 reads p_data synchronously here; safe to unlock on
-        // return (defer above).  We never retain pixelBuffer past this call.
+        // send_send_video_v2 reads p_data synchronously here; we never retain pixelBuffer past this
+        // call.  Re-read `sender` under senderLock: if stop()/rename tore it down while we converted,
+        // skip — sending to a freed handle is a UAF.  Teardown holds senderLock, so it can't free the
+        // handle underneath this in-flight send.
+        senderLock.lock()
+        defer { senderLock.unlock() }
+        guard let sender = self.sender else { return }
         withUnsafePointer(to: &frame) { sendVideo(sender, UnsafeRawPointer($0)) }
     }
 
@@ -406,13 +421,17 @@ final class NDIOutput: VideoOutput {
             _isLive = false
             return
         }
-        sender = created
+        senderLock.lock(); sender = created; senderLock.unlock()
         _isLive = true
         reportError(nil)   // live — clear any stale failure
         print("[NDIOutput] NDI source '\(label)' is live.")
     }
 
     private func destroySenderLocked() {
+        // Hold senderLock so we never free the handle while deliver() is mid-send with it (UAF).
+        // Ordering is always lock → senderLock (callers hold `lock`); deliver takes senderLock alone.
+        senderLock.lock()
+        defer { senderLock.unlock() }
         guard let sender else { return }
         NDIRuntime.shared.sendDestroy?(sender)
         self.sender = nil

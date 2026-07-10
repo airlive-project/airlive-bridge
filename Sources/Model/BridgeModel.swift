@@ -222,6 +222,12 @@ final class BridgeModel: ObservableObject {
             guard let self, let channel else { return }
             self.handleConnectivityChange(channel)
         }
+        // A delivery-mode flip (control-only ↔ video) on the ON-AIR camera changes its feed mode
+        // without a connectivity edge — re-pick it so every output keeps carrying the program.
+        channel.onVideoActiveChanged = { [weak self, weak channel] in
+            guard let self, let channel, channel.id == self.effectiveProgramID else { return }
+            self.applyFeedMode(self.computeFeedMode())
+        }
         // Keyed by channel id (NOT stored in the grow-forever set): the entry dies
         // with the channel in removeChannel / the profile teardown, so a long session
         // of add/remove cycles can't accumulate dead subscriptions.

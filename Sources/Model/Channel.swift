@@ -48,6 +48,12 @@ final class BridgeChannel: ObservableObject, Identifiable {
     /// border from a fully-disconnected one.  Set by `BridgeModel` at channel creation.
     var onConnectivityChanged: (() -> Void)?
 
+    /// Fired on main when the derived `videoActive` flips (camera toggles control-only ↔ video via
+    /// delivery mode) WITHOUT a connectivity edge — the case `onConnectivityChanged` misses.  The
+    /// model re-picks the program feed mode so the program keeps flowing to every output across the
+    /// change.  Set by `BridgeModel` at channel creation.
+    var onVideoActiveChanged: (() -> Void)?
+
     /// "Has a live picture" gate for the no-signal overlay — a LOW-FREQUENCY
     /// published flag, NOT the per-frame buffer.  Set once when video starts,
     /// nil on disconnect/clear; views read `latestFrame == nil` only to decide
@@ -126,6 +132,17 @@ final class BridgeChannel: ObservableObject, Identifiable {
     /// control UI.  nil until the first `.control` snapshot arrives.
     @Published var remote: StateSnapshot? {
         didSet {
+            // Program feed mode keys off `videoActive` (control-only ↔ video+control).  A mid-stream
+            // delivery-mode flip changes it with NO connectivity edge, so fire a dedicated hook the
+            // model uses to re-pick the program feed mode — else an on-air camera going control-only
+            // strands the program in `.passthrough` (raw H.264 that stopped coming) → dead air, or the
+            // reverse leaves it on black.  A combined channel is always video-active (AirPlay side), so
+            // its ARLV `videoActive=false` must not fire this.
+            if kind != .screenMirroringPlusControl,
+               (oldValue?.videoActive ?? true) != (remote?.videoActive ?? true) {
+                onVideoActiveChanged?()
+            }
+
             // STICKY optimistic-lens reconcile.  Keep showing the operator's pick until EITHER the
             // camera confirms it, OR the camera moves to a genuinely DIFFERENT lens (changed on the
             // phone).  Do NOT drop it on a mere stale readback: some cameras keep reporting the old

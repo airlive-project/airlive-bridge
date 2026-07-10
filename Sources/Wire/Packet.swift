@@ -296,6 +296,18 @@ public struct DeviceCapabilities: Codable, Equatable, Sendable {
         zoomMax         = try c.decodeIfPresent(Float.self,   forKey: .zoomMax) ?? 0
         stabilizations  = try c.decodeIfPresent([String].self, forKey: .stabilizations) ?? []
         colorSpaces     = try c.decodeIfPresent([String].self, forKey: .colorSpaces) ?? []
+
+        // Clamp wire-supplied envelopes to sane physical maxima BEFORE anything builds a ladder from
+        // them.  CameraControlPanel materializes `Array(stride(from: min, through: max, by: step))` for
+        // WB temp/tint and zoom; a corrupt/hostile bound (e.g. zoomMax=1e8, auth is off by default)
+        // would allocate hundreds of millions of Doubles synchronously during a SwiftUI body eval →
+        // main-thread freeze / OOM.  Real devices sit far inside these; the clamp only bites a
+        // malformed packet.  (Inversion is handled separately by each ladder's `guard hi > lo`.)
+        wbTempMin = min(max(wbTempMin, 1000), 50000)
+        wbTempMax = min(max(wbTempMax, 1000), 50000)
+        wbTintMin = min(max(wbTintMin, -1000), 1000)
+        wbTintMax = min(max(wbTintMax, -1000), 1000)
+        zoomMax   = min(max(zoomMax, 0), 1000)
     }
 }
 

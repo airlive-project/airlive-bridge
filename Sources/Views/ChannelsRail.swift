@@ -110,34 +110,7 @@ struct ChannelsRail: View {
     /// add-source menu.  `addChannel` builds the model object, brings the receiver
     /// slot + Bonjour advert online, and applies the global auth so the phone connects.
     private var addButton: some View {
-        Menu {
-            // FLAT list — no nested submenu (it dismissed on hover).  Primary sources
-            // first; the HDMI/USB capture devices sit at the bottom as extras.
-            Button { model.addChannel() } label: {
-                Label("Airlive Camera", systemImage: "camera")
-            }
-            Button { model.addChannel(kind: .airplay) } label: {
-                Label("Screen Mirroring", systemImage: "rectangle.on.rectangle")
-            }
-            // One channel, two transports for the same phone: AirPlay video + Airlive
-            // control-only (no second encode — cool phone).
-            Button { model.addChannel(kind: .screenMirroringPlusControl) } label: {
-                Label("Screen Mirroring + Remote Control", systemImage: "plus.rectangle.on.rectangle")
-            }
-            let devices = CaptureDevices.discover()
-            if !devices.isEmpty {
-                Divider()
-                ForEach(devices, id: \.uniqueID) { device in
-                    Button {
-                        model.addChannel(kind: .capture,
-                                         captureDeviceID: device.uniqueID,
-                                         name: device.localizedName)
-                    } label: {
-                        Label("HDMI / USB: \(device.localizedName)", systemImage: "cable.connector")
-                    }
-                }
-            }
-        } label: {
+        MenuButton(rows: addSourceRows) {
             Image(systemName: "plus")
                 .font(.system(size: 11, weight: .bold))
                 .foregroundColor(Theme.textPrimary)
@@ -151,10 +124,34 @@ struct ChannelsRail: View {
                         .stroke(Theme.stroke, lineWidth: 1)
                 )
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
         .help("Add source")
+    }
+
+    /// Add-source rows for our own `MenuButton` — icons + a separator + discovered HDMI/USB devices.
+    /// A flat list (no nested submenu, which dismissed on hover); primary sources first, capture
+    /// devices below.  Built lazily on open so `CaptureDevices.discover()` runs only on click.
+    private func addSourceRows() -> [DropdownRow] {
+        var rows: [DropdownRow] = [
+            DropdownRow(id: "camera", label: "Airlive Camera", icon: "camera",
+                        action: { model.addChannel() }),
+            DropdownRow(id: "airplay", label: "Screen Mirroring", icon: "rectangle.on.rectangle",
+                        action: { model.addChannel(kind: .airplay) }),
+            DropdownRow(id: "sm+ctl", label: "Screen Mirroring + Remote Control", icon: "plus.rectangle.on.rectangle",
+                        action: { model.addChannel(kind: .screenMirroringPlusControl) }),
+        ]
+        let devices = CaptureDevices.discover()
+        if !devices.isEmpty {
+            rows.append(.separator("devices"))
+            for device in devices {
+                rows.append(DropdownRow(id: device.uniqueID,
+                                        label: "HDMI / USB: \(device.localizedName)",
+                                        icon: "cable.connector",
+                                        action: { model.addChannel(kind: .capture,
+                                                                   captureDeviceID: device.uniqueID,
+                                                                   name: device.localizedName) }))
+            }
+        }
+        return rows
     }
 
     // MARK: - List

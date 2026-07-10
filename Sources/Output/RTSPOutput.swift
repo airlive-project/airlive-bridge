@@ -20,7 +20,14 @@ import CoreVideo
 
 final class RTSPOutput: VideoOutput {
     let id = UUID()
-    var label: String
+    /// Lock-backed: renamed on main (BridgeModel.renameOutput) while `queue` reads it for log
+    /// lines — a plain `var label: String` races the String's CoW buffer (retain/release) across
+    /// threads. Shares `liveLock` with `isLive` (same trivial-contention pattern).
+    var label: String {
+        get { liveLock.lock(); defer { liveLock.unlock() }; return _label }
+        set { liveLock.lock(); _label = newValue; liveLock.unlock() }
+    }
+    private var _label: String
     let kind: OutputKind = .rtsp
 
     /// Live flag — written from main (start/stop) AND from `queue` (startListener's
@@ -71,7 +78,7 @@ final class RTSPOutput: VideoOutput {
     private let maxRTPPayload = 1400
 
     init(label: String, port: UInt16 = 8554) {
-        self.label = label
+        self._label = label
         self.port = port
     }
 
@@ -357,13 +364,22 @@ private final class RTSPClient {
                     body: body)
         case "SETUP":
             // Honour the client's interleaved channels if given; default 0-1.
+            // CRITICAL: never let a hostile/garbage `interleaved=` value trap the process.
+            // The old `UInt8(Int(...))` traps on >255 and `rtpChannel + 1` overflow-traps at 255 —
+            // one unauthenticated LAN packet would crash the single Bridge process and black out
+            // EVERY output. Parse with the failable `UInt8(_:)` (nil, not trap, on overflow), cap
+            // at <254 so the +1 stays a valid channel, and reject anything else with 461.
             if let transport = headerValue("Transport", in: lines),
-               let r = transport.range(of: "interleaved="),
-               let ch = Int(transport[r.upperBound...].prefix { $0.isNumber }) {
-                rtpChannel = UInt8(ch)
+               let r = transport.range(of: "interleaved=") {
+                let digits = transport[r.upperBound...].prefix { $0.isNumber }
+                guard let ch = UInt8(digits), ch < 254 else {
+                    respond(cseq: cseq, status: "461 Unsupported Transport")
+                    return
+                }
+                rtpChannel = ch
             }
             respond(cseq: cseq,
-                    extra: "Transport: RTP/AVP/TCP;unicast;interleaved=\(rtpChannel)-\(rtpChannel + 1)\r\nSession: \(session)")
+                    extra: "Transport: RTP/AVP/TCP;unicast;interleaved=\(rtpChannel)-\(rtpChannel &+ 1)\r\nSession: \(session)")
         case "PLAY":
             isPlaying = true
             owner?.refreshPlayState()   // a client is now playing → RTSP is a live passthrough consumer
