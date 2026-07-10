@@ -70,6 +70,12 @@ private final class SRTRuntime {
     private static func open() -> UnsafeMutableRawPointer? {
         var paths: [String] = []
         if let env = ProcessInfo.processInfo.environment["AIRLIVE_LIBSRT"] { paths.append(env) }
+        // Bundled copy FIRST: a shipped Bridge carries its own libsrt in Contents/Frameworks (see
+        // scripts/bundle-libsrt.sh), so SRT works out of the box with NO `brew install srt`. The
+        // Homebrew / dev-machine paths below are the fallback for a from-source dev run.
+        if let fw = Bundle.main.privateFrameworksPath {
+            paths += ["\(fw)/libsrt.dylib", "\(fw)/libsrt.1.dylib"]
+        }
         paths += [
             "/opt/homebrew/lib/libsrt.dylib", "/opt/homebrew/lib/libsrt.1.dylib",
             "/usr/local/lib/libsrt.dylib", "/usr/local/lib/libsrt.1.dylib",

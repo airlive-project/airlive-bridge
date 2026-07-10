@@ -42,9 +42,16 @@ SIGN_BUILD=()
 DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" \
 xcodebuild -project AirliveBridge.xcodeproj -scheme "$SCHEME" \
   -configuration Release -derivedDataPath "$DD" \
-  -destination 'platform=macOS' "${SIGN_BUILD[@]}" build >/dev/null
+  -destination 'platform=macOS' ${SIGN_BUILD[@]+"${SIGN_BUILD[@]}"} build >/dev/null
 [ -d "$APP" ] || { echo "✗ build did not produce $APP"; exit 1; }
 echo "  ✓ built $APP"
+
+# Make SRT self-contained: bundle libsrt (+ its deps) into Contents/Frameworks BEFORE any
+# signing, so the app-level codesign below seals it. Signs the added dylibs with the same
+# identity (ad-hoc "-" when DEVELOPER_ID_APP is unset). libndi stays EXTERNAL on purpose
+# (NDI's license forbids redistribution — the user installs NDI Tools).
+echo "▶︎ Bundling libsrt for self-contained SRT…"
+"$ROOT/scripts/bundle-libsrt.sh" "$APP" "${DEVELOPER_ID_APP:--}"
 
 # Versioned, hyphenated DMG name from the app's real marketing version — MUST
 # match the appcast enclosure url.  (Read from the built plist = single source.)
@@ -58,14 +65,19 @@ DMG="$BUILD_DIR/Airlive-Bridge-${VERSION}.dmg"
 EDKEY="$(defaults read "$APP/Contents/Info.plist" SUPublicEDKey 2>/dev/null || echo "")"
 if [ -z "$EDKEY" ] || [ "$EDKEY" = "REPLACE_WITH_generate_keys_OUTPUT=" ] || \
    ! printf '%s' "$EDKEY" | grep -Eq '^[A-Za-z0-9+/]{43}=$'; then
-  if [ -n "${DEVELOPER_ID_APP:-}" ]; then
-    echo "✗ SUPublicEDKey is missing/placeholder ('$EDKEY')."
-    echo "  Run generate_keys (see docs/RELEASE.md), paste the public key into"
-    echo "  project.yml SUPublicEDKey, re-run xcodegen, then package again."
-    exit 1
-  fi
-  echo "⚠️  SUPublicEDKey is a placeholder — fine for this UNSIGNED smoke-test,"
-  echo "   but a real key is REQUIRED before any distributable release."
+  # A real Sparkle key is only load-bearing for a DEVELOPER ID (auto-update) release. An
+  # Apple-Development interim build (right-click→Open, handed out manually — no Sparkle feed yet)
+  # or an unsigned smoke-test can proceed with the placeholder.
+  case "${DEVELOPER_ID_APP:-}" in
+    "Developer ID"*)
+      echo "✗ SUPublicEDKey is missing/placeholder ('$EDKEY') — REQUIRED for a Developer ID release."
+      echo "  Run generate_keys (see docs/APPLE-DEVELOPER-RELEASE.md), paste the public key into"
+      echo "  project.yml SUPublicEDKey, re-run xcodegen, then package again."
+      exit 1 ;;
+    *)
+      echo "⚠️  SUPublicEDKey is a placeholder — OK for an unsigned or Apple-Development interim build"
+      echo "   (no Sparkle auto-update yet); a real key is REQUIRED before a notarized Developer ID release." ;;
+  esac
 fi
 
 if [ -n "${DEVELOPER_ID_APP:-}" ]; then
@@ -100,6 +112,10 @@ fi
 echo "▶︎ Building DMG…"
 cp -R "$APP" "$STAGING/"
 ln -s /Applications "$STAGING/Applications"
+# Ship the uninstaller in the DMG so a user can cleanly remove the app + all its data
+# (App Support, prefs, Keychain) without hunting through ~/Library. See docs/APPLE-DEVELOPER-RELEASE.md.
+cp "$ROOT/scripts/uninstall-bridge.command" "$STAGING/Uninstall Airlive Bridge.command"
+chmod +x "$STAGING/Uninstall Airlive Bridge.command"
 hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING" -ov -format UDZO "$DMG" >/dev/null
 echo "  ✓ $DMG"
 
