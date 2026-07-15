@@ -29,6 +29,26 @@ control back to the iPhone. So remote control (ISO/WB/lens/tally…) lives **in
 this app**. One bridge → works in vMix, ProPresenter, Wirecast, OBS, Resolume,
 TouchDesigner, etc.
 
+## Sources — what you can connect
+
+Two kinds of iPhone source:
+
+**Airlive Camera** (our iOS app) — the full path. Install it on the iPhone, pick a
+channel, done. Connects over Wi-Fi (Bonjour `_airlive._tcp`) with two-way **remote
+control** (ISO / shutter / white balance / lens / tally) and a cool, low-power
+stream tuned for long shoots.
+
+**Any AirPlay camera app** (e.g. **Blackmagic Camera**) — the universal path. On the
+iPhone: Control Center → **Screen Mirroring** → pick the Bridge channel (shown as
+`Cam N`). Works with any AirPlay-capable app. Note: Screen Mirroring sends whatever
+is on the phone's screen, so use the app's own clean / external-output mode for a
+frame without its on-screen UI. Video-only — no remote control on this path.
+
+*(A wired **HDMI / USB capture device** can also be a channel.)*
+
+Either way the source becomes a channel in the switcher, and the program feeds every
+output — **NDI / OBS / SRT / RTSP / HDMI**.
+
 ## Model
 
 - You **create channels** (receiver slots) — not a list of pre-found cameras.
