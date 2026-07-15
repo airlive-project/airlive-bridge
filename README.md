@@ -6,7 +6,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License: GPL v3"></a>
   <img src="https://img.shields.io/badge/macOS-13%2B-lightgrey" alt="macOS 13+">
   <img src="https://img.shields.io/badge/Apple%20Silicon-arm64-black" alt="Apple Silicon">
-  <a href="https://github.com/maupa-01/airlive-bridge/releases/latest"><img src="https://img.shields.io/badge/Download-latest%20DMG-brightgreen" alt="Download latest DMG"></a>
+  <a href="https://github.com/airlive-project/airlive-bridge/releases/latest"><img src="https://img.shields.io/badge/Download-latest%20DMG-brightgreen" alt="Download latest DMG"></a>
 </div>
 
 ---
