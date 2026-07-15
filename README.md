@@ -7,6 +7,10 @@ Receive **Airlive Camera** (iPhone) streams on a Mac, **switch between them
 One bridge turns several iPhone feeds into a live switcher with a standard output
 every tool understands.
 
+**Free & open source — GPL-3.0.** (It incorporates the GPL-3.0 AirPlay receiver
+[UxPlay](https://github.com/FDH2/UxPlay), so the whole app is GPL-3.0.) See
+[`LICENSE`](LICENSE) and [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
+
 ## Why
 
 Downstream protocols (NDI/SRT/RTSP) are **one-way video out** — they can't send

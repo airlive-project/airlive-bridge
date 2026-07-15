@@ -42,7 +42,7 @@ targets:
         # private key stays in the login Keychain, NEVER committed.  PLACEHOLDER until
         # generate_keys is run — package.sh REFUSES to ship a release while this is the
         # placeholder (a build with no real key has no update-trust anchor).
-        SUPublicEDKey: "REPLACE_WITH_generate_keys_OUTPUT="
+        SUPublicEDKey: "ie+HJccb8B+1CeZ6PRMIjDD3neKGtIpk8SvPhFQqdN4="
         # Silent scheduled background checks: OFF for now (manual "Check for Updates…"
         # only) — a non-sandboxed, library-validation-disabled tool auto-installing
         # updates unattended is a high-value target, so we enable background checks
