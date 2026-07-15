@@ -26,7 +26,7 @@ its uninstaller ships in the DMG.
 ## What we HAVE vs what we NEED
 
 **Have now (free, no paid program):**
-- `Apple Development: davidevsukov@gmail.com (N824A65FF7)` — Team **XWBJP49FTR**.
+- `Apple Development: <your-apple-id> (N824A65FF7)` — Team **XWBJP49FTR**.
   Can *sign* an app for local use + right-click-Open on other Macs. **Cannot notarize.**
 
 **Need (all gated on the paid Apple Developer Program — ~$99/yr):**
@@ -50,7 +50,7 @@ security find-identity -v            | grep "Developer ID"
 
 # notarytool credentials (app-specific password from appleid.apple.com):
 xcrun notarytool store-credentials airlive-notary \
-  --apple-id davidevsukov@gmail.com --team-id XWBJP49FTR --password <APP_SPECIFIC_PW>
+  --apple-id <your-apple-id> --team-id XWBJP49FTR --password <APP_SPECIFIC_PW>
 
 # Real Sparkle key (Bridge auto-update). Prints a public key → paste into
 # project.yml SUPublicEDKey, then re-run xcodegen:
@@ -85,7 +85,7 @@ xcrun stapler staple dist/obs-airlive.pkg
 - **Bridge:** sign with the Apple Development cert — real cert chain → the DMG opens
   on other Macs via **right-click → Open** (no "damaged"). Signed, NOT notarized:
   ```bash
-  DEVELOPER_ID_APP="Apple Development: davidevsukov@gmail.com (N824A65FF7)" ./scripts/package.sh
+  DEVELOPER_ID_APP="Apple Development: <your-apple-id> (N824A65FF7)" ./scripts/package.sh
   # (no NOTARY_PROFILE → signs + DMGs, skips notarization. SUPublicEDKey may stay
   #  placeholder for a non-distributed interim build — package.sh only WARNS then.)
   ```
