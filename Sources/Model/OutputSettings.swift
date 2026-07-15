@@ -32,11 +32,11 @@ enum LatencyPreset: Int, CaseIterable, Identifiable {
     /// Picker label.  The value is shown as "+N ms" because it is the buffer
     /// ADDED on top of the pipeline's own unavoidable latency (capture →
     /// encode → network → decode → display) — there is no true 0 ms total, so
-    /// "Lowest (+0 ms)" = "add nothing, show on decode", not "zero latency".
+    /// "Unbuffered (+0 ms)" = "add nothing, show on decode", not "zero latency".
     /// Honest by construction.
     var label: String {
         switch self {
-        case .lowest: return "Lowest (+0 ms)"
+        case .lowest: return "Unbuffered (+0 ms)"
         case .normal: return "Normal (+120 ms)"
         case .smooth: return "Smooth (+200 ms)"
         case .safe:   return "Safe (+400 ms)"

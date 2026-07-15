@@ -530,7 +530,9 @@ private struct SecurityFooter: View {
                     .font(.system(size: 12))
                     .foregroundColor(model.hasPassword ? Theme.accentBlue : Theme.textFaint)
                     .frame(width: 16)
-                Text(model.hasPassword ? "Receiver password set" : "Set receiver password")
+                // "Airlive receiver": the password guards ONLY the ARLV (Airlive Camera) receivers —
+                // AirPlay/HDMI channels have no auth handshake, so the generic wording overpromised.
+                Text(model.hasPassword ? "Airlive receiver password set" : "Set Airlive receiver password")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(Theme.textSecondary)
                 Spacer()

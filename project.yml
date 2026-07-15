@@ -53,14 +53,18 @@ targets:
         # is wiped on the next `xcodegen` — which is why the icon never stuck before.
         CFBundleIconName: AppIcon
         LSMinimumSystemVersion: "13.0"
+        # A video-production / broadcast tool → the Video category in Finder / Spotlight.
+        LSApplicationCategoryType: "public.app-category.video"
+        # About panel + Get Info.  Set the real legal entity if it's not just "Airlive".
+        NSHumanReadableCopyright: "Copyright © 2026 Airlive. All rights reserved."
         # Local-network access is needed twice: to receive the iPhone stream
         # (_airlive._tcp) AND for NDI's mDNS discovery (_ndi._tcp) — without the
         # NDI service type declared, macOS can block the NDI source from being
         # discovered by receivers like OBS/DistroAV.
-        NSLocalNetworkUsageDescription: "Airlive Bridge discovers Airlive Camera streams and publishes NDI on your local network."
+        NSLocalNetworkUsageDescription: "Airlive Bridge uses the local network to find and receive video from Airlive Camera, and to republish it to receivers such as OBS and NDI."
         # Capturing a UVC/HDMI capture card (the "HDMI / USB Capture" source) goes
         # through AVFoundation, which needs the camera-access usage string + grant.
-        NSCameraUsageDescription: "Airlive Bridge captures video from connected HDMI / USB capture devices."
+        NSCameraUsageDescription: "Airlive Bridge needs camera access to capture video from a connected HDMI or USB capture device (such as a capture card)."
         NSBonjourServices:
           - _airlive._tcp
           - _ndi._tcp

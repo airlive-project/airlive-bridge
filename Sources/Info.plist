@@ -22,6 +22,8 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.video</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
 	<key>NSBonjourServices</key>
@@ -32,9 +34,11 @@
 		<string>_raop._tcp</string>
 	</array>
 	<key>NSCameraUsageDescription</key>
-	<string>Airlive Bridge captures video from connected HDMI / USB capture devices.</string>
+	<string>Airlive Bridge needs camera access to capture video from a connected HDMI or USB capture device (such as a capture card).</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 Airlive. All rights reserved.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Airlive Bridge discovers Airlive Camera streams and publishes NDI on your local network.</string>
+	<string>Airlive Bridge uses the local network to find and receive video from Airlive Camera, and to republish it to receivers such as OBS and NDI.</string>
 	<key>SUEnableAutomaticChecks</key>
 	<false/>
 	<key>SUFeedURL</key>

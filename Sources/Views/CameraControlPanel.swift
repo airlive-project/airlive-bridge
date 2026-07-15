@@ -273,11 +273,6 @@ struct CameraControlPanel: View {
     private var lookSection: some View {
         ControlSection(title: "Look", fillHeight: true) {
             VStack(alignment: .leading, spacing: Spacing.sm) {
-                // ISO compensation — label left, on/off toggle far right (aligns with the LUT toggle).
-                lookToggleRow("ISO compensation", isOn: isoCompensation) {
-                    isoCompensation.toggle()
-                    channel.send(.setIsoCompensation(isoCompensation))
-                }
                 // Colour space — SELECTABLE, above the LUT, SAME full-width boxed dropdown.  Data-driven,
                 // NOT gated on a "colorSpace" cap (this camera advertises its spaces via `capabilities`,
                 // not a separate flag).  Readback-driven: a camera that refuses just re-broadcasts the
@@ -288,6 +283,12 @@ struct CameraControlPanel: View {
                     channel.send(.setColorSpace(v))   // EXACT raws (a wrong spelling silently no-ops)
                 }
                 lutRow
+                // ISO compensation — LAST (operator order: pick the space, pick the look, then the
+                // exposure tweak).  Label left, on/off toggle far right (aligns with the LUT toggle).
+                lookToggleRow("ISO compensation", isOn: isoCompensation) {
+                    isoCompensation.toggle()
+                    channel.send(.setIsoCompensation(isoCompensation))
+                }
             }
             .frame(maxWidth: .infinity, minHeight: Self.sectionBodyHeight, alignment: .topLeading)
         }
@@ -335,26 +336,35 @@ struct CameraControlPanel: View {
         }
     }
 
-    /// Preview-LUT: a full-width boxed dropdown (matching Colour space) + on/off toggle.  A new camera
-    /// (cap "lut") lists its QUICK-ACCESS LUTs (`caps.availableLuts`, re-broadcast on change); a legacy
-    /// camera falls back to the current `lutName`.  "None" = LUT off, mirrored by the toggle.
+    /// The camera's REAL LUT — burns into the operator's preview + the wire + the Rec-to-Clip bake, NOT a
+    /// receiver-side "preview LUT".  Hence the label "Camera LUT".  A new camera (cap "lut") lists its
+    /// QUICK-ACCESS LUTs (`caps.availableLuts`); a legacy camera just carries its current `lutName`.
+    /// CONTRACT: "None" = nothing.  A LUT turns on ONLY by an explicit pick from the list — the toggle
+    /// merely re-applies / clears the ALREADY-selected one and must NEVER invent a LUT.
     private var lutRow: some View {
-        let name = channel.remote?.lutName
+        let name = channel.remote?.lutName                       // the camera's ACTUAL loaded LUT (nil = None)
         let quickList = channel.hasCap("lut") ? caps.availableLuts : []
-        let base = quickList.isEmpty ? (name.map { [$0] } ?? []) : quickList
-        let usable = !base.isEmpty || name != nil
-        let shown = lutEnabled ? (name ?? "None") : "None"
+        // Keep the camera's current LUT in the option list even if it isn't a quick-LUT, so the field and
+        // the checkmark can never desync (the field showed the name while ✓ sat on None).
+        var options = ["None"] + quickList
+        if let name, !options.contains(name) { options.append(name) }
+        let usable = options.count > 1 || name != nil
+        let active = lutEnabled && name != nil                   // "on" only when a LUT is really selected
+        let shown = active ? (name ?? "None") : "None"           // SINGLE source → drives display AND ✓
         let toggle = AnyView(
-            PowerToggle(state: lutEnabled ? .on : .off) {
-                guard usable else { return }
+            PowerToggle(state: active ? .on : .off) {
+                // NEVER invent a LUT.  The old `base.first` fallback applied a quick-LUT nobody chose, and
+                // on a non-Apple-Log phone a Log-LUT over an already tone-mapped frame double-tone-maps
+                // ("overcooked", real TestFlight report).  Enable only RE-applies the selected `name`;
+                // with None on the camera there's nothing to enable → no-op (pick from the list instead).
+                guard usable, let current = name else { return }
                 lutEnabled.toggle()
-                let target = lutEnabled ? (name ?? base.first ?? "") : ""
-                channel.send(.setLUT(name: target, enabled: lutEnabled))
+                channel.send(.setLUT(name: lutEnabled ? current : "", enabled: lutEnabled))
             }
             .disabled(!usable)
         )
-        return lookBoxRow(label: "LUT", value: shown, isPlaceholder: shown == "None",
-                          options: ["None"] + base, enabled: usable, toggle: toggle) { picked in
+        return lookBoxRow(label: "Camera LUT", value: shown, isPlaceholder: shown == "None",
+                          options: options, enabled: usable, toggle: toggle) { picked in
             if picked == "None" {
                 lutEnabled = false; channel.send(.setLUT(name: "", enabled: false))
             } else {
@@ -390,20 +400,27 @@ struct CameraControlPanel: View {
     /// roadmapped alongside these presets — see ROADMAP.md.)
     private var delaySection: some View {
         ControlSection(title: "Output delay (ms)") {
-            SegmentedBar(
-                selection: Binding(
-                    get: { channel.delay },
-                    set: { channel.delay = $0 }
-                ),
-                options: LatencyPreset.allCases,
-                label: { delayShortLabel($0) }
-            )
+            VStack(alignment: .leading, spacing: Spacing.xs) {
+                SegmentedBar(
+                    selection: Binding(
+                        get: { channel.delay },
+                        set: { channel.delay = $0 }
+                    ),
+                    options: LatencyPreset.allCases,
+                    label: { delayShortLabel($0) }
+                )
+                // The +N is MILLISECONDS added on top of the pipeline's own latency; higher = a deeper
+                // jitter buffer = smoother on a weak link, at the cost of more delay.
+                Text("Milliseconds added — higher is smoother on a weak network, at more delay.")
+                    .font(.system(size: 11))
+                    .foregroundColor(Theme.textFaint)
+            }
         }
     }
 
     private func delayShortLabel(_ preset: LatencyPreset) -> String {
         switch preset {
-        case .lowest: return "Lowest +0"
+        case .lowest: return "Unbuffered +0"
         case .normal: return "Normal +120"
         case .smooth: return "Smooth +200"
         case .safe:   return "Safe +400"
