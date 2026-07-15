@@ -1,4 +1,15 @@
-# Airlive Bridge
+<div align="center">
+  <img src=".github/logo.png" width="130" alt="Airlive Bridge">
+  <h1>Airlive Bridge</h1>
+  <p><b>Free &amp; open-source Mac app that turns iPhone camera feeds into a live multicam<br>switcher — output to NDI, OBS, SRT &amp; RTSP, with remote camera control built in.</b></p>
+
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License: GPL v3"></a>
+  <img src="https://img.shields.io/badge/macOS-13%2B-lightgrey" alt="macOS 13+">
+  <img src="https://img.shields.io/badge/Apple%20Silicon-arm64-black" alt="Apple Silicon">
+  <a href="https://github.com/maupa-01/airlive-bridge/releases/latest"><img src="https://img.shields.io/badge/Download-latest%20DMG-brightgreen" alt="Download latest DMG"></a>
+</div>
+
+---
 
 Receive **Airlive Camera** (iPhone) streams on a Mac, **switch between them
 (multicam)**, and re-publish the chosen PROGRAM to any production tool —
@@ -7,8 +18,8 @@ Receive **Airlive Camera** (iPhone) streams on a Mac, **switch between them
 One bridge turns several iPhone feeds into a live switcher with a standard output
 every tool understands.
 
-**Free & open source — GPL-3.0.** (It incorporates the GPL-3.0 AirPlay receiver
-[UxPlay](https://github.com/FDH2/UxPlay), so the whole app is GPL-3.0.) See
+It incorporates the GPL-3.0 AirPlay receiver
+[UxPlay](https://github.com/FDH2/UxPlay), so the whole app is GPL-3.0 — see
 [`LICENSE`](LICENSE) and [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
 
 ## Why
