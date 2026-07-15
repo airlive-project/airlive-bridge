@@ -40,7 +40,7 @@
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Airlive Bridge uses the local network to find and receive video from Airlive Camera, and to republish it to receivers such as OBS and NDI.</string>
 	<key>SUEnableAutomaticChecks</key>
-	<false/>
+	<true/>
 	<key>SUFeedURL</key>
 	<string>https://raw.githubusercontent.com/airlive-project/airlive-bridge/main/appcast.xml</string>
 	<key>SUPublicEDKey</key>

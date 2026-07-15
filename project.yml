@@ -45,11 +45,12 @@ targets:
         # generate_keys is run — package.sh REFUSES to ship a release while this is the
         # placeholder (a build with no real key has no update-trust anchor).
         SUPublicEDKey: "ie+HJccb8B+1CeZ6PRMIjDD3neKGtIpk8SvPhFQqdN4="
-        # Silent scheduled background checks: OFF for now (manual "Check for Updates…"
-        # only) — a non-sandboxed, library-validation-disabled tool auto-installing
-        # updates unattended is a high-value target, so we enable background checks
-        # only AFTER the signing pipeline is proven end-to-end (see docs/RELEASE.md).
-        SUEnableAutomaticChecks: false
+        # Scheduled background update checks: ON since 1.0.0 re-ship (2026-07-15).
+        # The gate that kept this off — "prove the signing pipeline end-to-end
+        # first" — is satisfied: builds are Developer-ID signed + notarized +
+        # stapled, and SUPublicEDKey is the real generate_keys value, so Sparkle
+        # verifies both Apple's signature and our EdDSA on every update.
+        SUEnableAutomaticChecks: true
         # Points the Dock/Finder at the asset-catalog AppIcon.  MUST live here: xcodegen
         # regenerates Sources/Info.plist from these properties, so a hand-edit to the plist
         # is wiped on the next `xcodegen` — which is why the icon never stuck before.
