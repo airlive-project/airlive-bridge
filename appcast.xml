@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  appcast.xml — the LIVE Sparkle update feed for Airlive Bridge.
+
+  Served free and permanently by GitHub at:
+    https://raw.githubusercontent.com/airlive-project/airlive-bridge/main/appcast.xml
+  (this exact URL is baked into every shipped build via SUFeedURL — never move
+  or rename this file).  The .dmg itself is served by GitHub Releases (the
+  enclosure url); this file only announces versions.
+
+  Per release, add one <item>:
+    <item>
+      <title>Airlive Bridge X.Y.Z</title>
+      <pubDate>…RFC 822 date…</pubDate>
+      <sparkle:version>N</sparkle:version>                 CFBundleVersion (the integer Sparkle compares)
+      <sparkle:shortVersionString>X.Y.Z</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <enclosure
+        url="https://github.com/airlive-project/airlive-bridge/releases/download/vX.Y.Z/Airlive-Bridge-X.Y.Z.dmg"
+        length="…"  type="application/octet-stream"
+        sparkle:edSignature="…" />
+    </item>
+  `length` + `sparkle:edSignature` come from `sign_update` on the FINAL
+  notarized+stapled .dmg (package.sh prints them).  Keep the enclosure url ==
+  the uploaded GitHub asset name == the file package.sh produces.
+
+  No <item> entries = every installed build is up to date (valid feed).
+-->
+<rss version="2.0"
+     xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"
+     xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Airlive Bridge</title>
+    <link>https://raw.githubusercontent.com/airlive-project/airlive-bridge/main/appcast.xml</link>
+    <description>Most recent updates to Airlive Bridge</description>
+    <language>en</language>
+  </channel>
+</rss>

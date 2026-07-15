@@ -42,7 +42,7 @@
 	<key>SUEnableAutomaticChecks</key>
 	<false/>
 	<key>SUFeedURL</key>
-	<string>https://airlive.studio/bridge/appcast.xml</string>
+	<string>https://raw.githubusercontent.com/airlive-project/airlive-bridge/main/appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string>ie+HJccb8B+1CeZ6PRMIjDD3neKGtIpk8SvPhFQqdN4=</string>
 </dict>

@@ -33,11 +33,13 @@ targets:
         # appcast item's sparkle:version.
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         # --- Sparkle auto-update ---
-        # Appcast feed.  PLACEHOLDER — decide the FINAL permanent host before the first
-        # public release: it's baked into every shipped build and can NEVER change (a
-        # later change orphans older installs).  Tiny XML on the site you own; the big
-        # .dmg is served by GitHub Releases (the enclosure url).
-        SUFeedURL: "https://airlive.studio/bridge/appcast.xml"
+        # Appcast feed — the appcast.xml at this repo's ROOT, served free and
+        # permanently by GitHub raw.  Baked into every shipped build and can NEVER
+        # change (a later change orphans older installs), so the file must never be
+        # moved/renamed.  The big .dmg is served by GitHub Releases (enclosure url).
+        # (History: 1.0.0 shipped pointing at airlive.studio, which was never stood
+        # up — those installs update manually; 1.0.1+ use this working feed.)
+        SUFeedURL: "https://raw.githubusercontent.com/airlive-project/airlive-bridge/main/appcast.xml"
         # base64 Ed25519 PUBLIC key from `generate_keys` (44 chars, ends "=").  The
         # private key stays in the login Keychain, NEVER committed.  PLACEHOLDER until
         # generate_keys is run — package.sh REFUSES to ship a release while this is the
