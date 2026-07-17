@@ -490,7 +490,7 @@ private struct OutputCard: View {
     }
 
     /// Second line on the OBS card when not connected: link (left) + ✕ dismiss (right).
-    private static let pluginDownloadURL = URL(string: "https://airlive-site.vercel.app/downloads")!
+    private static let pluginDownloadURL = URL(string: "https://airlive.vercel.app/downloads")!
     private var pluginLinkRow: some View {
         HStack(spacing: Spacing.sm) {
             Button {

@@ -20,8 +20,8 @@ import AppKit
 enum Updater {
 
     /// Version feed: `{ "version": "1.0.1", "url": "…/downloads", "notes": "…" }`.
-    private static let feedURL = URL(string: "https://airlive-site.vercel.app/version.json")!
-    private static let downloadsURL = URL(string: "https://airlive-site.vercel.app/downloads")!
+    private static let feedURL = URL(string: "https://airlive.vercel.app/version.json")!
+    private static let downloadsURL = URL(string: "https://airlive.vercel.app/downloads")!
 
     private static var currentVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
