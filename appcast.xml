@@ -34,5 +34,17 @@
     <link>https://raw.githubusercontent.com/airlive-project/airlive-bridge/main/appcast.xml</link>
     <description>Most recent updates to Airlive Bridge</description>
     <language>en</language>
+    <item>
+      <title>Airlive Bridge 1.0.1</title>
+      <pubDate>Sat, 18 Jul 2026 18:24:07 +0000</pubDate>
+      <sparkle:version>2</sparkle:version>
+      <sparkle:shortVersionString>1.0.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[Maintenance update — corrected in-app links to the new airlive.vercel.app site.]]></description>
+      <enclosure
+        url="https://github.com/airlive-project/airlive-bridge/releases/download/v1.0.1/Airlive-Bridge-1.0.1.dmg"
+        length="10019538" type="application/octet-stream"
+        sparkle:edSignature="0Ooy2cLY7NLG9hdq9anxSvOmdZB7/eykxrm2IVVFC+1NBXAlDZtO/nqXgnRGhXWQy4inBotmxVDEDVHggrIlDg==" />
+    </item>
   </channel>
 </rss>

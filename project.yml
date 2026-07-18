@@ -83,10 +83,10 @@ targets:
     settings:
       base:
         PRODUCT_NAME: Airlive Bridge
-        MARKETING_VERSION: "1.0.0"   # semver: MAJOR.MINOR.PATCH — bump like a real release train
+        MARKETING_VERSION: "1.0.1"   # semver: MAJOR.MINOR.PATCH — bump like a real release train
         # Sparkle's compare key (→ CFBundleVersion).  Strictly increment EVERY release
         # (1 → 2 → 3 …) and mirror it in the appcast item's sparkle:version.
-        CURRENT_PROJECT_VERSION: "1"
+        CURRENT_PROJECT_VERSION: "2"
         SWIFT_VERSION: "5.9"
         # Apple Silicon only — the vendored UxPlay/openssl/libplist static libs are arm64.
         # A bare `ARCHS: arm64` gets DROPPED by xcodegen (never lands in the pbxproj), so an
