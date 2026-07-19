@@ -43,8 +43,8 @@
       <description><![CDATA[Maintenance update — corrected in-app links to the new airlive.vercel.app site.]]></description>
       <enclosure
         url="https://github.com/airlive-project/airlive-bridge/releases/download/v1.0.1/Airlive-Bridge-1.0.1.dmg"
-        length="10019538" type="application/octet-stream"
-        sparkle:edSignature="0Ooy2cLY7NLG9hdq9anxSvOmdZB7/eykxrm2IVVFC+1NBXAlDZtO/nqXgnRGhXWQy4inBotmxVDEDVHggrIlDg==" />
+        length="10019613" type="application/octet-stream"
+        sparkle:edSignature="phx3JpkuNZ4NJvfl0Xcz8/8jbbXjmP2egIwpwHgy9LgVh8FdtQz987eh37J40UFWZUs8kGcxIhDrLZyg7y8gCg==" />
     </item>
   </channel>
 </rss>

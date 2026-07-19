@@ -1,0 +1,5 @@
+{
+  "version": "1.0.1",
+  "url": "https://github.com/airlive-project/airlive-bridge/releases/latest/download/Airlive-Bridge.dmg",
+  "notes": "Maintenance update — corrected in-app links and moved the update check to GitHub (no website dependency)."
+}

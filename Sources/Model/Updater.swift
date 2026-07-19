@@ -1,27 +1,35 @@
 // Updater.swift — the "Check for Updates…" menu action (manual, gentle).
 //
-// The seamless Sparkle path is wired but DORMANT until the update backend is live
-// (a real EdDSA key + a hosted appcast — both blocked on the paid Apple Developer
-// Program + hosting; see docs/RELEASE.md).  Starting Sparkle with the placeholder
-// key made "Check for Updates…" throw an alarming "updater failed to start" alert,
-// so for now the menu uses this lightweight manual check instead:
+// The seamless Sparkle path is wired but DORMANT (no SPUUpdater is ever
+// instantiated), so the menu uses this lightweight manual check instead:
 //   • user clicks → fetch a tiny version.json, compare semver
-//   • newer available → "vX is available → Download" (opens the downloads page)
+//   • newer available → "vX is available → Download" (opens the download link)
 //   • otherwise / feed unreachable → a gentle "you're up to date"; the real fetch
 //     error is logged to Console, never shown as a scary popup (the operator asked
 //     for zero nagging — only a real available-update should interrupt them).
 //
-// When the Sparkle backend goes live, swap this menu action back to the Sparkle
-// updater (the framework, package.sh signing, and docs are all still in place).
+// SELF-CONTAINED RELEASE PIPELINE — the version feed is a `version.json` committed
+// at THIS repo's root and served by GitHub raw (a URL we fully control, never 404s,
+// no website involved).  Cutting a release is therefore one repo, one push:
+//   1. bump MARKETING_VERSION / CURRENT_PROJECT_VERSION in project.yml
+//   2. scripts/package.sh  →  notarized, stapled Airlive-Bridge-X.Y.Z.dmg
+//   3. bump version.json (version + notes) at the repo root
+//   4. gh release create vX.Y.Z --latest  (upload BOTH the versioned dmg AND the
+//      stable Airlive-Bridge.dmg copy the site button points at)
+//   5. git commit + push  →  every installed copy's "Check for Updates" now sees it.
+// (Already-installed builds older than this change point at the old site feed and
+// won't self-notify — they upgrade once by hand, then ride the GitHub feed forever.)
 
 import Foundation
 import AppKit
 
 enum Updater {
 
-    /// Version feed: `{ "version": "1.0.1", "url": "…/downloads", "notes": "…" }`.
-    private static let feedURL = URL(string: "https://airlive.vercel.app/version.json")!
-    private static let downloadsURL = URL(string: "https://airlive.vercel.app/downloads")!
+    /// Version feed we fully own: `{ "version": "1.0.1", "url": "…dmg", "notes": "…" }`
+    /// committed at the repo root, served by GitHub raw off `main`.
+    private static let feedURL = URL(string: "https://raw.githubusercontent.com/airlive-project/airlive-bridge/main/version.json")!
+    /// Fallback when a feed item carries no `url` — the GitHub Releases page.
+    private static let downloadsURL = URL(string: "https://github.com/airlive-project/airlive-bridge/releases/latest")!
 
     private static var currentVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
