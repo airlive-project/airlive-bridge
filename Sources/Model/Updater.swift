@@ -1,84 +1,56 @@
-// Updater.swift — the "Check for Updates…" menu action (manual, gentle).
+// Updater.swift — real Sparkle auto-update (background checks + in-app install).
 //
-// The seamless Sparkle path is wired but DORMANT (no SPUUpdater is ever
-// instantiated), so the menu uses this lightweight manual check instead:
-//   • user clicks → fetch a tiny version.json, compare semver
-//   • newer available → "vX is available → Download" (opens the download link)
-//   • otherwise / feed unreachable → a gentle "you're up to date"; the real fetch
-//     error is logged to Console, never shown as a scary popup (the operator asked
-//     for zero nagging — only a real available-update should interrupt them).
+// Airlive Bridge updates the "normal" Mac way: Sparkle checks the appcast on a
+// schedule, and when a newer SIGNED build exists it offers "Install and Relaunch"
+// — the app downloads the notarized DMG, verifies Apple's signature + our EdDSA,
+// swaps itself in /Applications and relaunches.  No website, no manual download,
+// no browser hop.  (Replaces the earlier hand-rolled version.json check.)
 //
-// SELF-CONTAINED RELEASE PIPELINE — the version feed is a `version.json` committed
-// at THIS repo's root and served by GitHub raw (a URL we fully control, never 404s,
-// no website involved).  Cutting a release is therefore one repo, one push:
+//   Feed  = appcast.xml at this repo's ROOT, served by GitHub raw — SUFeedURL in
+//           project.yml/Info.plist.  A URL we fully own; never 404s; no website.
+//   Trust = SUPublicEDKey (Info.plist) verifies every download's EdDSA signature;
+//           the private key lives ONLY in the login Keychain.  scripts/package.sh
+//           runs sign_update on the final notarized DMG and prints the signature.
+//
+// Cutting a release stays one repo, one push:
 //   1. bump MARKETING_VERSION / CURRENT_PROJECT_VERSION in project.yml
-//   2. scripts/package.sh  →  notarized, stapled Airlive-Bridge-X.Y.Z.dmg
-//   3. bump version.json (version + notes) at the repo root
-//   4. gh release create vX.Y.Z --latest  (upload BOTH the versioned dmg AND the
-//      stable Airlive-Bridge.dmg copy the site button points at)
-//   5. git commit + push  →  every installed copy's "Check for Updates" now sees it.
-// (Already-installed builds older than this change point at the old site feed and
-// won't self-notify — they upgrade once by hand, then ride the GitHub feed forever.)
+//   2. scripts/package.sh → notarized Airlive-Bridge-X.Y.Z.dmg (prints edSignature + length)
+//   3. add an <item> to appcast.xml (sparkle:version = the new CFBundleVersion; paste sig+length)
+//   4. gh release create vX.Y.Z --latest  (upload the versioned dmg + the stable Airlive-Bridge.dmg copy)
+//   5. git commit + push  →  every running Bridge auto-detects it within a day,
+//      or immediately when the operator picks "Check for Updates…".
+//
+// This is the canonical Sparkle-in-SwiftUI recipe (Sparkle docs: "Adding a Check
+// for Updates menu item with SwiftUI"): the App holds one SPUStandardUpdaterController;
+// the menu item is a tiny View whose view-model publishes whether a check is allowed.
 
-import Foundation
-import AppKit
+import SwiftUI
+import Sparkle
 
-enum Updater {
+/// Publishes whether the user may start an update check right now, so the menu
+/// item can disable itself while a check is already in flight.
+final class CheckForUpdatesViewModel: ObservableObject {
+    @Published var canCheckForUpdates = false
 
-    /// Version feed we fully own: `{ "version": "1.0.1", "url": "…dmg", "notes": "…" }`
-    /// committed at the repo root, served by GitHub raw off `main`.
-    private static let feedURL = URL(string: "https://raw.githubusercontent.com/airlive-project/airlive-bridge/main/version.json")!
-    /// Fallback when a feed item carries no `url` — the GitHub Releases page.
-    private static let downloadsURL = URL(string: "https://github.com/airlive-project/airlive-bridge/releases/latest")!
+    init(updater: SPUUpdater) {
+        updater.publisher(for: \.canCheckForUpdates)
+            .assign(to: &$canCheckForUpdates)
+    }
+}
 
-    private static var currentVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
+/// The "Check for Updates…" menu item.  Owns its view-model; the updater itself
+/// is owned for the whole app lifetime by AirliveBridgeApp.
+struct CheckForUpdatesView: View {
+    @ObservedObject private var viewModel: CheckForUpdatesViewModel
+    private let updater: SPUUpdater
+
+    init(updater: SPUUpdater) {
+        self.updater = updater
+        self.viewModel = CheckForUpdatesViewModel(updater: updater)
     }
 
-    private struct Feed: Decodable { let version: String; let url: String?; let notes: String? }
-
-    static func checkForUpdates(userInitiated: Bool) {
-        URLSession.shared.dataTask(with: feedURL) { data, _, error in
-            if let error { print("[Updater] feed unreachable: \(error.localizedDescription)") }
-            let feed = data.flatMap { try? JSONDecoder().decode(Feed.self, from: $0) }
-            DispatchQueue.main.async { present(feed: feed, userInitiated: userInitiated) }
-        }.resume()
-    }
-
-    private static func present(feed: Feed?, userInitiated: Bool) {
-        // A genuinely newer version → the only case that ever interrupts the operator.
-        if let feed, isNewer(feed.version, than: currentVersion) {
-            let alert = NSAlert()
-            alert.messageText = "Airlive Bridge \(feed.version) is available"
-            alert.informativeText = feed.notes?.isEmpty == false
-                ? feed.notes! : "You have \(currentVersion).  Download the new version to update."
-            alert.alertStyle = .informational
-            alert.addButton(withTitle: "Download…")   // default
-            alert.addButton(withTitle: "Later")        // Esc
-            if alert.runModal() == .alertFirstButtonReturn {
-                NSWorkspace.shared.open(feed.url.flatMap(URL.init(string:)) ?? downloadsURL)
-            }
-            return
-        }
-        // No newer version (or the feed isn't reachable yet) — only speak up when the
-        // operator explicitly clicked, and NEVER with an error.  Gentle "up to date".
-        guard userInitiated else { return }
-        let alert = NSAlert()
-        alert.messageText = "You’re up to date"
-        alert.informativeText = "Airlive Bridge \(currentVersion) is the latest version."
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
-    }
-
-    /// Numeric semver compare — "1.0.10" > "1.0.9".  Missing parts read as 0.
-    private static func isNewer(_ candidate: String, than current: String) -> Bool {
-        let a = candidate.split(separator: ".").map { Int($0) ?? 0 }
-        let b = current.split(separator: ".").map { Int($0) ?? 0 }
-        for i in 0 ..< max(a.count, b.count) {
-            let l = i < a.count ? a[i] : 0, r = i < b.count ? b[i] : 0
-            if l != r { return l > r }
-        }
-        return false
+    var body: some View {
+        Button("Check for Updates…", action: updater.checkForUpdates)
+            .disabled(!viewModel.canCheckForUpdates)
     }
 }

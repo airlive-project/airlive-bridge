@@ -10,12 +10,7 @@
 
 import SwiftUI
 import AppKit   // NSSavePanel / NSOpenPanel / NSAlert for profile load / save
-// NOTE: Sparkle is still LINKED (SPM) + the release tooling (package.sh signing,
-// docs/RELEASE.md) is in place, but the updater is NOT instantiated yet: starting it
-// with the placeholder EdDSA key threw an alarming "updater failed to start" alert.
-// Re-wire SPUStandardUpdaterController + CheckForUpdatesView once the real key + a
-// hosted appcast exist (blocked on the paid Apple Developer Program).  Until then the
-// "Check for Updates…" menu uses the gentle manual Updater (Updater.swift).
+import Sparkle  // real auto-update — the App owns one SPUStandardUpdaterController (see Updater.swift)
 
 /// Quit guard: closing the app mid-take kills every camera stream and the program feed
 /// (OBS/NDI/RTSP/SRT go dark) — too destructive for a stray ⌘Q.  If any channel is live,
@@ -50,11 +45,20 @@ struct AirliveBridgeApp: App {
     @StateObject private var model: BridgeModel
     @StateObject private var shortcuts: ShortcutCenter
 
+    /// Sparkle updater — created once for the app lifetime.  `startingUpdater: true`
+    /// begins scheduled background checks immediately (SUEnableAutomaticChecks); when
+    /// a newer signed build is on the appcast the operator gets the standard
+    /// "Install and Relaunch" prompt.  See Updater.swift for the release flow.
+    private let updaterController: SPUStandardUpdaterController
+
     init() {
         let m = BridgeModel()
         _model = StateObject(wrappedValue: m)
         _shortcuts = StateObject(wrappedValue: ShortcutCenter(model: m))
         AppDelegate.model = m   // quit guard reads live-stream state from here
+        updaterController = SPUStandardUpdaterController(startingUpdater: true,
+                                                        updaterDelegate: nil,
+                                                        userDriverDelegate: nil)
     }
 
     var body: some Scene {
@@ -101,12 +105,10 @@ struct AirliveBridgeApp: App {
                         options: [NSApplication.AboutPanelOptionKey.version: ""])
                 }
             }
-            // "Check for Updates…" right under About.  Gentle manual check for now
-            // (see Updater.swift) — only interrupts with a real available update,
-            // never an error.  Switches to Sparkle's seamless updater once the
-            // backend is live.
+            // "Check for Updates…" right under About — Sparkle's real updater:
+            // downloads + verifies + installs in place, no website or browser.
             CommandGroup(after: .appInfo) {
-                Button("Check for Updates…") { Updater.checkForUpdates(userInitiated: true) }
+                CheckForUpdatesView(updater: updaterController.updater)
             }
             // Our own Undo/Redo (⌘Z / ⇧⌘Z) — the model keeps a config-action history
             // (add/remove/reorder/rename of channels + outputs; never live switching).
