@@ -458,8 +458,10 @@ private struct ChannelSettingsView: View {
                     channel.extraDelayMs = max(0, channel.extraDelayMs - 10)
                     draft = String(channel.extraDelayMs)
                 }
-                stepButton("plus", enabled: true) {
-                    channel.extraDelayMs += 10
+                // Capped at BridgeChannel.maxExtraDelayMs — this delay is paid in decoded frames
+                // held in RAM, so an unbounded field would let a typo eat gigabytes.
+                stepButton("plus", enabled: channel.extraDelayMs < BridgeChannel.maxExtraDelayMs) {
+                    channel.extraDelayMs = min(BridgeChannel.maxExtraDelayMs, channel.extraDelayMs + 10)
                     draft = String(channel.extraDelayMs)
                 }
             }
@@ -504,8 +506,11 @@ private struct ChannelSettingsView: View {
         .help("Reset additional delay to 0")
     }
 
+    /// Typed value → clamped to 0…max.  Echo the CLAMPED number back into the field so an
+    /// over-limit entry visibly snaps to the ceiling instead of silently disagreeing with the model.
     private func commit() {
-        let v = max(0, Int(draft.trimmingCharacters(in: .whitespaces)) ?? channel.extraDelayMs)
+        let typed = Int(draft.trimmingCharacters(in: .whitespaces)) ?? channel.extraDelayMs
+        let v = min(max(0, typed), BridgeChannel.maxExtraDelayMs)
         channel.extraDelayMs = v
         draft = String(v)
     }

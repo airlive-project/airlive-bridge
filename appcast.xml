@@ -35,6 +35,18 @@
     <description>Most recent updates to Airlive Bridge</description>
     <language>en</language>
     <item>
+      <title>Airlive Bridge 1.0.3</title>
+      <pubDate>Mon, 20 Jul 2026 15:17:04 +0000</pubDate>
+      <sparkle:version>4</sparkle:version>
+      <sparkle:shortVersionString>1.0.3</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[Output delay now defaults to Normal +120 ms for a steadier picture out of the box, with an explainer behind the ⓘ. Additional delay is capped at 2000 ms. Tidier alignment in the camera control panel.]]></description>
+      <enclosure
+        url="https://github.com/airlive-project/airlive-bridge/releases/download/v1.0.3/Airlive-Bridge-1.0.3.dmg"
+        length="10001795" type="application/octet-stream"
+        sparkle:edSignature="7oKmz2eYKCS+U+b7y09lxb+a9x4cicI+dnMndxq1kg5XMrovIPIOLjbWeJeWLq9i59q4e8jG4vi4VeesMHrPDA==" />
+    </item>
+    <item>
       <title>Airlive Bridge 1.0.2</title>
       <pubDate>Sun, 19 Jul 2026 12:20:34 +0000</pubDate>
       <sparkle:version>3</sparkle:version>

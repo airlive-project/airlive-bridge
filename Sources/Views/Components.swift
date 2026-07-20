@@ -582,6 +582,34 @@ struct ParamStrip: View {
     }
 }
 
+// MARK: - Info dot (ⓘ explainer)
+
+/// A quiet ⓘ that reveals a short explainer on click.  Sized to sit inline with a section
+/// title.  A popover rather than a `.help` tooltip: the text is a couple of sentences the
+/// operator reads deliberately, and it must not vanish while they're reading it.
+struct InfoDot: View {
+    let text: String
+    @State private var show = false
+
+    var body: some View {
+        Button { show.toggle() } label: {
+            Image(systemName: "info.circle")
+                .font(.system(size: 12))
+                .foregroundColor(show ? Theme.textSecondary : Theme.textFaint)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $show, arrowEdge: .bottom) {
+            Text(text)
+                .font(.system(size: 12))
+                .foregroundColor(Theme.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(width: 300, alignment: .leading)
+                .padding(Spacing.md)
+        }
+    }
+}
+
 // MARK: - Control section (titled card with one optional section-level AUTO)
 
 /// A titled section card grouping related parameter rows.  The header carries the section's ONE AUTO
@@ -592,6 +620,10 @@ struct ControlSection<Content: View>: View {
     let title: String
     var auto: Bool = false
     var onAuto: ((Bool) -> Void)? = nil
+    /// Optional explainer shown behind an ⓘ button LEFT of the title.  Use it instead of a
+    /// caption under the controls: the prose is there when asked for and costs no layout
+    /// height, so two cards side by side stay the same size.
+    var info: String? = nil
     /// Optional compact control shown in the header, LEFT of the AUTO toggle (e.g. EV compensation).
     var accessory: AnyView? = nil
     /// Stretch the card to fill its offered height — set on both cards of a two-column row (with the
@@ -604,9 +636,15 @@ struct ControlSection<Content: View>: View {
         Card(padding: Spacing.sm) {
             VStack(alignment: .leading, spacing: Spacing.sm) {
                 HStack(spacing: Spacing.sm) {
-                    Text(title.uppercased())
-                        .font(.system(size: 11, weight: .medium)).tracking(0.6)
-                        .foregroundColor(Theme.textFaint)
+                    // ⓘ sits AFTER the title, tucked close to it: leading it would indent the
+                    // title out of line with the controls below (every card's text starts at the
+                    // same left edge).
+                    HStack(spacing: Spacing.xs) {
+                        Text(title.uppercased())
+                            .font(.system(size: 11, weight: .medium)).tracking(0.6)
+                            .foregroundColor(Theme.textFaint)
+                        if let info { InfoDot(text: info) }
+                    }
                     Spacer()
                     if let accessory { accessory }
                     if let onAuto { autoToggle(onAuto) }

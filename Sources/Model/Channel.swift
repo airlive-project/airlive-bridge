@@ -209,21 +209,34 @@ final class BridgeChannel: ObservableObject, Identifiable {
 
     /// Jitter-buffer depth applied to this channel's output.  Forwarded live to
     /// the receiver so a mid-stream change re-anchors the playout timeline.
-    // Default .lowest (0 ms): a LAN + our no-B-frame stream has low jitter, and present() feeds BOTH
-    // the preview mirrors and the program/NDI output, so 0 cuts preview AND program latency together.
-    // Per-channel + operator-tunable — bump to Normal/Smooth/Safe on a weak link.
-    @Published var delay: LatencyPreset = .lowest {
+    // Default .normal (+120 ms, SRT's own default): a stream that hitches on air is worse than one
+    // that runs 120 ms later — real Wi-Fi jitter is what an operator actually meets, and the
+    // out-of-the-box picture should be STEADY.  .lowest stays one click away for a wired/strong link
+    // (it feeds both the preview mirrors and the program/NDI output, so it cuts both together).
+    @Published var delay: LatencyPreset = .normal {
         didSet {
             guard delay != oldValue else { return }
             receiver?.updateDelay(delay)
         }
     }
 
+    /// Hard ceiling for `extraDelayMs`.  This delay is paid in DECODED frames held in RAM
+    /// (BridgeChannelReceiver's `frameRing`; the AirPlay path retains one closure per frame), so
+    /// the cost is ~3.1 MB per 1080p frame — ≈190 MB per SECOND at 60 fps, per channel.  2 s is
+    /// already far past any real use: this control exists to line a fast source up with a slower
+    /// one (AirPlay mirroring ≈200-500 ms, capture cards ≈100 ms), so legitimate values are tens
+    /// to a few hundred ms.  Without a cap a typo ("10000") quietly eats gigabytes and starves the
+    /// decoder's buffer pool.
+    static let maxExtraDelayMs = 2000
+
     /// Precise ADDITIONAL playout delay (ms) on top of `delay`'s preset — set in the
     /// channel's gear settings to align this source with slower cameras (multicam sync).
-    /// Forwarded live to the receiver.
+    /// Forwarded live to the receiver.  CLAMPED here, the one choke point every path goes
+    /// through (UI field, ± steppers, profile load), so no caller can smuggle a huge value in.
     @Published var extraDelayMs: Int = 0 {
         didSet {
+            let clamped = Swift.min(Swift.max(0, extraDelayMs), Self.maxExtraDelayMs)
+            if clamped != extraDelayMs { extraDelayMs = clamped; return }   // re-entry settles at the bound
             guard extraDelayMs != oldValue else { return }
             receiver?.updateExtraDelay(extraDelayMs)
         }
@@ -289,7 +302,7 @@ final class BridgeChannel: ObservableObject, Identifiable {
     var controlReceiver: ChannelReceiver?
 
     init(id: UUID = UUID(), name: String, kind: ChannelKind = .airlive,
-         captureDeviceID: String? = nil, delay: LatencyPreset = .lowest) {
+         captureDeviceID: String? = nil, delay: LatencyPreset = .normal) {
         self.id = id
         self.name = name
         self.kind = kind

@@ -180,13 +180,16 @@ struct CameraControlPanel: View {
                 lookSection.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .fixedSize(horizontal: false, vertical: true)
+            // Both cards `fillHeight` + `maxHeight: .infinity` + the row `.fixedSize(vertical:)` — the
+            // same recipe as the Focus/Look row above, so the two bottoms line up exactly.
             HStack(alignment: .top, spacing: Spacing.md) {
                 // Stabilization shows only when the camera supports it (it affects the pictured video);
                 // otherwise Output delay takes the whole row.  fps / resolution were removed — they only
                 // change the phone's LOCAL recording master, never the fixed 1080p/30 monitoring wire.
-                if hasStabilization { stabilizationSection.frame(maxWidth: .infinity) }
-                delaySection.frame(maxWidth: .infinity)
+                if hasStabilization { stabilizationSection.frame(maxWidth: .infinity, maxHeight: .infinity) }
+                delaySection.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -301,13 +304,19 @@ struct CameraControlPanel: View {
         caps.colorSpaces.isEmpty ? ["Rec.709", "P3 D65", "Rec.2020 HLG", "Apple Log"] : caps.colorSpaces
     }
 
-    private static let lookLabelWidth: CGFloat = 92
+    /// ONE label column for every Look row — the controls beside it all start at the same x, and no
+    /// label may cross that line.  Sized for the LONGEST label ("ISO compensation" ≈ 112 pt at 13 pt
+    /// medium); at the old 92 pt that row alone ran its natural width and overhung the dropdowns'
+    /// left edge, which is exactly the ragged look this fixes.
+    private static let lookLabelWidth: CGFloat = 128
     private static let lookRowHeight: CGFloat = 34
 
-    /// Look row: label left, on/off toggle far right (ISO compensation).  Toggle aligns with the LUT's.
+    /// Look row: label left, on/off toggle far right (ISO compensation).  Same fixed label column as
+    /// `lookBoxRow` so its text stops on the shared line instead of running past it.
     private func lookToggleRow(_ title: String, isOn: Bool, onToggle: @escaping () -> Void) -> some View {
         HStack(spacing: Spacing.sm) {
             Text(title).font(.system(size: 13, weight: .medium)).foregroundColor(Theme.textPrimary)
+                .frame(width: Self.lookLabelWidth, alignment: .leading)
             Spacer(minLength: Spacing.sm)
             PowerToggle(state: isOn ? .on : .off, action: onToggle)
         }
@@ -383,7 +392,7 @@ struct CameraControlPanel: View {
     /// stabilized picture the wire carries.  EXACT raws "Standard"/"High" from `caps.stabilizations`.
     private var stabilizationSection: some View {
         let cur = stabSel.isEmpty ? (channel.remote?.stabilization ?? "—") : stabSel
-        return ControlSection(title: "Stabilization") {
+        return ControlSection(title: "Stabilization", fillHeight: true) {
             Dropdown(items: caps.stabilizations,
                      selection: caps.stabilizations.contains(cur) ? cur : nil,
                      displayText: cur, isPlaceholder: cur == "—") { v in
@@ -399,24 +408,33 @@ struct CameraControlPanel: View {
     /// it lives with camera control and shows in Solo AND Multiview.  (A precise ms field is
     /// roadmapped alongside these presets — see ROADMAP.md.)
     private var delaySection: some View {
-        ControlSection(title: "Output delay (ms)") {
-            VStack(alignment: .leading, spacing: Spacing.xs) {
-                SegmentedBar(
-                    selection: Binding(
-                        get: { channel.delay },
-                        set: { channel.delay = $0 }
-                    ),
-                    options: LatencyPreset.allCases,
-                    label: { delayShortLabel($0) }
-                )
-                // The +N is MILLISECONDS added on top of the pipeline's own latency; higher = a deeper
-                // jitter buffer = smoother on a weak link, at the cost of more delay.
-                Text("Milliseconds added — higher is smoother on a weak network, at more delay.")
-                    .font(.system(size: 11))
-                    .foregroundColor(Theme.textFaint)
-            }
+        // The explainer lives behind the header ⓘ, not in a caption under the bar: a caption made
+        // this card taller than Stabilization beside it, and the honest "+0 isn't zero" story needs
+        // more room than one line anyway.
+        ControlSection(title: "Output delay (ms)", info: Self.delayInfo, fillHeight: true) {
+            SegmentedBar(
+                selection: Binding(
+                    get: { channel.delay },
+                    set: { channel.delay = $0 }
+                ),
+                options: LatencyPreset.allCases,
+                label: { delayShortLabel($0) }
+            )
         }
     }
+
+    /// Why "+0" is not "zero", and what buying delay actually buys.  Kept honest — the numbers are
+    /// the buffer ADDED on top of the pipeline's own unavoidable latency (see LatencyPreset).
+    private static let delayInfo = """
+        Buffer added on top of the delay the pipeline already has.
+
+        Unbuffered +0 is not zero delay — it is the least the capture → encode → network → \
+        decode path can physically deliver. It simply adds nothing of its own.
+
+        Each step up adds a jitter buffer: frames are held briefly so a network hiccup is \
+        absorbed instead of reaching air. The picture runs steadier the higher you go, and \
+        arrives that much later.
+        """
 
     private func delayShortLabel(_ preset: LatencyPreset) -> String {
         switch preset {
