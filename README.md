@@ -9,6 +9,11 @@
   <a href="https://github.com/airlive-project/airlive-bridge/releases/latest"><img src="https://img.shields.io/badge/Download-latest%20DMG-brightgreen" alt="Download latest DMG"></a>
 </div>
 
+<p align="center">
+  <img src=".github/screenshot.png" width="900"
+       alt="Airlive Bridge — multicam switcher: channel rail, Preview/Program with a live multiview grid, camera control, and NDI / OBS / SRT / RTSP / HDMI program outputs">
+</p>
+
 ---
 
 Receive **Airlive Camera** (iPhone) streams on a Mac, **switch between them
@@ -58,11 +63,19 @@ Install it on the iPhone, pick a channel, done. Connects over Wi-Fi (Bonjour `_a
 control** (ISO / shutter / white balance / lens / tally) and a cool, low-power
 stream tuned for long shoots.
 
+**Airlive Camera → Airlive Bridge:**
+
+https://github.com/user-attachments/assets/30b79c7c-c103-4462-b067-66cfeca66173
+
 **Any AirPlay camera app** (e.g. **Blackmagic Camera**) — the universal path. On the
 iPhone: Control Center → **Screen Mirroring** → pick the Bridge channel (shown as
 `Cam N`). Works with any AirPlay-capable app. Note: Screen Mirroring sends whatever
 is on the phone's screen, so use the app's own clean / external-output mode for a
 frame without its on-screen UI. Video-only — no remote control on this path.
+
+**Blackmagic Camera (via AirPlay Screen Mirroring) → Airlive Bridge:**
+
+https://github.com/user-attachments/assets/d4cbecb8-fb2c-4378-ba60-5c92ccdf0e75
 
 *(A wired **HDMI / USB capture device** can also be a channel.)*
 
@@ -112,6 +125,10 @@ output — **NDI / OBS / SRT / RTSP / HDMI**.
 - **RTSP** — built-in RTSP server; point vMix / VLC / any decoder at the URL.
 - **HDMI** — clean full-screen program out on a second display.
 - ⏭ **Virtual Camera** — planned.
+
+**Airlive Bridge program → OBS** (via the OBS relay):
+
+https://github.com/user-attachments/assets/e855d1e5-ffff-4490-a67b-6f993a7c8647
 
 ## Shortcuts
 
