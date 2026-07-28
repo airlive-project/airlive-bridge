@@ -35,6 +35,18 @@
     <description>Most recent updates to Airlive Bridge</description>
     <language>en</language>
     <item>
+      <title>Airlive Bridge 1.0.5</title>
+      <pubDate>Tue, 28 Jul 2026 08:51:52 +0000</pubDate>
+      <sparkle:version>6</sparkle:version>
+      <sparkle:shortVersionString>1.0.5</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[Fixes keyboard shortcuts being permanently stuck off: the "Enable shortcuts" switch disabled itself along with the rest of the panel, so once shortcuts were turned off there was no way to turn them back on.]]></description>
+      <enclosure
+        url="https://github.com/airlive-project/airlive-bridge/releases/download/v1.0.5/Airlive-Bridge-1.0.5.dmg"
+        length="10000990" type="application/octet-stream"
+        sparkle:edSignature="SPthIzc9nP/tEok3f5jHS7MO47wCF97Shtzyq2/QRLFJI+hy1OI0rHrD6UlaV0XkugdJg4LSaD3yxr5WV89KBg==" />
+    </item>
+    <item>
       <title>Airlive Bridge 1.0.4</title>
       <pubDate>Tue, 28 Jul 2026 07:59:36 +0000</pubDate>
       <sparkle:version>5</sparkle:version>

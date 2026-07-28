@@ -50,25 +50,31 @@ struct ShortcutSettings: View {
                 .disabled(!shortcuts.enabled)
             permissionWarning
 
-            HStack {
-                sectionLabel("SWITCHER")
-                Spacer()
-                Button("Reset all") { bindings.resetAll() }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(Theme.textSecondary)
-                    .help("Reset every key to its default")
-            }
-            .padding(.top, Spacing.md)
-            fixedRow(ShortcutAction(kind: .cut, index: 0), title: "Cut")
-            fixedRow(ShortcutAction(kind: .removeChannel, index: 0), title: "Remove Selected Channel")
+            // Only the KEY-ASSIGNMENT sections grey out when shortcuts are off.  The
+            // disable MUST NOT wrap the GENERAL rows above: it used to sit on the whole
+            // column, which disabled the very "Enable shortcuts" switch that turns them
+            // back on — once off, there was no way back from the UI at all.
+            Group {
+                HStack {
+                    sectionLabel("SWITCHER")
+                    Spacer()
+                    Button("Reset all") { bindings.resetAll() }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(Theme.textSecondary)
+                        .help("Reset every key to its default")
+                }
+                .padding(.top, Spacing.md)
+                fixedRow(ShortcutAction(kind: .cut, index: 0), title: "Cut")
+                fixedRow(ShortcutAction(kind: .removeChannel, index: 0), title: "Remove Selected Channel")
 
-            sectionLabel("LENSES").padding(.top, Spacing.md)
-            ForEach(0 ..< 6, id: \.self) { i in
-                fixedRow(ShortcutAction(kind: .lens, index: i), title: "Lens \(i + 1)")
+                sectionLabel("LENSES").padding(.top, Spacing.md)
+                ForEach(0 ..< 6, id: \.self) { i in
+                    fixedRow(ShortcutAction(kind: .lens, index: i), title: "Lens \(i + 1)")
+                }
             }
+            .disabled(!shortcuts.enabled)
         }
-        .disabled(!shortcuts.enabled)
     }
 
     /// Left-column row: title flush left, chip flush right.
