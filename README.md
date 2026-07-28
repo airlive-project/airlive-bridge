@@ -38,9 +38,14 @@ TouchDesigner, etc.
 
 Download [`Airlive-Bridge.dmg`](https://github.com/airlive-project/airlive-bridge/releases/latest/download/Airlive-Bridge.dmg)
 from [Releases](https://github.com/airlive-project/airlive-bridge/releases/latest)
-and drag **Airlive Bridge** to Applications.  Interim build: if Gatekeeper warns,
-right-click the app → **Open** (full notarization ships with the signed release).
+and drag **Airlive Bridge** to Applications.  The app is **signed with a Developer ID
+and notarized by Apple**, so it opens normally — no right-click → Open dance.
 An **Uninstall Airlive Bridge** helper is included in the DMG.
+
+From then on it **updates itself**: Airlive Bridge checks for new versions in the
+background and offers the standard *Install and Relaunch*, verifying Apple's
+signature plus our own before replacing anything.  You can also check on demand
+from the menu bar (**Airlive Bridge → Check for Updates…**).
 
 ## Build from source
 
