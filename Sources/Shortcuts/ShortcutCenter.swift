@@ -70,7 +70,7 @@ final class ShortcutCenter: ObservableObject {
     /// Request Input Monitoring (user-initiated), then re-arm once it lands.
     func requestPermission() {
         ShortcutMonitor.requestPermission()
-        hasPermission = ShortcutMonitor.hasPermission
+        refreshPermission()   // a button tap, not a view update — safe to publish
         apply()
     }
 
@@ -80,9 +80,22 @@ final class ShortcutCenter: ObservableObject {
         UserDefaults.standard.set(showHints, forKey: Keys.hints)
     }
 
+    /// Re-read the Input-Monitoring grant and publish it ONLY when it actually changed.
+    ///
+    /// Deliberately NOT called from `apply()`: apply() runs inside the `enabled` / `global`
+    /// `didSet`, i.e. INSIDE the SwiftUI view update that wrote the toggle.  Mutating a
+    /// second `@Published` there is "publishing changes from within view updates" — it made
+    /// the switch snap straight back to off, so shortcuts could be turned OFF but never back
+    /// ON (the `didSet`-free "Show key hints" toggle kept working, which is what pinned it).
+    private func refreshPermission() {
+        let granted = ShortcutMonitor.hasPermission
+        if granted != hasPermission { hasPermission = granted }
+    }
+
     /// Bring up the right engine(s) for the current settings.  Idempotent.
+    /// Publishes NOTHING — see `refreshPermission()`.
     private func apply() {
-        hasPermission = ShortcutMonitor.hasPermission
+        let granted = ShortcutMonitor.hasPermission   // local read, no @Published write
         monitor.stop()
         if let m = localMonitor { NSEvent.removeMonitor(m); localMonitor = nil }
         guard enabled else { return }
@@ -94,7 +107,7 @@ final class ShortcutCenter: ObservableObject {
             (self?.handleLocal(event) ?? false) ? nil : event
         }
         // Global (chord) layers on top when opted in + permitted.
-        if global && hasPermission { monitor.ensureRunning() }
+        if global && granted { monitor.ensureRunning() }
     }
 
     // MARK: - Event handling
@@ -193,6 +206,7 @@ final class ShortcutCenter: ObservableObject {
         // App activated — re-check the permission grant and re-arm.
         nc.addObserver(forName: NSApplication.didBecomeActiveNotification,
                        object: nil, queue: .main) { [weak self] _ in
+            self?.refreshPermission()   // notification, not a view update — safe to publish
             self?.apply()
         }
         // Woke from sleep — the system may have killed the tap.
@@ -209,11 +223,7 @@ final class ShortcutCenter: ObservableObject {
             // may never fire to notice a mid-session revoke.  Publish the change so the
             // Settings warning ("Needs Input Monitoring") appears without a click, and
             // the operator learns the keys stopped instead of silently missing cuts.
-            let granted = ShortcutMonitor.hasPermission
-            if granted != self.hasPermission {
-                self.hasPermission = granted
-                self.objectWillChange.send()
-            }
+            self.refreshPermission()   // timer callback, not a view update — safe to publish
         }
     }
 }
