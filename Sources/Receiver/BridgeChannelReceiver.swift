@@ -727,12 +727,20 @@ final class BridgeChannelReceiver: ChannelReceiver {
         }
     }
 
-    /// Forward a RAW program payload to the channel's relay taps ON MAIN.  The taps
-    /// (`onProgramFormat` / `onProgramSample`) are written by `BridgeModel` on the
-    /// main thread, so they must be read there — mirrors the `onProgramFrame` hop in
-    /// `present()`.  `handle()` runs on `queue` (background), so the direct call was
-    /// a data race.  The relay re-dispatches to its own queue immediately, so the
-    /// per-packet main hop is just a pointer handoff.
+    /// Forward a RAW program payload to the channel's relay taps, ON THIS QUEUE.
+    ///
+    /// These used to hop every packet through `DispatchQueue.main.async`, purely so the
+    /// tap closures (written by `BridgeModel` on main) could be read without a data race.
+    /// That put the outgoing video for OBS / RTSP / SRT into the same queue as SwiftUI's
+    /// rendering of the multiview, previews and controls — so the stream inherited the UI
+    /// thread's scheduling.  It showed up exactly as the operator described: perfectly
+    /// smooth INSIDE the Bridge (its preview is paced off-main from the decoded ring), but
+    /// juddering the moment it was relayed to OBS.  A "just a pointer handoff" comment does
+    /// not make the main thread punctual.
+    ///
+    /// The race is now closed where it belongs — the taps themselves are lock-guarded on
+    /// `BridgeChannel` — so these run straight from the network queue, and every relay
+    /// output re-dispatches to its own queue anyway.  Nothing on this path touches UI state.
     private func forwardProgramFormat(_ payload: Data) {
         guard isProgramSource else { return }   // H1: no main hop for a non-program channel
         forwardDelayed { [weak self] in self?.channel?.onProgramFormat?(payload) }
@@ -750,9 +758,8 @@ final class BridgeChannelReceiver: ChannelReceiver {
     /// is preserved (serial `queue`, constant delta); a mid-stream delay change can
     /// briefly reorder until the next IDR — the same tolerance the decoded ring has.
     private func forwardDelayed(_ body: @escaping () -> Void) {
-        let deliver = { DispatchQueue.main.async(execute: body) }
         let d = bufferSeconds   // queue-confined; forward* callers run on `queue`
-        if d <= 0 { deliver() } else { queue.asyncAfter(deadline: .now() + d, execute: deliver) }
+        if d <= 0 { body() } else { queue.asyncAfter(deadline: .now() + d, execute: body) }
     }
 
     /// Reject this connection: send the failure result, then close gracefully so

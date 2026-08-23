@@ -286,8 +286,28 @@ final class BridgeChannel: ObservableObject, Identifiable {
     /// transcode).  `onProgramFormat` carries the length-prefixed SPS/PPS the
     /// camera resends each keyframe.
     var onProgramFrame: ((CVPixelBuffer, UInt64) -> Void)?
-    var onProgramSample: ((Data, Int64) -> Void)?
-    var onProgramFormat: ((Data) -> Void)?
+
+    // The two RAW taps are written on MAIN (BridgeModel, on a program switch) and read on the
+    // receiver's network queue, once per encoded frame.  They are lock-guarded so the receiver can
+    // call them DIRECTLY from that queue.  Previously the receiver hopped every packet through
+    // `DispatchQueue.main.async` just to read these safely — which put the outgoing video for OBS /
+    // RTSP / SRT in the same queue as SwiftUI's rendering of the multiview, previews and controls.
+    // The operator saw exactly that: a picture that was perfectly smooth INSIDE the Bridge (its
+    // preview is paced off-main from the decoded ring) but juddered once relayed to OBS, because the
+    // relay inherited the UI thread's scheduling.  The taps only hand a payload to an output that
+    // immediately re-dispatches to its own queue, so nothing here needs the main thread at all.
+    private let programTapLock = NSLock()
+    private var _onProgramSample: ((Data, Int64) -> Void)?
+    private var _onProgramFormat: ((Data) -> Void)?
+
+    var onProgramSample: ((Data, Int64) -> Void)? {
+        get { programTapLock.lock(); defer { programTapLock.unlock() }; return _onProgramSample }
+        set { programTapLock.lock(); _onProgramSample = newValue; programTapLock.unlock() }
+    }
+    var onProgramFormat: ((Data) -> Void)? {
+        get { programTapLock.lock(); defer { programTapLock.unlock() }; return _onProgramFormat }
+        set { programTapLock.lock(); _onProgramFormat = newValue; programTapLock.unlock() }
+    }
 
     // Receiver-password auth is GLOBAL (one password for the whole Bridge) and
     // lives on `BridgeModel`; the model pushes it to this channel's receiver via
