@@ -35,6 +35,18 @@
     <description>Most recent updates to Airlive Bridge</description>
     <language>en</language>
     <item>
+      <title>Airlive Bridge 1.0.6</title>
+      <pubDate>Sun, 23 Aug 2026 15:59:28 +0000</pubDate>
+      <sparkle:version>7</sparkle:version>
+      <sparkle:shortVersionString>1.0.6</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[Smoother program out to OBS, RTSP and SRT: the outgoing stream no longer shares the UI thread with the interface, which was making a picture that looked perfect inside the Bridge judder once relayed.]]></description>
+      <enclosure
+        url="https://github.com/airlive-project/airlive-bridge/releases/download/v1.0.6/Airlive-Bridge-1.0.6.dmg"
+        length="10002108" type="application/octet-stream"
+        sparkle:edSignature="9w2cXQelNX5ucoXa2hEueomYp4Na7sUBEluChHuQvIXGeTNgx9XyVB0BiR6ot4KwWJeeAUG8hNAInskCDaoXDQ==" />
+    </item>
+    <item>
       <title>Airlive Bridge 1.0.5</title>
       <pubDate>Tue, 28 Jul 2026 08:51:52 +0000</pubDate>
       <sparkle:version>6</sparkle:version>
