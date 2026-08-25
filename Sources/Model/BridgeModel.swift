@@ -1082,7 +1082,7 @@ final class BridgeModel: ObservableObject {
     }
 
     /// Reconstruct a `VideoOutput` from a saved config (OFF — the caller never starts it).
-    /// Unknown / not-implemented kinds (e.g. `.vcam`) are skipped.
+    /// A kind this build doesn't know (an older profile, a newer field) is skipped.
     private func makeOutput(from cfg: BridgeProfile.OutputConfig) -> VideoOutput? {
         guard let kind = OutputKind(rawValue: cfg.kind) else { return nil }
         let output: VideoOutput?
@@ -1092,7 +1092,7 @@ final class BridgeModel: ObservableObject {
         case .rtsp: output = RTSPOutput(label: cfg.label, port: UInt16(cfg.port ?? 8554))
         case .hdmi: output = HDMIOutput(label: cfg.label)
         case .srt:  output = SRTOutput(label: cfg.label)
-        case .vcam: output = nil                       // not implemented
+        case .vcam: output = VirtualCameraOutput(label: cfg.label)
         }
         output?.config = cfg.config
         return output

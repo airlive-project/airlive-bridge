@@ -16,10 +16,9 @@ import CoreVideo
 /// The kind of downstream transport an output publishes to.  Raw values are
 /// stable identifiers (persistable, shown in the UI as a badge).
 ///
-/// Only `.ndi` is functional today; `.srt`, `.rtsp` and `.vcam` exist so the
-/// "Publish to" rail can show the operator the FULL protocol surface as visually
-/// complete (but non-functional / "Soon") placeholders — the real transports
-/// land in later phases.  `CaseIterable` so the "Add output" menu can list every
+/// Every kind below is a shipping transport — Virtual Camera was the last
+/// placeholder and now runs like the rest.  The raw values are PERSISTED in saved
+/// profiles, so never rename one.  `CaseIterable` so the "Add output" menu lists every
 /// kind without a hand-maintained array that could drift from this enum.
 enum OutputKind: String, CaseIterable, Identifiable {
     case ndi
@@ -72,7 +71,7 @@ enum OutputKind: String, CaseIterable, Identifiable {
     /// disabled controls on placeholder cards and the add menu — the single
     /// source of truth so the card and the menu can never disagree about which
     /// kinds are real.
-    var isImplemented: Bool { self == .ndi || self == .obs || self == .rtsp || self == .srt || self == .hdmi }
+    var isImplemented: Bool { true }   // every kind ships now — Virtual Camera was the last placeholder
 }
 
 /// One downstream re-publishing sink.  Reference type (`AnyObject`) because an

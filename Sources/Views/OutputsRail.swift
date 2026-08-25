@@ -193,7 +193,7 @@ private func addProgramOutput(_ kind: OutputKind, to model: BridgeModel) {
     case .hdmi: model.addProgramOutput(HDMIOutput(label: name))
     case .rtsp: model.addProgramOutput(RTSPOutput(label: name, port: nextRTSPPort(model)))
     case .srt:  model.addProgramOutput(SRTOutput(label: name))
-    case .vcam: break   // Virtual Camera is "soon"
+    case .vcam: model.addProgramOutput(VirtualCameraOutput(label: name))
     }
 }
 
@@ -749,7 +749,7 @@ private extension OutputKind {
         case .hdmi: return "Second screen"
         case .srt:  return "srt://host:port"
         case .rtsp: return "rtsp://0.0.0.0:8554/live/cam"
-        case .vcam: return "Airlive Camera"
+        case .vcam: return "Pick “Airlive Virtual Camera” in Zoom / Meet / Teams"
         }
     }
 }

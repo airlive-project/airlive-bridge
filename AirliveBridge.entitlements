@@ -3,15 +3,32 @@
 <plist version="1.0">
 <dict>
   <!--
-    Developer ID distribution (NOT App Store sandbox).  The one entitlement that
-    MATTERS: the Bridge dlopen's third-party dylibs at runtime — libndi (NDI
-    Runtime) and libsrt (brew).  Under the Hardened Runtime that notarization
-    requires, dlopen of a library signed by a different Team ID is BLOCKED unless
-    library validation is disabled.  Without this, NDI and SRT silently fail on a
-    notarized build even though they work in debug.  No sandbox key → full
-    network/file access for a pro LAN tool.
+    Developer ID distribution (NOT App Store sandbox).  The Bridge dlopen's third-party
+    dylibs at runtime — libndi (NDI Runtime) and libsrt.  Under the Hardened Runtime that
+    notarization requires, dlopen of a library signed by a different Team ID is BLOCKED
+    unless library validation is disabled.  Without this, NDI and SRT silently fail on a
+    notarized build even though they work in debug.  No sandbox key → full network/file
+    access for a pro LAN tool.
   -->
   <key>com.apple.security.cs.disable-library-validation</key>
   <true/>
+
+  <!--
+    Lets the app install its bundled Virtual Camera system extension.  This is a
+    RESTRICTED entitlement: it only takes effect when the signature carries a
+    provisioning profile that grants the System Extension capability, and macOS refuses
+    to load the extension unless the app runs from /Applications.
+  -->
+  <key>com.apple.developer.system-extension.install</key>
+  <true/>
+
+  <!--
+    Shared container the program frames are published through — the extension is a
+    separate process and reads them from here.  Must match the extension's group id.
+  -->
+  <key>com.apple.security.application-groups</key>
+  <array>
+    <string>group.studio.airlive.bridge</string>
+  </array>
 </dict>
 </plist>

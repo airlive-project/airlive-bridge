@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    The ONLY entitlement a camera extension needs (Apple's own template ships exactly
+    this): the App Group whose container holds the shared frame slot.  It must match
+    the Bridge's group id verbatim, or the two processes map different files and the
+    camera silently shows the placeholder forever.
+  -->
+  <key>com.apple.security.application-groups</key>
+  <array>
+    <string>group.studio.airlive.bridge</string>
+  </array>
+</dict>
+</plist>

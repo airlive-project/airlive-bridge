@@ -19,6 +19,9 @@ targets:
     platform: macOS
     sources:
       - Sources
+      # Compiled into BOTH targets: it is the shared-memory contract between the app and
+      # its camera extension, so a change can never land on one side only.
+      - VirtualCamera/SharedFrameBuffer.swift
     info:
       path: Sources/Info.plist
       properties:
@@ -80,6 +83,11 @@ targets:
       - sdk: CoreMedia.framework
       - sdk: CoreVideo.framework
       - package: Sparkle   # auto-update (see packages: above)
+      # Bundled system extension — macOS loads it from Contents/Library/SystemExtensions
+      # and ONLY when the app itself lives in /Applications.
+      - target: AirliveVirtualCamera
+        embed: true
+        codeSign: true
     settings:
       base:
         PRODUCT_NAME: Airlive Bridge
@@ -126,6 +134,42 @@ targets:
           # so the link is warning-clean and the app runs on every supported macOS.
           - $(SRCROOT)/Vendor/deps/lib/libcrypto.a
           - $(SRCROOT)/Vendor/deps/lib/libplist-2.0.a
+
+  # ── Virtual Camera ────────────────────────────────────────────────────────────
+  # A CoreMediaIO camera extension: a separate process macOS launches when any app
+  # opens the camera, so Zoom / Meet / QuickTime see "Airlive Virtual Camera" whether
+  # or not the Bridge happens to be running.  It reads program frames from the shared
+  # App Group slot and shows a spoken-for placeholder when there is nothing on air.
+  AirliveVirtualCamera:
+    type: system-extension
+    platform: macOS
+    sources:
+      - VirtualCamera
+    info:
+      path: VirtualCamera/Info.plist
+      properties:
+        CFBundleDisplayName: Airlive Virtual Camera
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSMinimumSystemVersion: "13.0"
+        # Shown by macOS in the approval prompt the operator confirms once.
+        NSSystemExtensionUsageDescription: "Airlive Bridge installs a virtual camera so other apps can use the program feed as a webcam."
+        # How CoreMediaIO reaches the extension.  The TeamID prefix is REQUIRED — the
+        # service name must be unique across every extension on the machine.
+        CMIOExtension:
+          CMIOExtensionMachServiceName: $(TeamIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)
+    settings:
+      base:
+        PRODUCT_NAME: AirliveVirtualCamera
+        PRODUCT_BUNDLE_IDENTIFIER: studio.airlive.bridge.AirliveBridge.vcam
+        SWIFT_VERSION: "5.9"
+        ARCHS: "arm64"
+        EXCLUDED_ARCHS: x86_64
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_ENTITLEMENTS: VirtualCamera/AirliveVirtualCamera.entitlements
+        DEVELOPMENT_TEAM: XWBJP49FTR
+        CODE_SIGN_STYLE: Automatic
+        SKIP_INSTALL: YES
 
 schemes:
   AirliveBridge:
