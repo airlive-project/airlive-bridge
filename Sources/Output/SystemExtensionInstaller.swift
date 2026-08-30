@@ -62,12 +62,21 @@ final class SystemExtensionInstaller: NSObject, OSSystemExtensionRequestDelegate
 
     // MARK: - OSSystemExtensionRequestDelegate
 
-    /// A new build of the extension ships with every Bridge update, so always replace —
-    /// declining would leave an old extension serving a newer app.
+    /// Replace ONLY when the staged extension is genuinely a different build.
+    ///
+    /// This used to answer `.replace` to everything, including "the identical version you
+    /// already have". Every replace tears down the extension's process and relaunches it,
+    /// which unpublishes the camera for a moment and, on macOS, defers the outgoing copy's
+    /// removal until the next restart. Answering it to an unchanged extension meant an app
+    /// that asked the operator to reboot and re-approve in exchange for nothing at all.
     func request(_ request: OSSystemExtensionRequest,
                  actionForReplacingExtension existing: OSSystemExtensionProperties,
                  withExtension ext: OSSystemExtensionProperties) -> OSSystemExtensionRequest.ReplacementAction {
-        .replace
+        if existing.bundleVersion == ext.bundleVersion,
+           existing.bundleShortVersion == ext.bundleShortVersion {
+            return .cancel
+        }
+        return .replace
     }
 
     func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) {
@@ -92,6 +101,13 @@ final class SystemExtensionInstaller: NSObject, OSSystemExtensionRequestDelegate
         // are meaningless in any other domain, and mapping them blindly produces a
         // confident, wrong diagnosis (an early build claimed the extension was missing
         // from the bundle when it was sitting right there).
+        // Cancelling our own replacement of an identical build is the SUCCESS path above,
+        // not a failure: the extension the app wants is already the one that is installed.
+        if ns.domain == OSSystemExtensionErrorDomain,
+           ns.code == OSSystemExtensionError.requestCanceled.rawValue {
+            completion?(.installed)
+            return
+        }
         guard ns.domain == OSSystemExtensionErrorDomain else {
             completion?(.failed("Couldn't install the virtual camera: \(ns.localizedDescription) [\(ns.domain) \(ns.code)]"))
             return

@@ -10,12 +10,25 @@
 //   • The extension can ONLY load when the Bridge runs from /Applications.
 //   • The FIRST activation asks the operator to approve it in System Settings.
 // Neither is an error state, so both are reported as plain guidance on the card.
+//
+// WHO DOES WHAT — the division that this file got wrong for three days:
+//   • INSTALLING the camera is a property of the CARD EXISTING, and happens ONCE.
+//     It used to happen on every toggle-on, as a `.replace` request, which tears the
+//     extension down and relaunches it — so switching the card on made the device
+//     briefly disappear, and the very lookup running alongside it lost the race.  The
+//     operator saw "camera not found" for a camera the system was listing, and was told
+//     to reboot and re-approve for something the app was doing to itself.
+//   • The TOGGLE owns the sink stream and nothing else: on = push frames, off = stop.
+//   • WHAT THE CARD SAYS is derived from the system, never remembered.  A latched string
+//     survives the condition it described; that is what made the message stick.
+//   • The device appearing is an EVENT, not something to poll for: CoreMediaIO tells us
+//     when the camera list changes, and the card follows on its own.
 
 import Foundation
 import CoreVideo
+import CoreMediaIO
 import VideoToolbox
 import SystemExtensions
-import AppKit    // one notification: the operator returning from System Settings (see watchForApproval)
 import os
 
 /// Same subsystem the extension logs under — one `log show` shows both ends of the hop.
@@ -44,11 +57,46 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     let kind: OutputKind = .vcam
     var config: String = ""
 
+    /// Where the camera actually is right now.  Every value is set by a real event —
+    /// an activation callback, the camera list changing, the sink opening — so the card
+    /// cannot show a state the machine has left.
+    private enum Stage {
+        case installing                 // request submitted, nothing to say yet
+        case awaitingApproval           // macOS is asking the operator
+        case needsInstall(String)       // it cannot be installed, and why
+        case starting                   // approved; the device has not appeared YET (transient)
+        case ready                      // the device is published, the toggle is off
+        case live                       // frames are going in
+        case failed(String)             // a real transport failure
+
+        /// Only states the operator can DO something about are worth red text.
+        /// `starting` deliberately says nothing: it resolves by itself within a second,
+        /// and calling it an error is what taught the operator to distrust this card.
+        var message: String? {
+            switch self {
+            case .needsInstall(let why): return why
+            case .failed(let why):       return why
+            case .awaitingApproval:
+                return "Approve “\(kVCamDeviceName)” in System Settings → General → Login Items & Extensions."
+            case .installing, .starting, .ready, .live: return nil
+            }
+        }
+    }
+
     private let lock = NSLock()
+    private var _stage: Stage = .installing
     private var _isLive = false
-    private var _lastError: String?
     var isLive: Bool { lock.lock(); defer { lock.unlock() }; return _isLive }
-    var lastError: String? { lock.lock(); defer { lock.unlock() }; return _lastError }
+    var lastError: String? { lock.lock(); defer { lock.unlock() }; return _stage.message }
+
+    /// Wired by BridgeModel.configureOutput, exactly like every other output's — without it
+    /// nothing this class learns can reach the card, and every fix below would be invisible.
+    var onStateChanged: (() -> Void)?
+
+    private func setStage(_ stage: Stage) {
+        lock.lock(); _stage = stage; lock.unlock()
+        DispatchQueue.main.async { [weak self] in self?.onStateChanged?() }
+    }
 
     /// Opening and closing the sink talks to CoreMediaIO and can block; frames do NOT
     /// come through here — see `send`.
@@ -76,41 +124,93 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     init(id: UUID = UUID(), label: String = "Virtual Camera") {
         self.id = id
         self.label = label
+        super.init()
+        watchDeviceList()
+        install()
     }
 
-    // MARK: - Lifecycle
+    deinit {
+        stopWatchingDeviceList()
+    }
+
+    // MARK: - Installing the camera (ONCE, because the card exists)
+
+    /// Ask macOS for the camera. Runs when the card is created — adding a Virtual Camera
+    /// output IS the request for one — and never again for the life of this output.
+    ///
+    /// It used to run on every toggle-on, and that was the whole disease: each call submits
+    /// an activation request, and a request that replaces the staged extension tears its
+    /// process down and relaunches it, which unpublishes the device for a moment. The lookup
+    /// running beside it then failed and wrote "camera not found" about a camera that exists.
+    private func install() {
+        installer.activate { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .installed:
+                // Approved and staged. The device usually appears within a second, and the
+                // list watcher below is what notices; do not call that gap an error.
+                self.refreshFromDeviceList(fallback: .starting)
+            case .needsApproval:
+                self.setStage(.awaitingApproval)
+            case .notInApplications:
+                self.setStage(.needsInstall("Move Airlive Bridge to /Applications — macOS only loads a camera extension from there."))
+            case .failed(let why):
+                self.setStage(.needsInstall(why))
+            }
+        }
+    }
+
+    // MARK: - The camera appearing is an EVENT
+
+    private var deviceListener: CMIOObjectPropertyListenerBlock?
+
+    /// CoreMediaIO says when the machine's camera list changes. That is exactly the moment
+    /// our answer changes — the extension finished launching, or the operator approved it in
+    /// System Settings — so the card follows on its own, with no polling, no timer, and
+    /// nothing for the operator to toggle off and on to "wake it up".
+    private func watchDeviceList() {
+        var address = CMIOObjectPropertyAddress(
+            mSelector: CMIOObjectPropertySelector(kCMIOHardwarePropertyDevices),
+            mScope: CMIOObjectPropertyScope(kCMIOObjectPropertyScopeGlobal),
+            mElement: CMIOObjectPropertyElement(kCMIOObjectPropertyElementMain))
+        let block: CMIOObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.refreshFromDeviceList(fallback: .starting)
+        }
+        if CMIOObjectAddPropertyListenerBlock(CMIOObjectID(kCMIOObjectSystemObject),
+                                              &address, queue, block) == noErr {
+            deviceListener = block
+        }
+    }
+
+    private func stopWatchingDeviceList() {
+        guard let listener = deviceListener else { return }
+        var address = CMIOObjectPropertyAddress(
+            mSelector: CMIOObjectPropertySelector(kCMIOHardwarePropertyDevices),
+            mScope: CMIOObjectPropertyScope(kCMIOObjectPropertyScopeGlobal),
+            mElement: CMIOObjectPropertyElement(kCMIOObjectPropertyElementMain))
+        CMIOObjectRemovePropertyListenerBlock(CMIOObjectID(kCMIOObjectSystemObject),
+                                              &address, queue, listener)
+        deviceListener = nil
+    }
+
+    /// Re-derive the stage from the machine, never from memory. `fallback` is what to say
+    /// when the camera is not in the list — "starting" while we are waiting for it to appear,
+    /// but the installer's own verdict (awaiting approval, cannot install) outranks that.
+    private func refreshFromDeviceList(fallback: Stage) {
+        let present = CMIOSinkConnection.deviceExists(uuid: kVCamDeviceUUID)
+        lock.lock(); let live = _isLive; let open = sink != nil; lock.unlock()
+        if !present { setStage(fallback); return }
+        if live, open { setStage(.live); return }
+        // The camera is there. If the operator has this output switched on but we never
+        // managed to open the sink — the usual case right after an approval — open it now.
+        if live { openSink() } else { setStage(.ready) }
+    }
+
+    // MARK: - Lifecycle (the toggle owns the SINK, nothing else)
 
     func start() {
-        queue.async { [weak self] in
-            guard let self else { return }
-            let connection = CMIOSinkConnection()
-            if let reason = connection.open(deviceUUID: kVCamDeviceUUID) {
-                // The extension isn't there or isn't the build we expect — say which, and
-                // do NOT claim to be live.
-                self.setError(reason)
-                return
-            }
-            self.lock.lock()
-            self.sink = connection
-            self.framesSent = 0; self.framesDropped = 0
-            self.reportedOnce = false          // a new session may fail in a new way
-            self._isLive = true
-            // Do NOT clear an existing message here: the installer runs in parallel and may
-            // already have said "restart the Mac to finish installing".  Opening the sink
-            // SUCCEEDS in that case — against the outgoing extension, which is still live —
-            // and wiping the message left the operator running yesterday's build with no hint.
-            self.lock.unlock()
-        }
-        // Activation talks to macOS on the main thread and may show the approval prompt.
-        watchForApproval()
-        installer.activate { [weak self] result in
-            switch result {
-            case .installed:      self?.sinkOpenedOrRetry()
-            case .needsApproval:  self?.setError("Approve “\(kVCamDeviceName)” in System Settings → General → Login Items & Extensions.")
-            case .notInApplications: self?.setError("Move Airlive Bridge to /Applications — macOS only loads a camera extension from there.")
-            case .failed(let m):  self?.setError(m)
-            }
-        }
+        lock.lock(); _isLive = true; lock.unlock()
+        openSink()
     }
 
     func stop() {
@@ -126,63 +226,46 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
             self.lock.unlock()
             // Outside the lock: this talks to the extension's process and its own close()
             // must not be able to park an incoming frame behind it.
-            if let reason = connection?.close() { self.setError(reason) }
+            if let reason = connection?.close() { self.setStage(.failed(reason)) }
+            else { self.refreshFromDeviceList(fallback: .starting) }
         }
-        DispatchQueue.main.async { [weak self] in self?.stopWatchingForApproval() }
         // The extension is deliberately LEFT INSTALLED: uninstalling on every toggle would
         // re-prompt the operator for approval each time, and a camera that vanishes from
         // Zoom's list mid-call is worse than one that shows a "no program" placeholder.
     }
 
-    func clearError() { lock.lock(); _lastError = nil; lock.unlock() }
-
-    /// Watches for the operator coming back from System Settings.
-    ///
-    /// Approving an extension happens in another app, and the callback that tells us it
-    /// finished does not always arrive — it certainly does not when the request was made
-    /// before the approval.  Rather than leaving a stale "approve this" on the card forever,
-    /// the sink is retried the moment the Bridge is frontmost again: by then the operator has
-    /// either approved it or not, and the answer is one cheap device lookup away.
-    private var activationObserver: NSObjectProtocol?
-
-    private func watchForApproval() {
-        guard activationObserver == nil else { return }
-        activationObserver = NotificationCenter.default.addObserver(
-            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            guard let self, self.isLive == false || self.lastError != nil else { return }
-            self.sinkOpenedOrRetry()
-        }
-    }
-
-    private func stopWatchingForApproval() {
-        if let o = activationObserver { NotificationCenter.default.removeObserver(o) }
-        activationObserver = nil
-    }
-
-    // MARK: - Frames
-
-    /// Open the sink now that the extension is installed.
-    ///
-    /// On a FIRST activation the two halves of `start()` race and the sink half always loses:
-    /// the device does not exist yet, so it fails immediately and gives up. The operator then
-    /// approves the extension in System Settings — and nothing retried, so the card went quiet
-    /// while the camera stayed dark until they toggled it off and on by hand.
-    private func sinkOpenedOrRetry() {
+    /// Open the sink and start pushing. Safe to call repeatedly — the device appearing, the
+    /// operator approving and the toggle going on all land here, and only the first one that
+    /// finds a real camera does any work.
+    private func openSink() {
         queue.async { [weak self] in
             guard let self else { return }
-            self.lock.lock(); let alreadyOpen = self.sink != nil; self.lock.unlock()
-            if alreadyOpen { self.setError(nil); return }
+            self.lock.lock()
+            let alreadyOpen = self.sink != nil
+            let wanted = self._isLive
+            self.lock.unlock()
+            guard wanted, !alreadyOpen else { return }
+
             let connection = CMIOSinkConnection()
-            if let reason = connection.open(deviceUUID: kVCamDeviceUUID) { self.setError(reason); return }
+            if let reason = connection.open(deviceUUID: kVCamDeviceUUID) {
+                // Not a verdict on the camera: it may simply not have appeared yet. The
+                // device-list watcher will bring us back here the moment it does.
+                self.setStage(CMIOSinkConnection.deviceExists(uuid: kVCamDeviceUUID)
+                              ? .failed(reason) : .starting)
+                return
+            }
             self.lock.lock()
             self.sink = connection
             self.framesSent = 0; self.framesDropped = 0
-            self._isLive = true
-            self._lastError = nil
+            self.reportedOnce = false      // a new session may fail in a new way
             self.lock.unlock()
+            self.setStage(.live)
         }
     }
+
+    func clearError() { refreshFromDeviceList(fallback: .starting) }
+
+    // MARK: - Frames
 
     func send(_ pixelBuffer: CVPixelBuffer, timeNs: UInt64) {
         lock.lock(); let live = _isLive; let sink = self.sink; lock.unlock()
@@ -202,7 +285,7 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
         // That is the normal resting state of a virtual camera, not a fault, and calling it
         // one told operators the camera was broken whenever Zoom simply wasn't running.
         case .queueFull: framesDropped &+= 1
-        case .failed:    reportOnce("The virtual camera stopped accepting frames — toggle this output off and on.")
+        case .failed:    reportOnce("The virtual camera stopped accepting frames — switch this output off and on.")
         }
     }
 
@@ -221,7 +304,7 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
             return src
         }
         // The converter is built and used under `lock`, but a failure is REPORTED after
-        // releasing it — `setError` takes the same lock, and NSLock is not recursive.
+        // releasing it — reporting takes the same lock, and NSLock is not recursive.
         lock.lock()
         var failure: String?
         if transfer == nil { failure = buildConverterLocked() }
@@ -286,10 +369,6 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     private var reportedOnce = false
     private func reportOnce(_ message: String) {
         lock.lock(); let already = reportedOnce; reportedOnce = true; lock.unlock()
-        if !already { setError(message) }
-    }
-
-    private func setError(_ message: String?) {
-        lock.lock(); _lastError = message; lock.unlock()
+        if !already { setStage(.failed(message)) }
     }
 }

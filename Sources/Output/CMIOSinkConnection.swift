@@ -164,6 +164,12 @@ final class CMIOSinkConnection {
         return .sent
     }
 
+    /// Is the camera published right now?  One enumeration, microseconds — cheap enough to
+    /// ask on every device-list change instead of remembering an answer that goes stale.
+    static func deviceExists(uuid: String) -> Bool {
+        CMIOSinkConnection().findDevice(uuid: uuid) != nil
+    }
+
     // MARK: - CoreMediaIO lookup
 
     private func findDevice(uuid: String) -> CMIODeviceID? {

@@ -370,6 +370,13 @@ final class BridgeModel: ObservableObject {
         if let hdmi = output as? HDMIOutput {
             hdmi.onStateChanged = { [weak self] in self?.objectWillChange.send() }   // lastError → card
         }
+        if let vcam = output as? VirtualCameraOutput {
+            // The ONLY output that lacked this, and the reason its card kept showing a state
+            // the machine had long left: the extension being approved, the camera appearing,
+            // the sink opening — all of it happens without an operator gesture, and without
+            // this line none of it could reach the view.
+            vcam.onStateChanged = { [weak self] in self?.objectWillChange.send() }
+        }
         // An output added mid-stream starts with the CURRENT program SPS/PPS (the camera won't
         // resend them — once per connection), so its first decoded frame is the forced IDR above.
         if let cached = programBus.lastFormatPayload { output.relayFormat(cached) }
