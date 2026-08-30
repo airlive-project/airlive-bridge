@@ -777,12 +777,14 @@ final class BridgeModel: ObservableObject {
 
         // 4. Rebuild outputs — all OFF (operator toggles them on).
         for cfg in profile.outputs {
-            // Only ONE OBS relay is possible (a single loopback slot 127.0.0.1:47788) —
-            // a hand-edited / older-build profile with two .obs entries would restore as
-            // two relays both hammering that slot.  Skip the duplicate (same guard
-            // restoreOutput uses); the post-loop block guarantees exactly one exists.
-            if cfg.kind == OutputKind.obs.rawValue,
-               programOutputs.contains(where: { $0.kind == .obs }) { continue }
+            // A SINGLETON kind restores at most once (OutputKind.isSingleton).  The "+" menu
+            // stops offering a second, but a profile does not come from that menu: it can be
+            // hand-edited, shared, or written by a build from before the guard existed.  Two
+            // OBS relays would both hammer the one loopback slot; two Virtual Cameras would
+            // fight over the single device macOS publishes, one silently dropping its frames
+            // while switching either off killed the other's picture.
+            if let kind = OutputKind(rawValue: cfg.kind), kind.isSingleton,
+               programOutputs.contains(where: { $0.kind == kind }) { continue }
             guard let output = makeOutput(from: cfg) else {
                 // No silent shrinkage: a profile from a newer build (or with .vcam)
                 // must SAY that a card didn't come back, not just be missing it.
@@ -963,11 +965,13 @@ final class BridgeModel: ObservableObject {
     }
 
     /// Rebuild one output from its config, OFF (undo of a remove / redo of an add).
-    /// Returns nil for an OBS relay when one already exists — only one loopback slot.
+    /// Returns nil for a SINGLETON kind when one already exists — see OutputKind.isSingleton.
+    /// Undo is a way past the "+" menu: delete the card, add a fresh one, then ⌘Z, and
+    /// without this there would be two of something there can only be one of.
     @discardableResult
     private func restoreOutput(_ cfg: BridgeProfile.OutputConfig, at index: Int? = nil) -> VideoOutput? {
-        if cfg.kind == OutputKind.obs.rawValue,
-           programOutputs.contains(where: { $0.kind == .obs }) { return nil }
+        if let kind = OutputKind(rawValue: cfg.kind), kind.isSingleton,
+           programOutputs.contains(where: { $0.kind == kind }) { return nil }
         guard let output = makeOutput(from: cfg) else { return nil }
         configureOutput(output)
         programOutputs.insert(output, at: min(index ?? programOutputs.count, programOutputs.count))
