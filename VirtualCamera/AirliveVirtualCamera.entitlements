@@ -9,7 +9,10 @@
   <key>com.apple.security.app-sandbox</key>
   <true/>
   <!--
-    The App Group id MUST start with the Team ID.  A "TeamID.name" group is
+    UNUSED — see the app's entitlements for why it is still here.  Nothing is read from or
+    written to this container; the frames arrive on the sink stream.
+
+    If it is ever claimed again: the App Group id MUST start with the Team ID.  A "TeamID.name" group is
     SELF-AUTHORIZING outside the App Store — the prefix proves ownership, so no
     capability has to be registered on the portal.  The "group.name" form is the
     App Store shape and REQUIRES registration; claiming it unregistered made macOS

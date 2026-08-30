@@ -18,7 +18,7 @@ enum PlaceholderFrame {
     /// into the extension's resources and it is what people see. Otherwise the state is
     /// written out in text, which is still better than a black rectangle nobody can read.
     static func make(width: Int, height: Int) -> CVPixelBuffer? {
-        guard let rgb = drawRGB(width: width, height: height) else {
+        guard let (rgb, branded) = drawRGB(width: width, height: height) else {
             vcamLog.error("placeholder: could not be drawn — the camera will show black")
             return nil
         }
@@ -29,7 +29,10 @@ enum PlaceholderFrame {
             vcamLog.error("placeholder: colour conversion failed — the camera will show black")
             return nil
         }
-        vcamLog.notice("placeholder ready (\(bundledImage() != nil ? "branded image" : "text"))")
+        // `branded` is reported BY the drawing, not re-derived: writing the log word used to
+        // call bundledImage() a second time, which opens and parses the PNG again to answer a
+        // question the draw had already answered.  Once is once.
+        vcamLog.notice("placeholder ready (\(branded ? "branded image" : "text"))")
         return converted
     }
 
@@ -101,7 +104,8 @@ enum PlaceholderFrame {
         return dst
     }
 
-    private static func drawRGB(width: Int, height: Int) -> CVPixelBuffer? {
+    /// Returns the drawn frame and whether the brand image was the one drawn.
+    private static func drawRGB(width: Int, height: Int) -> (CVPixelBuffer, Bool)? {
         let attrs: [String: Any] = [kCVPixelBufferIOSurfacePropertiesKey as String: [:]]
         var px: CVPixelBuffer?
         CVPixelBufferCreate(kCFAllocatorDefault, width, height,
@@ -118,7 +122,7 @@ enum PlaceholderFrame {
                                   space: space,
                                   bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue
                                             | CGBitmapInfo.byteOrder32Little.rawValue)
-        else { return px }
+        else { return (px, false) }
 
         // Near-black, not pure black: distinguishes "we are alive and drawing" from a
         // dead camera that never produced a frame at all.
@@ -129,14 +133,14 @@ enum PlaceholderFrame {
         // window, and whoever drew it decided what belongs there.
         if let image = bundledImage() {
             ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-            return px
+            return (px, true)
         }
 
         draw("Airlive Bridge Virtual Camera", in: ctx, size: 56, y: Double(height) / 2 + 18,
              width: width, gray: 0.92)
         draw("No program — open Airlive Bridge and put a camera on air",
              in: ctx, size: 28, y: Double(height) / 2 - 46, width: width, gray: 0.55)
-        return px
+        return (px, false)
     }
 
     private static func draw(_ text: String, in ctx: CGContext, size: CGFloat,

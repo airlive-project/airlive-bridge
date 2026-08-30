@@ -46,6 +46,12 @@ final class SystemExtensionInstaller: NSObject, OSSystemExtensionRequestDelegate
         case installed
         case needsApproval
         case notInApplications
+        /// macOS accepted the request and finishes it at the next restart.  It means two
+        /// different things depending on which request was made — staged but not yet loaded,
+        /// or unstaged but still listed — so the WORDING belongs to the caller, not here.
+        /// It used to be folded into `.failed("Restart the Mac to finish INSTALLING…")`,
+        /// which is the one sentence that is always wrong when the operator asked to remove.
+        case afterRestart
         case failed(String)
     }
 
@@ -80,6 +86,11 @@ final class SystemExtensionInstaller: NSObject, OSSystemExtensionRequestDelegate
     /// app, still launching on demand, with nothing left that could ever feed it.  Only this
     /// request removes it, and only the app that installed it may ask.
     func deactivate(_ completion: @escaping (Outcome) -> Void) {
+        // Forget that we ever activated.  `activateOnce` answers from memory, so without this
+        // a Virtual Camera output added after a removal would be told "already installed" and
+        // never submit a request — the camera would stay gone until the app was relaunched.
+        outcome = nil
+        submitted = false
         self.completion = completion
         let request = OSSystemExtensionRequest.deactivationRequest(
             forExtensionWithIdentifier: bundleID, queue: .main)
@@ -111,7 +122,7 @@ final class SystemExtensionInstaller: NSObject, OSSystemExtensionRequestDelegate
         case .completed:
             completion?(.installed)
         case .willCompleteAfterReboot:
-            completion?(.failed("Restart the Mac to finish installing the virtual camera."))
+            completion?(.afterRestart)
         @unknown default:
             completion?(.installed)
         }

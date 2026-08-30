@@ -373,6 +373,8 @@ final class NDIOutput: VideoOutput {
         let outBuffer = sendableBufferLocked(from: pixelBuffer)
         lock.unlock()
         guard let outBuffer, let sendVideo = NDIRuntime.shared.sendVideo else { return }
+        announceWirePath(Unmanaged.passUnretained(outBuffer).toOpaque()
+                         == Unmanaged.passUnretained(pixelBuffer).toOpaque(), outBuffer)
 
         CVPixelBufferLockBaseAddress(outBuffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(outBuffer, .readOnly) }
@@ -407,10 +409,27 @@ final class NDIOutput: VideoOutput {
     /// stride of the first row.  Returns nil for a layout NDI can't be handed directly.
     ///
     /// NV12 is TWO planes, and NDI reads them as one block: the chroma plane must sit exactly
-    /// one luma plane after the start.  VideoToolbox allocates both in a single IOSurface and
-    /// normally does exactly that, but "normally" is not "always" — an allocator is free to pad
-    /// between planes — so it is checked per frame and a non-contiguous buffer falls back to a
-    /// conversion rather than shipping a torn picture.
+    /// one luma plane after the start, because the frame struct has ONE pointer and one stride
+    /// and puts chroma at `p_data + stride * yres`.  There is no field for a separate UV plane.
+    ///
+    /// ⚠️ MEASURED 2026-08-30, and it is NOT what the "send the decoder's own NV12" commit
+    /// assumed: at **1080p this test fails on every frame**.  VideoToolbox decodes H.264 in
+    /// 16-row macroblocks, so it allocates the luma plane 1088 rows tall for a 1080-row picture
+    /// and chroma starts 8 rows (15 360 bytes) further on than `stride * 1080`.  Verified by
+    /// encoding and decoding a real frame with the receiver's exact output attributes:
+    ///
+    ///     1920x1080 → gap 15360 → CONVERTED      1280x720 → adjacent → native
+    ///                                            1920x1088 → adjacent → native
+    ///
+    /// So the phone's 1080p program ALWAYS takes the conversion below.  That is not a bug and
+    /// there is nothing to fix in NDI's direction — no attribute removes the decoder's
+    /// macroblock alignment, and no NDI field can express a gap — but the win of that commit is
+    /// smaller than its message claims: it is "CoreImage replaced by a VideoToolbox plane copy",
+    /// not "zero conversion".  The native path still earns its keep for sources that ARE
+    /// aligned — 720p capture cards, AirPlay mirrors — and costs one pointer comparison.
+    ///
+    /// Do not re-litigate this from reasoning.  `[NDIOutput] wire path =` says what a session
+    /// actually did; read that first.
     private func wireLayout(of buffer: CVPixelBuffer, height: Int) -> (fourCC: UInt32, base: UnsafeMutableRawPointer, stride: Int)? {
         if CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_32BGRA {
             guard let base = CVPixelBufferGetBaseAddress(buffer) else { return nil }
@@ -420,8 +439,24 @@ final class NDIOutput: VideoOutput {
               let luma = CVPixelBufferGetBaseAddressOfPlane(buffer, 0),
               let chroma = CVPixelBufferGetBaseAddressOfPlane(buffer, 1) else { return nil }
         let lumaStride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0)
-        guard luma.advanced(by: lumaStride * height) == chroma else { return nil }
+        // The chroma stride must match too: NDI derives the UV rows from the ONE stride it was
+        // given, so a chroma plane padded differently would be read at the wrong offset every
+        // row — a picture with correct luma and sheared colour, which is a far more confusing
+        // failure than no picture at all.
+        guard luma.advanced(by: lumaStride * height) == chroma,
+              CVPixelBufferGetBytesPerRowOfPlane(buffer, 1) == lumaStride else { return nil }
         return (kNDIFourCC_NV12, luma, lumaStride)
+    }
+
+    /// Says ONCE per session which of the two paths the frames are actually taking.  It exists
+    /// because the answer was assumed for a week and was wrong (see wireLayout): a claim about
+    /// the frame path that nothing prints is a claim nobody can check.
+    private var announcedWirePath = false
+    private func announceWirePath(_ native: Bool, _ buffer: CVPixelBuffer) {
+        guard !announcedWirePath else { return }
+        announcedWirePath = true
+        let w = CVPixelBufferGetWidth(buffer), h = CVPixelBufferGetHeight(buffer)
+        print("[NDIOutput] wire path = \(native ? "NATIVE NV12 (no conversion)" : "CONVERTED (planes not adjacent)") at \(w)x\(h)")
     }
 
     // MARK: Sender lifecycle (lock held by callers)
@@ -527,8 +562,17 @@ final class NDIOutput: VideoOutput {
     /// pool only when the frame size changes.
     private func conversionDestinationLocked(width: Int, height: Int) -> CVPixelBuffer? {
         if conversionPool == nil || poolWidth != width || poolHeight != height {
+            // NV12, not BGRA.  This pool is what the 1080p program ACTUALLY goes through —
+            // the decoder's planes are never adjacent at that height (see wireLayout), so the
+            // native path cannot fire and every frame lands here.  Converting to BGRA meant
+            // expanding YUV to RGB, 8.3 MB a frame, only for NDI's own encoder to squeeze it
+            // back to YUV on the way out.  A pool-allocated NV12 buffer comes out with adjacent
+            // planes and matching strides at every size tested (1080p, 720p and portrait), so
+            // the transfer becomes a repack that NDI can send natively: 3.1 MB a frame, no
+            // colour matrix in either direction, and — measured — pixel-identical luma and
+            // chroma.  Verified offline before landing; do not swap it back on reasoning alone.
             let pbAttrs: [String: Any] = [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
                 kCVPixelBufferWidthKey as String:  width,
                 kCVPixelBufferHeightKey as String: height,
                 kCVPixelBufferIOSurfacePropertiesKey as String: [:] as CFDictionary,
@@ -538,7 +582,7 @@ final class NDIOutput: VideoOutput {
             guard CVPixelBufferPoolCreate(kCFAllocatorDefault, poolAttrs,
                                           pbAttrs as CFDictionary, &pool) == kCVReturnSuccess,
                   let pool else {
-                print("[NDIOutput] failed to create BGRA conversion pool \(width)×\(height).")
+                print("[NDIOutput] failed to create NV12 conversion pool \(width)×\(height).")
                 return nil
             }
             conversionPool = pool

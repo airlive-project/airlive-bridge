@@ -40,16 +40,30 @@ final class AirliveStreamSink: NSObject, CMIOExtensionStreamSource {
          .streamSinkBufferUnderrunCount, .streamSinkEndOfData]
     }
 
+    /// Times the device asked for a frame and the queue was empty while the Bridge was
+    /// pushing.  CoreMediaIO defines a property for this number and we ADVERTISE it, so it
+    /// has to be a real count: a stream that lists a property and then answers nothing is a
+    /// stream that lied about what it knows.
+    private let underruns = NSLock()
+    private var _underrunCount = 0
+    func noteUnderrun() { underruns.lock(); _underrunCount += 1; underruns.unlock() }
+    private var underrunCount: Int { underruns.lock(); defer { underruns.unlock() }; return _underrunCount }
+
     func streamProperties(forProperties properties: Set<CMIOExtensionProperty>) throws -> CMIOExtensionStreamProperties {
         let p = CMIOExtensionStreamProperties(dictionary: [:])
         if properties.contains(.streamActiveFormatIndex) { p.activeFormatIndex = 0 }
         if properties.contains(.streamFrameDuration) {
-            p.frameDuration = CMTime(value: 1, timescale: kFrameRate)
+            p.frameDuration = CMTime(value: 1, timescale: kVCamFrameRate)
         }
         // One buffer in flight, one needed to start: this is live video, so a deep queue
         // would only add latency — a late frame is worth less than the next one.
         if properties.contains(.streamSinkBufferQueueSize) { p.sinkBufferQueueSize = 1 }
         if properties.contains(.streamSinkBuffersRequiredForStartup) { p.sinkBuffersRequiredForStartup = 1 }
+        if properties.contains(.streamSinkBufferUnderrunCount) { p.sinkBufferUnderrunCount = underrunCount }
+        // The Bridge never declares an end of data — it closes the stream instead, which is
+        // what makes the placeholder come back.  So the honest answer here is always "no",
+        // which CoreMediaIO spells 0 (the property is a number, not a flag).
+        if properties.contains(.streamSinkEndOfData) { p.sinkEndOfData = 0 }
         return p
     }
 
@@ -64,7 +78,15 @@ final class AirliveStreamSink: NSObject, CMIOExtensionStreamSource {
         return true
     }
 
-    private(set) var client: CMIOExtensionClient?
+    /// GUARDED: CoreMediaIO authorizes and stops the stream on its own queue, while the device
+    /// reads this on `timerQueue` to pull the next frame.  Handing a class reference between
+    /// two threads unsynchronised is an over-release waiting for a fast off/on.
+    private let clientLock = NSLock()
+    private var _client: CMIOExtensionClient?
+    private(set) var client: CMIOExtensionClient? {
+        get { clientLock.lock(); defer { clientLock.unlock() }; return _client }
+        set { clientLock.lock(); _client = newValue; clientLock.unlock() }
+    }
 
     func startStream() throws {
         guard let client else {
@@ -75,6 +97,7 @@ final class AirliveStreamSink: NSObject, CMIOExtensionStreamSource {
     }
 
     func stopStream() throws {
+        underruns.lock(); _underrunCount = 0; underruns.unlock()
         // Forget the client here: it belongs to the connection that just closed.  Holding a
         // dead client is what turns a fast off/on into a camera that starts cleanly and then
         // never yields another frame.

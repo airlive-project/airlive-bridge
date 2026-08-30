@@ -2,12 +2,6 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>AirliveCameraDeviceUUID</key>
-	<string>6F1B7A54-2C3E-4B7E-9E4D-A1C0D2E3F4A5</string>
-	<key>AirliveCameraSinkUUID</key>
-	<string>5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F</string>
-	<key>AirliveCameraSourceUUID</key>
-	<string>3A2B1C0D-4E5F-4A6B-8C7D-9E0F1A2B3C4D</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>

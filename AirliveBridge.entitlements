@@ -23,8 +23,16 @@
   <true/>
 
   <!--
-    Shared container the program frames are published through — the extension is a
-    separate process and reads them from here.  Must match the extension's group id.
+    A shared container that carries NOTHING.  Frames reach the extension through its
+    CoreMediaIO SINK stream, never through here — an App Group cannot carry them, because
+    macOS runs a camera extension as its own user and the same group path resolves to two
+    different places on the two sides (see CMIOSinkConnection).
+
+    Kept anyway, and deliberately: the pair of entitlements is part of the signature both
+    sides were approved under, and this feature has cost enough approval-and-restart cycles
+    that changing the signing shape to delete an unused key is not a trade worth making on
+    a release build.  Remove it in a quiet window, on its own, with a full approve-and-open
+    test — never bundled with something else.
   -->
   <key>com.apple.security.application-groups</key>
   <array>

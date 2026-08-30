@@ -43,6 +43,16 @@ final class CMIOSinkConnection {
     private var sent: UInt64 = 0
     private var lastLog = Date.distantPast
 
+    /// Last format description handed to CoreMediaIO, kept only as long as it still describes
+    /// the frames arriving.  See `send`.
+    private var cachedFormat: CMFormatDescription?
+
+    /// The extension lives in another process and knows nothing about this object's lifetime.
+    /// If the connection is dropped without `close()` — a profile reload swapping the outputs,
+    /// a card deleted mid-teardown — the stream stays started over there with a client that no
+    /// longer exists.  Closing here makes that impossible rather than merely unlikely.
+    deinit { close() }
+
     /// Open the sink on the device with `deviceUUID`.  Returns a human-readable reason on
     /// failure rather than a status code — every failure here is something the operator can
     /// act on (approve the extension, update the app).
@@ -90,6 +100,7 @@ final class CMIOSinkConnection {
         let dev = deviceID, stream = streamID, total = sent
         started = false
         queue = nil
+        cachedFormat = nil
         lock.unlock()
 
         guard wasStarted else { return nil }
@@ -106,11 +117,15 @@ final class CMIOSinkConnection {
         return nil
     }
 
-    /// Enqueue one frame in the camera's published format.  `timeNs` is the program's host time.
-    /// Returns whether the frame actually reached the queue — the caller counts these, so a
-    /// camera that is "on" but never delivering can say so instead of showing black.
+    /// Enqueue one frame in the camera's published format.  Returns whether it actually
+    /// reached the queue — the caller counts these, so a camera that is "on" but never
+    /// delivering can say so instead of showing black.
+    ///
+    /// It takes NO timestamp, deliberately.  It used to accept the program's and discard it on
+    /// the next line, which reads like an oversight and hid the real rule below: this stream's
+    /// clock is the host clock, so the only timestamp that can be correct here is read here.
     @discardableResult
-    func send(_ pixelBuffer: CVPixelBuffer, timeNs: UInt64) -> SinkSendResult {
+    func send(_ pixelBuffer: CVPixelBuffer) -> SinkSendResult {
         lock.lock(); defer { lock.unlock() }
         guard started, let queue else { return .failed }
         // One buffer deep by design: if the extension hasn't drained the previous frame, the
@@ -120,17 +135,27 @@ final class CMIOSinkConnection {
         // per frame and nothing else.
         guard CMSimpleQueueGetCount(queue) < CMSimpleQueueGetCapacity(queue) else { return .queueFull }
 
-        // The format description is derived FROM THE BUFFER, per frame, not built by hand
-        // once.  A hand-built description carries no colour attachments, and CoreMediaIO
-        // hands the consumer a sample whose description disagrees with its pixels — which
-        // renders as black, silently.  (This is what Apple's own camera-extension sample
-        // does on the sending side; the extension keeps a plain description because it only
-        // declares the stream's shape.)
-        var desc: CMFormatDescription?
-        guard CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault,
-                                                           imageBuffer: pixelBuffer,
-                                                           formatDescriptionOut: &desc) == noErr,
-              let desc else { return .failed }
+        // The description is derived FROM THE BUFFER, never built by hand: a hand-built one
+        // carries no colour attachments, so CoreMediaIO hands the consumer a sample whose
+        // description disagrees with its own pixels — which renders as black, silently.
+        //
+        // It is also not rebuilt for every frame.  CMVideoFormatDescriptionMatchesImageBuffer
+        // is Apple's own answer to exactly this question: it compares the description against
+        // the buffer across every key the two share — codec, dimensions, colour primaries,
+        // transfer function, YCbCr matrix, chroma siting, aperture — so a cache validated with
+        // it cannot go stale behind our back when the program cuts to a different source.
+        // Building a new one 30 times a second was work for nobody.
+        var desc = cachedFormat
+        if desc == nil || !CMVideoFormatDescriptionMatchesImageBuffer(desc!, imageBuffer: pixelBuffer) {
+            var made: CMFormatDescription?
+            guard CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault,
+                                                               imageBuffer: pixelBuffer,
+                                                               formatDescriptionOut: &made) == noErr,
+                  let made else { return .failed }
+            cachedFormat = made
+            desc = made
+        }
+        guard let desc else { return .failed }
 
         // Host clock, not the program's timeline.  The sink's clock is the host clock; a
         // timestamp from the program's own timeline (which starts when the phone connects)
@@ -139,7 +164,6 @@ final class CMIOSinkConnection {
             duration: CMTime(value: 1, timescale: kVCamFrameRate),
             presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
             decodeTimeStamp: .invalid)
-        _ = timeNs
         var sbuf: CMSampleBuffer?
         guard CMSampleBufferCreateForImageBuffer(allocator: kCFAllocatorDefault,
                                                  imageBuffer: pixelBuffer, dataReady: true,

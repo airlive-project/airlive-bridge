@@ -1,9 +1,10 @@
-// LumaProbe.swift — the app's half of the virtual camera's per-hop pixel probe.
+// LumaProbe.swift — both halves of the virtual camera's per-hop pixel probe.
 //
-// Deliberately a COPY of the same enum in VirtualCamera/VCamLog.swift, not a shared file: the
-// extension is a separate target that must stay self-contained (it is loaded by macOS as its
-// own process and links nothing of the app's).  Both halves must read pixels the SAME way or
-// the comparison they exist for is meaningless — change one, change the other.
+// Compiled into the app AND the extension, from this one file.  The two ends only tell you
+// anything when they read pixels the SAME way — the whole point is to compare their numbers —
+// and this used to be a hand-kept copy in VirtualCamera/VCamLog.swift with a comment asking
+// whoever edited one to remember the other.  The extension stays every bit as self-contained:
+// a source file compiled into two binaries links nothing between them.
 
 import Foundation
 import CoreVideo

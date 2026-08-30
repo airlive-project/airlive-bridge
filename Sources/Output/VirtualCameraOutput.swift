@@ -2,9 +2,11 @@
 //
 // Publishes the program feed as a system camera, so Zoom / Meet / Teams / QuickTime
 // can pick "Airlive Bridge Virtual Camera" from their normal camera list.  Unlike every
-// other output there is no socket and no encode: frames are converted to the extension's
-// fixed 1080p BGRA and pushed into the extension's SINK stream (see CMIOSinkConnection),
-// which the extension — a separate process macOS launches on demand — pulls from.
+// other output there is no socket, no encode and — for a 1080p program — no conversion
+// either: the decoder's own frame is pushed straight into the extension's SINK stream (see
+// CMIOSinkConnection), which the extension, a separate process macOS launches on demand,
+// pulls from.  Anything that is not already the camera's format and size is letterboxed
+// into it once, by VideoToolbox.
 //
 // Two things make this output unlike the others, and both are macOS rules, not ours:
 //   • The extension can ONLY load when the Bridge runs from /Applications.
@@ -34,21 +36,9 @@ import os
 /// Same subsystem the extension logs under — one `log show` shows both ends of the hop.
 private let vcamOutLog = Logger(subsystem: "studio.airlive.vcam", category: "bridge")
 
-/// The virtual camera's fixed wire size and cadence.  The extension declares the same
-/// values; they are a compile-time contract between the two targets, not negotiated.
-let kVCamWidth: Int32 = 1920
-let kVCamHeight: Int32 = 1080
-let kVCamFrameRate: Int32 = 30
-/// The camera publishes 8-bit 4:2:0 bi-planar VIDEO RANGE — the exact format the program
-/// decoder produces, so the normal case is a pass-through with no conversion at all.
-/// Declared identically by the extension (AirliveProviderSource); the two are one contract.
-let kVCamPixelFormat: OSType = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-/// Device identity the extension publishes — how we find it among all cameras.
-let kVCamDeviceUUID = "6F1B7A54-2C3E-4B7E-9E4D-A1C0D2E3F4A5"
-/// The camera's name as every OTHER app lists it.  Declared by the extension
-/// (AirliveProviderSource) and repeated here for the UI: the operator has to recognise
-/// the same words in Zoom's picker, so the two must never drift apart.
-let kVCamDeviceName = "Airlive Bridge Virtual Camera"
+// Size, cadence, pixel format, identity and the camera's name are declared ONCE, in
+// Sources/Shared/VirtualCameraContract.swift — the extension compiles the same file, so the
+// two ends of this hop cannot drift apart.
 
 final class VirtualCameraOutput: NSObject, VideoOutput {
 
@@ -80,7 +70,13 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
             case .awaitingApproval:
                 return "Approve “\(kVCamDeviceName)” in System Settings → General → Login Items & Extensions."
             case .cameraProcessMissing:
-                return "macOS didn’t start the virtual camera. Log out and back in — or restart the Mac — and it will come back."
+                // Cheapest remedy FIRST.  Measured 2026-08-30: the camera was published and
+                // being served to Zoom while this app could not enumerate it at all — a fresh
+                // process found it instantly with the identical lookup.  So the usual cause is
+                // not that macOS failed to launch the extension; it is that THIS process built
+                // its device list while the extension was being replaced and never refreshed.
+                // Reopening the app costs seconds; logging out costs the operator their session.
+                return "Quit and reopen Airlive Bridge — this copy can’t see the virtual camera. If it’s still missing, log out and back in."
             case .installing, .starting, .ready, .live: return nil
             }
         }
@@ -89,8 +85,27 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     private let lock = NSLock()
     private var _stage: Stage = .installing
     private var _isLive = false
+
+    /// macOS accepted a NEW extension but could not swap it in, because the old one is still
+    /// running — something has the camera open.  It finishes at the next restart, and until
+    /// then the camera on this Mac is the PREVIOUS version.
+    ///
+    /// Latched, and deliberately outside the stage machine: everything else here is re-derived
+    /// from the system, and that is exactly what buried this message.  The old extension is
+    /// alive, so its device is in the list and its sink opens perfectly — the card went `.live`
+    /// a moment after saying "restart", and the operator was left running the old camera with
+    /// nothing on screen to say so.  A pending swap is not a state of the camera; it is a fact
+    /// about this app session, and only relaunching after a restart can clear it.
+    private var pendingRestart = false
+
     var isLive: Bool { lock.lock(); defer { lock.unlock() }; return _isLive }
-    var lastError: String? { lock.lock(); defer { lock.unlock() }; return _stage.message }
+    var lastError: String? {
+        lock.lock(); defer { lock.unlock() }
+        if pendingRestart {
+            return "Restart the Mac to finish updating the virtual camera — until then apps still get the previous version."
+        }
+        return _stage.message
+    }
 
     /// Wired by BridgeModel.configureOutput, exactly like every other output's — without it
     /// nothing this class learns can reach the card, and every fix below would be invisible.
@@ -104,6 +119,8 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     /// Opening and closing the sink talks to CoreMediaIO and can block; frames do NOT
     /// come through here — see `send`.
     private let queue = DispatchQueue(label: "studio.airlive.bridge.vcam", qos: .userInitiated)
+    /// Marks `queue` so a re-entrant call can tell "already there" from "arrived on main".
+    private static let queueKey = DispatchSpecificKey<Void>()
     private var sink: CMIOSinkConnection?
 
     /// Fallback conversion ONLY — built lazily the first time a frame arrives that is not
@@ -119,8 +136,11 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
 
     private let installer = SystemExtensionInstaller.shared
 
-    /// Frames sent / skipped since start.  Touched only from the program bus, which delivers
-    /// frames one at a time; they exist so the log can answer "on but blank" without guessing.
+    /// Frames taken by the camera, and frames the camera had no room for since this output
+    /// was switched on.  Touched only from the program bus, which delivers frames one at a
+    /// time.  A large, steadily growing `dropped` with `sent` frozen is not a fault — it is
+    /// exactly what "the camera is on and no app has it open" looks like — and printing both
+    /// once a second is what lets the log say which of the two is happening.
     private var framesSent: UInt64 = 0
     private var framesDropped: UInt64 = 0
 
@@ -128,6 +148,7 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
         self.id = id
         self.label = label
         super.init()
+        queue.setSpecific(key: Self.queueKey, value: ())
         watchDeviceList()
         install()
     }
@@ -159,6 +180,12 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
                 self.setStage(.awaitingApproval)
             case .notInApplications:
                 self.setStage(.needsInstall("Move Airlive Bridge to /Applications — macOS only loads a camera extension from there."))
+            case .afterRestart:
+                self.lock.lock(); self.pendingRestart = true; self.lock.unlock()
+                // Still refresh: the OLD extension is running and usable, so the operator can
+                // keep working — the latched message above is what stops that from reading as
+                // "everything is fine".
+                self.refreshFromDeviceList(fallback: .starting)
             case .failed(let why):
                 self.setStage(.needsInstall(why))
             }
@@ -193,6 +220,12 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
 
     private var isStarting: Bool {
         if case .starting = _stage { return true }
+        return false
+    }
+
+    /// MUST be read under `lock`.
+    private var isCameraProcessMissing: Bool {
+        if case .cameraProcessMissing = _stage { return true }
         return false
     }
 
@@ -233,9 +266,28 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     /// when the camera is not in the list — "starting" while we are waiting for it to appear,
     /// but the installer's own verdict (awaiting approval, cannot install) outranks that.
     private func refreshFromDeviceList(fallback: Stage) {
+        // ALWAYS on our own queue.  Enumerating CoreMediaIO devices runs an AVFoundation
+        // discovery first (see CMIOSinkConnection.refreshCameraList) and both are synchronous
+        // calls into other processes — cheap, but not free, and two callers arrive on the main
+        // thread: the activation completion, which macOS delivers on .main, and the operator
+        // dismissing the message on the card.  Neither is worth a stutter in the multiview.
+        guard DispatchQueue.getSpecific(key: Self.queueKey) != nil else {
+            queue.async { [weak self] in self?.refreshFromDeviceList(fallback: fallback) }
+            return
+        }
         let present = CMIOSinkConnection.deviceExists(uuid: kVCamDeviceUUID)
-        lock.lock(); let live = _isLive; let open = sink != nil; lock.unlock()
-        if !present { setStage(fallback); return }
+        lock.lock()
+        let live = _isLive
+        let open = sink != nil
+        // A verdict that the camera is UNREACHABLE outranks the caller's fallback.  Every path
+        // here passes `.starting`, which says nothing on the card — so once the timeout had
+        // concluded the camera would never appear, the very next device-list notification
+        // erased that conclusion and left the output switched on, silent, and doing nothing.
+        // The operator got no message at all, which is the one outcome this card exists to
+        // prevent.  It clears itself the moment the device really is there (below).
+        let stuck = !present && isCameraProcessMissing
+        lock.unlock()
+        if !present { setStage(stuck ? .cameraProcessMissing : fallback); return }
         if live, open { setStage(.live); return }
         // The camera is there. If the operator has this output switched on but we never
         // managed to open the sink — the usual case right after an approval — open it now.
@@ -256,20 +308,25 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
         // `openSink` found `wanted == false` and returned without a word. The card still read
         // "on", because that is the same flag start() had set. Off-then-on silently produced
         // a camera that was never opened.
-        lock.lock(); _isLive = false; lock.unlock()
+        lock.lock()
+        _isLive = false
+        // The connection is taken OUT of the object here, synchronously, and handed to the
+        // block below — which therefore no longer needs `self` to exist by the time it runs.
+        // Deleting the card releases this output immediately, and the teardown used to hang
+        // off a weak self: the object died first, the block returned at its `guard`, and the
+        // extension was never told to stop.  Its stream stayed open with a client that was
+        // gone.  Ownership, not lifetime, is what closes a stream.
+        let connection = sink
+        sink = nil
+        if let t = transfer { VTPixelTransferSessionInvalidate(t) }
+        transfer = nil
+        pool = nil
+        lock.unlock()
         queue.async { [weak self] in
-            guard let self else { return }
-            self.lock.lock()
-            let connection = self.sink
-            self.sink = nil
-            if let t = self.transfer { VTPixelTransferSessionInvalidate(t) }
-            self.transfer = nil
-            self.pool = nil
-            self.lock.unlock()
             // Outside the lock: this talks to the extension's process and its own close()
             // must not be able to park an incoming frame behind it.
-            if let reason = connection?.close() { self.setStage(.failed(reason)) }
-            else { self.refreshFromDeviceList(fallback: .starting) }
+            if let reason = connection?.close() { self?.setStage(.failed(reason)) }
+            else { self?.refreshFromDeviceList(fallback: .starting) }
         }
         // The extension is deliberately LEFT INSTALLED: uninstalling on every toggle would
         // re-prompt the operator for approval each time, and a camera that vanishes from
@@ -295,7 +352,8 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
                 // either way — a silent stage is fine on the card, never in the log.
                 let present = CMIOSinkConnection.deviceExists(uuid: kVCamDeviceUUID)
                 vcamOutLog.notice("sink NOT opened — \(reason, privacy: .public) (device present: \(present))")
-                self.setStage(present ? .failed(reason) : .starting)
+                self.lock.lock(); let stuck = self.isCameraProcessMissing; self.lock.unlock()
+                self.setStage(present ? .failed(reason) : (stuck ? .cameraProcessMissing : .starting))
                 return
             }
             self.lock.lock()
@@ -313,6 +371,10 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     // MARK: - Frames
 
     func send(_ pixelBuffer: CVPixelBuffer, timeNs: UInt64) {
+        // `timeNs` is unused on purpose: the camera stream runs on the HOST clock, so the only
+        // timestamp that can be right is the one read at the moment of enqueue, inside the
+        // sink.  The parameter stays because the VideoOutput protocol has it and every other
+        // output needs it.
         lock.lock(); let live = _isLive; let sink = self.sink; lock.unlock()
         guard live, let sink else { return }
         // Enqueued on the CALLER's thread, deliberately.  The contract forbids holding the
@@ -324,7 +386,7 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
             return
         }
         probe(frame)
-        switch sink.send(frame, timeNs: timeNs) {
+        switch sink.send(frame) {
         case .sent:      framesSent &+= 1
         // Nobody has the camera open — the extension stops draining and the queue stays full.
         // That is the normal resting state of a virtual camera, not a fault, and calling it
@@ -343,9 +405,16 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     /// colour matrix and a range, and choosing either differently from the source visibly
     /// changed the picture.
     private func cameraReady(_ src: CVPixelBuffer) -> CVPixelBuffer? {
+        // The IOSurface is not a detail of the pass-through, it is the reason one is possible:
+        // the frame crosses into another process as a surface handle, so a buffer without one
+        // has nothing to hand over and arrives as no picture at all.  Every frame we have ever
+        // seen here carries one (VideoToolbox and AVFoundation both allocate that way) — this
+        // sends the one that does not through the converter, whose pool is IOSurface-backed,
+        // instead of silently publishing a black camera.
         if CVPixelBufferGetPixelFormatType(src) == kVCamPixelFormat,
            CVPixelBufferGetWidth(src) == Int(kVCamWidth),
-           CVPixelBufferGetHeight(src) == Int(kVCamHeight) {
+           CVPixelBufferGetHeight(src) == Int(kVCamHeight),
+           CVPixelBufferGetIOSurface(src) != nil {
             return src
         }
         // The converter is built and used under `lock`, but a failure is REPORTED after
@@ -408,7 +477,7 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
         guard Date().timeIntervalSince(lastProbe) >= 1.0 else { return }
         lastProbe = Date()
         let passthrough = CVPixelBufferGetPixelFormatType(buffer) == kVCamPixelFormat
-        vcamOutLog.notice("sending \(passthrough ? "pass-through" : "CONVERTED", privacy: .public) \(LumaProbe.describe(buffer), privacy: .public)")
+        vcamOutLog.notice("sending \(passthrough ? "pass-through" : "CONVERTED", privacy: .public) — taken \(self.framesSent), no room for \(self.framesDropped) — \(LumaProbe.describe(buffer), privacy: .public)")
     }
 
     private var reportedOnce = false

@@ -91,7 +91,7 @@ targets:
         MARKETING_VERSION: "1.1.0"   # semver: MAJOR.MINOR.PATCH — bump like a real release train
         # Sparkle's compare key (→ CFBundleVersion).  Strictly increment EVERY release
         # (1 → 2 → 3 …) and mirror it in the appcast item's sparkle:version.
-        CURRENT_PROJECT_VERSION: "11"
+        CURRENT_PROJECT_VERSION: "13"
         SWIFT_VERSION: "5.9"
         # Apple Silicon only — the vendored UxPlay/openssl/libplist static libs are arm64.
         # A bare `ARCHS: arm64` gets DROPPED by xcodegen (never lands in the pbxproj), so an
@@ -135,13 +135,21 @@ targets:
   # ── Virtual Camera ────────────────────────────────────────────────────────────
   # A CoreMediaIO camera extension: a separate process macOS launches when any app
   # opens the camera, so Zoom / Meet / QuickTime see "Airlive Bridge Virtual Camera" whether
-  # or not the Bridge happens to be running.  It reads program frames from the shared
-  # App Group slot and shows a spoken-for placeholder when there is nothing on air.
+  # or not the Bridge happens to be running.  The Bridge pushes program frames into the
+  # extension's CMIO SINK stream (an App Group slot cannot work — the extension runs as its
+  # own user), and the extension shows its "no video input" card whenever they stop.
   AirliveVirtualCamera:
     type: system-extension
     platform: macOS
     sources:
       - VirtualCamera
+      # ONE declaration of the camera's size, cadence, pixel format, identity and name,
+      # compiled into BOTH targets.  It used to be written once per target with a comment in
+      # each copy saying they must agree; the two ends of a cross-process hop deserve a
+      # mechanism, not a promise.
+      - path: Sources/Shared/VirtualCameraContract.swift
+      # The pixel probe both ends print, so the two readings are comparable BY CONSTRUCTION.
+      - path: Sources/Shared/LumaProbe.swift
     info:
       path: VirtualCamera/Info.plist
       properties:
@@ -162,12 +170,6 @@ targets:
         # service name must be unique across every extension on the machine.
         CMIOExtension:
           CMIOExtensionMachServiceName: $(TeamIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)
-        # Identity of the device and its two streams.  The DEVICE uuid is the contract with
-        # the app (it matches on it to find us) and anchors the user's camera permission —
-        # it must never change across releases.
-        AirliveCameraDeviceUUID: 6F1B7A54-2C3E-4B7E-9E4D-A1C0D2E3F4A5
-        AirliveCameraSourceUUID: 3A2B1C0D-4E5F-4A6B-8C7D-9E0F1A2B3C4D
-        AirliveCameraSinkUUID: 5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F
     settings:
       base:
         # The bundle, its executable and its identifier must all be THE SAME STRING.
@@ -188,7 +190,7 @@ targets:
         # recognised as newer.
         MARKETING_VERSION: "1.1.0"
         # Kept EQUAL to the app's, so the pair moves together and only on a real release.
-        CURRENT_PROJECT_VERSION: "11"
+        CURRENT_PROJECT_VERSION: "13"
         SWIFT_VERSION: "5.9"
         ARCHS: "arm64"
         EXCLUDED_ARCHS: x86_64
@@ -209,9 +211,12 @@ targets:
     # afternoon left three staged copies and no camera. For users it would be worse: an
     # update that only touched app code would still take their camera away until they rebooted.
     #
-    # Tied to the app's build number, an unchanged extension reports an unchanged version, and
-    # SystemExtensionInstaller answers `.cancel` — nothing is replaced, nothing is torn down,
-    # nothing waits for a restart. Shipping a real change means bumping CURRENT_PROJECT_VERSION,
+    # Tied to the app's build number, an unchanged extension reports an unchanged version and
+    # macOS resolves the request as "already active" WITHOUT ever asking us what to do about a
+    # replacement — nothing is replaced, nothing is torn down, nothing waits for a restart.
+    # (There is no "cancel if the versions match" branch in SystemExtensionInstaller, and there
+    # must not be: by the time macOS asks, it has already decided to replace.)
+    # Shipping a real change means bumping CURRENT_PROJECT_VERSION,
     # which is a deliberate, visible act, exactly as it should be. When iterating ON the
     # extension itself, bump it to see your change.
 

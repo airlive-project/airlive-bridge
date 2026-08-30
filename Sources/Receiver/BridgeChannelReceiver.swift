@@ -1089,9 +1089,9 @@ final class BridgeChannelReceiver: ChannelReceiver {
             // YUV→RGB conversion at decode (RGB output bakes a transfer curve into
             // the pixels; NV12 keeps the wire's raw values for the zero-copy
             // CALayer preview).  The pipeline already handles NV12 everywhere
-            // (AirPlay produces it); NDI's bgraBufferLocked converts on demand —
-            // if NDI-heavy sessions ever matter, measure that convert before
-            // switching anything.  (The 2026-07-06 overcooked wire itself was a
+            // (AirPlay produces it); NDI repacks on demand into an NV12 pool — it
+            // was measured on 2026-08-30, and NDI now carries this buffer's own
+            // format end to end rather than expanding it to RGB.  (The 2026-07-06 overcooked wire itself was a
             // CAMERA bake bug — receivers were innocent; see
             // airlive/docs/WIRE-COLOR-RECEIVER-DIAGNOSIS.md.)
             let outputAttrs: [String: Any] = [

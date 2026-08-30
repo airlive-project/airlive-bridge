@@ -36,7 +36,7 @@ final class AirliveStreamSource: NSObject, CMIOExtensionStreamSource {
         let p = CMIOExtensionStreamProperties(dictionary: [:])
         if properties.contains(.streamActiveFormatIndex) { p.activeFormatIndex = 0 }
         if properties.contains(.streamFrameDuration) {
-            p.frameDuration = CMTime(value: 1, timescale: kFrameRate)
+            p.frameDuration = CMTime(value: 1, timescale: kVCamFrameRate)
         }
         return p
     }
