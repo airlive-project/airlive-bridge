@@ -10,21 +10,34 @@
 // app (preview, other outputs) keeps working.  See docs/NDI-SETUP.md.
 //
 // Frame contract (from VideoOutput): the channel hands us a decoded CVPixelBuffer
-// for every frame while we're live.  The Studio decoder produces 32BGRA, which
-// is exactly NDIlib_FourCC_type_BGRA — so the common path is a zero-conversion
-// lock-and-send.  Anything else is converted to BGRA via a cached CIContext.
+// for every frame while we're live.  The decoders produce NV12 (8-bit 4:2:0
+// bi-planar, video range) — the ARLV camera path and the AirPlay path both — and
+// NDI carries that natively, so the common path sends the decoder's own bytes with
+// NO conversion at all.  Only a source that is neither NV12-contiguous nor already
+// BGRA (an HDMI capture card is BGRA; an exotic layout is neither) is converted,
+// and then by VTPixelTransferSession — a fixed-function hardware block.
+//
+// This file used to assert the opposite ("the decoder produces 32BGRA") and convert
+// every frame through CoreImage on the strength of it.  The claim was true once; the
+// decoder's output format was changed to NV12 in a later commit that edited this file
+// without touching the comment.  From then on the "rare fallback" ran on every single
+// frame of the app's two main sources: a full CoreImage render pass, plus a fresh
+// colour space object, per frame — the largest avoidable cost in the whole program
+// path, and a colour-management path no other consumer of the same buffer used.
 // We must not retain the buffer past the call, and we don't: send_send_video_v2
 // copies (or at minimum reads) the data synchronously before we unlock.
 
 import Foundation
 import CoreVideo
-import CoreImage
+import VideoToolbox
 
 // MARK: - NDI C ABI (minimal, matches Processing.NDI.* headers)
 
 // FourCC codes are the literal 'BGRA' / 'UYVY' little-endian packed values the
 // SDK defines.  We only ever emit BGRA.
 private let kNDIFourCC_BGRA: UInt32 = fourCC("BGRA")
+/// 8-bit 4:2:0 bi-planar YCbCr — the decoders' own output, sent untouched.
+private let kNDIFourCC_NV12: UInt32 = fourCC("NV12")
 
 /// Build a FourCC the way the NDI SDK does: the four ASCII bytes packed
 /// little-endian (byte 0 in the low 8 bits).  e.g. "BGRA" → 0x41524742.
@@ -271,7 +284,7 @@ final class NDIOutput: VideoOutput {
     private var pendingTimeNs: UInt64 = 0
 
     // BGRA conversion fallback — created lazily only if a non-BGRA frame arrives.
-    private var ciContext: CIContext?
+    private var transferSession: VTPixelTransferSession?
     // Recycled destination pool for the conversion path (no per-frame alloc).
     private var conversionPool: CVPixelBufferPool?
     private var poolWidth = 0
@@ -298,14 +311,15 @@ final class NDIOutput: VideoOutput {
         lock.lock(); defer { lock.unlock() }
         destroySenderLocked()
         _isLive = false
-        // Drop the BGRA conversion pool (~25 MB of IOSurfaces at 1080p) — it only ever exists
-        // for a non-BGRA source (rare: the Studio decoder emits BGRA), and a stopped output
-        // shouldn't keep it warm.  Safe under `lock` (all pool access is lock-held in deliver's
-        // convert); conversionDestinationLocked lazily rebuilds on next use.  The CIContext
-        // deliberately STAYS cached (50–200 ms rebuild — see bgraBufferLocked).
+        // Drop the conversion pool (~25 MB of IOSurfaces at 1080p) and the transfer session —
+        // both exist only for a source NDI can't take directly, which is no longer the normal
+        // case at all, and a stopped output must not keep IOSurfaces warm.  Safe under `lock`
+        // (every access is lock-held in sendableBufferLocked); both rebuild lazily on next use.
         conversionPool = nil
         poolWidth = 0
         poolHeight = 0
+        if let t = transferSession { VTPixelTransferSessionInvalidate(t) }
+        transferSession = nil
     }
 
     /// Publish one decoded frame.  No-op when not live.  Called on MAIN (the program tap) but
@@ -348,31 +362,31 @@ final class NDIOutput: VideoOutput {
         }
     }
 
-    /// The actual convert + SDK send, off main on `sendQueue`.
+    /// The actual send, off main on `sendQueue`.
     private func deliver(_ pixelBuffer: CVPixelBuffer, timeNs: UInt64) {
-        // Convert under `lock` (the BGRA pool + CIContext are lock-guarded), then RELEASE `lock`
-        // before the SDK send.  The send goes out under `senderLock` instead — a slow receiver
-        // blocking `sendVideo` must never hold `lock` and stall a main-thread send() checking state.
+        // Prepare under `lock` (the conversion pool + transfer session are lock-guarded), then
+        // RELEASE `lock` before the SDK send.  The send goes out under `senderLock` instead — a
+        // slow receiver blocking `sendVideo` must never hold `lock` and stall a main-thread
+        // send() checking state.
         lock.lock()
         guard _isLive, NDIRuntime.shared.sendVideo != nil else { lock.unlock(); return }
-        let outBuffer = bgraBufferLocked(from: pixelBuffer)
+        let outBuffer = sendableBufferLocked(from: pixelBuffer)
         lock.unlock()
         guard let outBuffer, let sendVideo = NDIRuntime.shared.sendVideo else { return }
 
         CVPixelBufferLockBaseAddress(outBuffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(outBuffer, .readOnly) }
 
-        guard let base = CVPixelBufferGetBaseAddress(outBuffer) else { return }
         let width  = CVPixelBufferGetWidth(outBuffer)
         let height = CVPixelBufferGetHeight(outBuffer)
-        let stride = CVPixelBufferGetBytesPerRow(outBuffer)
+        guard let wire = wireLayout(of: outBuffer, height: height) else { return }
 
         var frame = NDIlib_video_frame_v2_t()
         frame.xres = Int32(width)
         frame.yres = Int32(height)
-        frame.FourCC = kNDIFourCC_BGRA
-        frame.line_stride_in_bytes = Int32(stride)
-        frame.p_data = base.assumingMemoryBound(to: UInt8.self)
+        frame.FourCC = wire.fourCC
+        frame.line_stride_in_bytes = Int32(wire.stride)
+        frame.p_data = wire.base.assumingMemoryBound(to: UInt8.self)
         // Convert the monotonic host nanoseconds to NDI's 100-ns timestamp unit.
         // (NDI timestamps are in 100-nanosecond intervals.)
         frame.timestamp = Int64(bitPattern: timeNs / 100)
@@ -380,13 +394,34 @@ final class NDIOutput: VideoOutput {
         frame.timecode = kNDISendTimecodeSynthesize
 
         // send_send_video_v2 reads p_data synchronously here; we never retain pixelBuffer past this
-        // call.  Re-read `sender` under senderLock: if stop()/rename tore it down while we converted,
+        // call.  Re-read `sender` under senderLock: if stop()/rename tore it down while we prepared,
         // skip — sending to a freed handle is a UAF.  Teardown holds senderLock, so it can't free the
         // handle underneath this in-flight send.
         senderLock.lock()
         defer { senderLock.unlock() }
         guard let sender = self.sender else { return }
         withUnsafePointer(to: &frame) { sendVideo(sender, UnsafeRawPointer($0)) }
+    }
+
+    /// How this buffer goes on the wire: which NDI FourCC, where the bytes start, and the
+    /// stride of the first row.  Returns nil for a layout NDI can't be handed directly.
+    ///
+    /// NV12 is TWO planes, and NDI reads them as one block: the chroma plane must sit exactly
+    /// one luma plane after the start.  VideoToolbox allocates both in a single IOSurface and
+    /// normally does exactly that, but "normally" is not "always" — an allocator is free to pad
+    /// between planes — so it is checked per frame and a non-contiguous buffer falls back to a
+    /// conversion rather than shipping a torn picture.
+    private func wireLayout(of buffer: CVPixelBuffer, height: Int) -> (fourCC: UInt32, base: UnsafeMutableRawPointer, stride: Int)? {
+        if CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_32BGRA {
+            guard let base = CVPixelBufferGetBaseAddress(buffer) else { return nil }
+            return (kNDIFourCC_BGRA, base, CVPixelBufferGetBytesPerRow(buffer))
+        }
+        guard CVPixelBufferIsPlanar(buffer), CVPixelBufferGetPlaneCount(buffer) == 2,
+              let luma = CVPixelBufferGetBaseAddressOfPlane(buffer, 0),
+              let chroma = CVPixelBufferGetBaseAddressOfPlane(buffer, 1) else { return nil }
+        let lumaStride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0)
+        guard luma.advanced(by: lumaStride * height) == chroma else { return nil }
+        return (kNDIFourCC_NV12, luma, lumaStride)
     }
 
     // MARK: Sender lifecycle (lock held by callers)
@@ -457,37 +492,34 @@ final class NDIOutput: VideoOutput {
 
     // MARK: BGRA conversion fallback (lock held by caller)
 
-    /// Return a BGRA buffer for `src`: `src` itself when it's already 32BGRA
-    /// (the common Studio-decoder case, zero copy), otherwise a converted copy
-    /// from the recycled conversion pool.  Returns nil only if conversion fails.
-    private func bgraBufferLocked(from src: CVPixelBuffer) -> CVPixelBuffer? {
-        if CVPixelBufferGetPixelFormatType(src) == kCVPixelFormatType_32BGRA {
-            return src
-        }
-
-        let width  = CVPixelBufferGetWidth(src)
+    /// The buffer to send: `src` itself whenever NDI can take it as-is — which is every
+    /// frame from either decoder (contiguous NV12) and every frame from an HDMI capture card
+    /// (BGRA) — otherwise a converted copy from the recycled pool.
+    private func sendableBufferLocked(from src: CVPixelBuffer) -> CVPixelBuffer? {
         let height = CVPixelBufferGetHeight(src)
-        guard let dst = conversionDestinationLocked(width: width, height: height) else {
-            return nil
+        if wireLayout(of: src, height: height) != nil { return src }
+
+        let width = CVPixelBufferGetWidth(src)
+        guard let dst = conversionDestinationLocked(width: width, height: height) else { return nil }
+
+        // VTPixelTransferSession, not CoreImage: a fixed-function hardware block instead of an
+        // image-processing graph.  CoreImage also colour-manages on the way through, which put
+        // NDI on a different colour path from every other consumer of the identical buffer.
+        // Lazily built — with the pass-through above, most sessions never convert at all, and
+        // an unused session plus its pool is exactly the kind of idle allocation that costs heat.
+        if transferSession == nil {
+            var session: VTPixelTransferSession?
+            guard VTPixelTransferSessionCreate(allocator: kCFAllocatorDefault,
+                                               pixelTransferSessionOut: &session) == noErr,
+                  let session else { return nil }
+            transferSession = session
         }
-
-        // Lazy first-use allocation, under `lock`: the Studio decoder emits
-        // 32BGRA, so this conversion path (and thus the CIContext) is only ever
-        // hit by a non-BGRA source.  Building the CIContext can take 50–200 ms,
-        // and it happens INSIDE the send lock, so the FIRST non-BGRA frame blocks
-        // the frame path briefly — an accepted one-time cost for a rare path.
-        // Do not remove this lazy guard to "simplify": eager allocation would pay
-        // that cost on every output even when BGRA is the only format seen.
-        let context = ciContext ?? {
-            let c = CIContext(options: [.useSoftwareRenderer: false])
-            ciContext = c
-            return c
-        }()
-
-        let image = CIImage(cvPixelBuffer: src)
-        context.render(image, to: dst,
-                       bounds: CGRect(x: 0, y: 0, width: width, height: height),
-                       colorSpace: CGColorSpaceCreateDeviceRGB())
+        guard let transferSession,
+              VTPixelTransferSessionTransferImage(transferSession, from: src, to: dst) == noErr
+        else { return nil }
+        // Carry the source's colour tags: a pool buffer is born untagged, and an untagged frame
+        // is interpreted by whatever the receiver assumes.
+        CVBufferPropagateAttachments(src, dst)
         return dst
     }
 
