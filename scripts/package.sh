@@ -90,8 +90,13 @@ PLIST
   [ -f "$APP/Contents/embedded.provisionprofile" ] \
     || { echo "✗ no embedded.provisionprofile in the app — the virtual camera would be dead for users"; exit 1; }
   [ -d "$EXT" ] || { echo "✗ the camera extension is missing from the exported app"; exit 1; }
-  codesign -dvv "$EXT" 2>&1 | grep -q "Authority=Developer ID Application" \
-    || { echo "✗ the camera extension is not Developer ID signed — it will not load on any other Mac"; exit 1; }
+  # Captured, not piped into `grep -q`: with `set -o pipefail`, grep's early exit on a match
+  # sends SIGPIPE to codesign, and the pipeline reports failure for a check that PASSED.
+  EXT_SIG="$(codesign -dvv "$EXT" 2>&1 || true)"
+  case "$EXT_SIG" in
+    *"Authority=Developer ID Application"*) : ;;
+    *) echo "✗ the camera extension is not Developer ID signed — it will not load on any other Mac"; exit 1 ;;
+  esac
   echo "  ✓ exported $APP (Developer ID, provisioning profile embedded, extension signed)"
 else
   DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" \
