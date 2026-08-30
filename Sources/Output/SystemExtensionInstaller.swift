@@ -15,6 +15,33 @@ import SystemExtensions
 
 final class SystemExtensionInstaller: NSObject, OSSystemExtensionRequestDelegate {
 
+    /// ONE installer, and at most one activation request, per app session — the same
+    /// placement OBS uses (its output handler's constructor). Every request that finds a
+    /// different staged build triggers a replacement, and a replacement is what can leave the
+    /// machine without a camera (see VirtualCameraOutput.Stage.cameraProcessMissing). Asking
+    /// repeatedly — a profile opened, a card removed and undone — was rolling those dice again
+    /// for nothing.
+    static let shared = SystemExtensionInstaller()
+
+    private var outcome: Outcome?
+    private var waiting: [(Outcome) -> Void] = []
+    private var submitted = false
+
+    /// Submit once; everyone else is told what happened, whenever it happened.
+    func activateOnce(_ completion: @escaping (Outcome) -> Void) {
+        if let outcome { completion(outcome); return }
+        waiting.append(completion)
+        guard !submitted else { return }
+        submitted = true
+        activate { [weak self] result in
+            guard let self else { return }
+            self.outcome = result
+            let pending = self.waiting
+            self.waiting = []
+            pending.forEach { $0(result) }
+        }
+    }
+
     enum Outcome {
         case installed
         case needsApproval
@@ -62,21 +89,16 @@ final class SystemExtensionInstaller: NSObject, OSSystemExtensionRequestDelegate
 
     // MARK: - OSSystemExtensionRequestDelegate
 
-    /// Replace ONLY when the staged extension is genuinely a different build.
+    /// Always replace, as every shipping camera extension does.
     ///
-    /// This used to answer `.replace` to everything, including "the identical version you
-    /// already have". Every replace tears down the extension's process and relaunches it,
-    /// which unpublishes the camera for a moment and, on macOS, defers the outgoing copy's
-    /// removal until the next restart. Answering it to an unchanged extension meant an app
-    /// that asked the operator to reboot and re-approve in exchange for nothing at all.
+    /// This is not reached for an unchanged build: the system decides `alreadyActive` and
+    /// never asks. It is reached only once the system has already resolved to replace — so a
+    /// "cancel if the versions match" branch here is unreachable, and dangerous if it ever
+    /// stopped being: it would leave a NEW binary unstaged while the app reported success.
     func request(_ request: OSSystemExtensionRequest,
                  actionForReplacingExtension existing: OSSystemExtensionProperties,
                  withExtension ext: OSSystemExtensionProperties) -> OSSystemExtensionRequest.ReplacementAction {
-        if existing.bundleVersion == ext.bundleVersion,
-           existing.bundleShortVersion == ext.bundleShortVersion {
-            return .cancel
-        }
-        return .replace
+        .replace
     }
 
     func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) {
@@ -101,13 +123,6 @@ final class SystemExtensionInstaller: NSObject, OSSystemExtensionRequestDelegate
         // are meaningless in any other domain, and mapping them blindly produces a
         // confident, wrong diagnosis (an early build claimed the extension was missing
         // from the bundle when it was sitting right there).
-        // Cancelling our own replacement of an identical build is the SUCCESS path above,
-        // not a failure: the extension the app wants is already the one that is installed.
-        if ns.domain == OSSystemExtensionErrorDomain,
-           ns.code == OSSystemExtensionError.requestCanceled.rawValue {
-            completion?(.installed)
-            return
-        }
         guard ns.domain == OSSystemExtensionErrorDomain else {
             completion?(.failed("Couldn't install the virtual camera: \(ns.localizedDescription) [\(ns.domain) \(ns.code)]"))
             return

@@ -65,6 +65,7 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
         case awaitingApproval           // macOS is asking the operator
         case needsInstall(String)       // it cannot be installed, and why
         case starting                   // approved; the device has not appeared YET (transient)
+        case cameraProcessMissing       // approved and staged, but macOS never launched it
         case ready                      // the device is published, the toggle is off
         case live                       // frames are going in
         case failed(String)             // a real transport failure
@@ -78,6 +79,8 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
             case .failed(let why):       return why
             case .awaitingApproval:
                 return "Approve “\(kVCamDeviceName)” in System Settings → General → Login Items & Extensions."
+            case .cameraProcessMissing:
+                return "macOS didn’t start the virtual camera. Log out and back in — or restart the Mac — and it will come back."
             case .installing, .starting, .ready, .live: return nil
             }
         }
@@ -114,7 +117,7 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     private var transfer: VTPixelTransferSession?
     private var pool: CVPixelBufferPool?
 
-    private let installer = SystemExtensionInstaller()
+    private let installer = SystemExtensionInstaller.shared
 
     /// Frames sent / skipped since start.  Touched only from the program bus, which delivers
     /// frames one at a time; they exist so the log can answer "on but blank" without guessing.
@@ -143,13 +146,15 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     /// process down and relaunches it, which unpublishes the device for a moment. The lookup
     /// running beside it then failed and wrote "camera not found" about a camera that exists.
     private func install() {
-        installer.activate { [weak self] result in
+        installer.activateOnce { [weak self] result in
             guard let self else { return }
             switch result {
             case .installed:
                 // Approved and staged. The device usually appears within a second, and the
-                // list watcher below is what notices; do not call that gap an error.
+                // list watcher below is what notices; do not call that gap an error — but do
+                // not let it last for ever either. See `expectDeviceShortly`.
                 self.refreshFromDeviceList(fallback: .starting)
+                self.expectDeviceShortly()
             case .needsApproval:
                 self.setStage(.awaitingApproval)
             case .notInApplications:
@@ -158,6 +163,37 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
                 self.setStage(.needsInstall(why))
             }
         }
+    }
+
+    /// "Staged and enabled" is not the same as "running", and macOS will tell you the first
+    /// while the second is false.
+    ///
+    /// Replacing a camera extension is a race inside the system's own service: it stops the
+    /// outgoing process and, milliseconds later, submits the same launchd job for the incoming
+    /// one — the job name comes from the bundle id, so both versions share it. If the old
+    /// process has not been reaped yet, launchd answers "operation already in progress", the
+    /// service reads that as "already running", and NOTHING EVER LAUNCHES THE NEW ONE. The
+    /// activation request still completes successfully. Verified in the system log, and lost
+    /// three times out of five in one afternoon.
+    ///
+    /// We cannot win that race — nor can any other app; the reference implementation ships
+    /// with the same caveat. What we can do is stop reporting success and going quiet. If the
+    /// device has not appeared shortly after activation completed, say so, and say the remedy:
+    /// logging out and back in restarts that service, which re-launches what is already
+    /// approved. A full restart is not required, and the operator spent a day believing it was.
+    private func expectDeviceShortly() {
+        queue.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self else { return }
+            self.lock.lock(); let stillWaiting = self.isStarting; self.lock.unlock()
+            guard stillWaiting, !CMIOSinkConnection.deviceExists(uuid: kVCamDeviceUUID) else { return }
+            vcamOutLog.error("camera did not appear after activation — macOS never launched the extension")
+            self.setStage(.cameraProcessMissing)
+        }
+    }
+
+    private var isStarting: Bool {
+        if case .starting = _stage { return true }
+        return false
     }
 
     // MARK: - The camera appearing is an EVENT
