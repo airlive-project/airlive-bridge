@@ -49,6 +49,10 @@ final class AirliveDeviceSource: NSObject, CMIOExtensionDeviceSource {
 
     private var format: CMFormatDescription!
     private var placeholder: CVPixelBuffer?
+    /// The placeholder's OWN description, derived from its own buffer — see publishPlaceholder.
+    private var placeholderFormat: CMFormatDescription?
+
+    private let shownPlaceholder = RateLog("placeholder shown")
 
     private let pulled = RateLog("pulled from sink")
     private let forwarded = RateLog("forwarded to consumers")
@@ -223,27 +227,54 @@ final class AirliveDeviceSource: NSObject, CMIOExtensionDeviceSource {
     private func publishPlaceholder() {
         guard streamSource.isStreaming else { return }
         guard CACurrentMediaTime() - lastRealFrame > Self.realFrameGrace else { return }
-        guard let buffer = currentPlaceholder(), let format else { return }
+        guard let buffer = currentPlaceholder(), let description = placeholderFormat else { return }
 
+        let now = CMClockGetTime(CMClockGetHostTimeClock())
         var timing = CMSampleTimingInfo(
             duration: CMTime(value: 1, timescale: kFrameRate),
-            presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
+            presentationTimeStamp: now,
             decodeTimeStamp: .invalid)
         var sbuf: CMSampleBuffer?
+        // The description comes from the PLACEHOLDER'S OWN BUFFER, not from the stream's.
+        //
+        // That one difference is why the placeholder was published for weeks and never seen:
+        // a real frame arrives from the Bridge carrying a description built from the frame
+        // itself, and consumers render it; the placeholder was handed the stream's hand-built
+        // description instead, and was quietly dropped. Two kinds of sample went down one
+        // stream, and only one of them was the kind that works. Now there is only one kind.
         CMSampleBufferCreateForImageBuffer(allocator: kCFAllocatorDefault,
                                            imageBuffer: buffer, dataReady: true,
                                            makeDataReadyCallback: nil, refcon: nil,
-                                           formatDescription: format,
+                                           formatDescription: description,
                                            sampleTiming: &timing, sampleBufferOut: &sbuf)
         guard let sbuf else { return }
         streamSource.stream.send(sbuf, discontinuity: [],
-                                 hostTimeInNanoseconds: UInt64(timing.presentationTimeStamp.seconds * Double(NSEC_PER_SEC)))
+                                 hostTimeInNanoseconds: UInt64(max(0, now.seconds) * Double(NSEC_PER_SEC)))
+        shownPlaceholder.tick()
     }
 
-    /// Drawn once and reused — it never changes.
+    /// Drawn once and reused — it never changes.  Its colour is stated ON THE BUFFER and its
+    /// description derived FROM the buffer, so what goes down the stream is the same shape of
+    /// sample the Bridge sends: consumers cannot tell the two apart, which is the point.
     private func currentPlaceholder() -> CVPixelBuffer? {
         if let placeholder { return placeholder }
-        placeholder = PlaceholderFrame.make(width: Int(kFrameWidth), height: Int(kFrameHeight))
-        return placeholder
+        guard let made = PlaceholderFrame.make(width: Int(kFrameWidth), height: Int(kFrameHeight)) else { return nil }
+        CVBufferSetAttachment(made, kCVImageBufferColorPrimariesKey,
+                              kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldPropagate)
+        CVBufferSetAttachment(made, kCVImageBufferTransferFunctionKey,
+                              kCVImageBufferTransferFunction_ITU_R_709_2, .shouldPropagate)
+        CVBufferSetAttachment(made, kCVImageBufferYCbCrMatrixKey,
+                              kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate)
+        var description: CMFormatDescription?
+        guard CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault,
+                                                           imageBuffer: made,
+                                                           formatDescriptionOut: &description) == noErr,
+              description != nil else {
+            vcamLog.error("placeholder: no format description — it cannot be shown")
+            return nil
+        }
+        placeholderFormat = description
+        placeholder = made
+        return made
     }
 }
