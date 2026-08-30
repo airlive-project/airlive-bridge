@@ -15,6 +15,7 @@ import Foundation
 import CoreMedia
 import CoreVideo
 import CoreMediaIO
+import AVFoundation
 import os
 
 /// Same subsystem the extension logs under, so ONE `log stream` command shows both ends of
@@ -164,6 +165,26 @@ final class CMIOSinkConnection {
         return .sent
     }
 
+    /// Bring this process's view of the machine's cameras up to date.
+    ///
+    /// A camera that appears AFTER a process has already looked can stay invisible to it: the
+    /// enumeration below answers from what CoreMediaIO knows, and in a long-running app that
+    /// can be an older answer than the truth. It cost a whole afternoon — a fresh probe found
+    /// the camera on its first try while the Bridge, running since before the extension
+    /// launched, insisted it was not there.
+    ///
+    /// AVFoundation owns the camera lifecycle on macOS and notices new ones; asking it first
+    /// is what makes the answer current. Cheap, and only asked when we are looking anyway.
+    private func refreshCameraList() {
+        // A camera extension is an EXTERNAL device to AVFoundation — under a name that
+        // changed in macOS 14, hence the two spellings for one deployment target of 13.
+        var types: [AVCaptureDevice.DeviceType] = [.builtInWideAngleCamera]
+        if #available(macOS 14.0, *) { types.append(.external) } else { types.append(.externalUnknown) }
+        _ = AVCaptureDevice.DiscoverySession(deviceTypes: types,
+                                             mediaType: .video,
+                                             position: .unspecified).devices
+    }
+
     /// Is the camera published right now?  One enumeration, microseconds — cheap enough to
     /// ask on every device-list change instead of remembering an answer that goes stale.
     static func deviceExists(uuid: String) -> Bool {
@@ -173,6 +194,7 @@ final class CMIOSinkConnection {
     // MARK: - CoreMediaIO lookup
 
     private func findDevice(uuid: String) -> CMIODeviceID? {
+        refreshCameraList()
         var address = CMIOObjectPropertyAddress(
             mSelector: CMIOObjectPropertySelector(kCMIOHardwarePropertyDevices),
             mScope: CMIOObjectPropertyScope(kCMIOObjectPropertyScopeGlobal),

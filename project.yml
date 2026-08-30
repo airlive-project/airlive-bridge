@@ -91,7 +91,7 @@ targets:
         MARKETING_VERSION: "1.1.0"   # semver: MAJOR.MINOR.PATCH — bump like a real release train
         # Sparkle's compare key (→ CFBundleVersion).  Strictly increment EVERY release
         # (1 → 2 → 3 …) and mirror it in the appcast item's sparkle:version.
-        CURRENT_PROJECT_VERSION: "9"
+        CURRENT_PROJECT_VERSION: "10"
         SWIFT_VERSION: "5.9"
         # Apple Silicon only — the vendored UxPlay/openssl/libplist static libs are arm64.
         # A bare `ARCHS: arm64` gets DROPPED by xcodegen (never lands in the pbxproj), so an
@@ -188,7 +188,7 @@ targets:
         # recognised as newer.
         MARKETING_VERSION: "1.1.0"
         # Kept EQUAL to the app's, so the pair moves together and only on a real release.
-        CURRENT_PROJECT_VERSION: "9"
+        CURRENT_PROJECT_VERSION: "10"
         SWIFT_VERSION: "5.9"
         ARCHS: "arm64"
         EXCLUDED_ARCHS: x86_64

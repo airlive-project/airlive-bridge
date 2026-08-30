@@ -13,6 +13,7 @@ import Foundation
 import CoreMediaIO
 import CoreMedia
 import CoreVideo
+import QuartzCore
 
 final class AirliveDeviceSource: NSObject, CMIOExtensionDeviceSource {
 
@@ -29,9 +30,22 @@ final class AirliveDeviceSource: NSObject, CMIOExtensionDeviceSource {
     private var placeholderTimer: DispatchSourceTimer?
     private var sinkTimer: DispatchSourceTimer?
 
-    /// True while the Bridge holds the sink open.  Read at the top of the placeholder tick:
-    /// real frames always win.
+    /// True while the Bridge holds the sink open.  Gates the PULL timer only — never the
+    /// picture.  What the camera shows is decided by whether frames actually arrive.
     private var sinkStarted = false
+
+    /// When the last REAL frame was forwarded.  This, and nothing else, decides whether the
+    /// camera shows the program or the placeholder.
+    ///
+    /// It used to be the `sinkStarted` flag, and that was the wrong question: a flag says what
+    /// the Bridge announced, not what is happening. Announcements go missing — an app that
+    /// quits without closing, a stop that never arrives, a sink opened while nothing is being
+    /// pushed — and every one of those left the camera showing nothing at all, because the
+    /// placeholder was suppressed on the strength of a promise. Frames are not a promise.
+    private var lastRealFrame: CFTimeInterval = 0
+    /// A quarter-second without a frame is a gap the viewer would see as a freeze, and short
+    /// enough that the placeholder returns while they are still looking.
+    private static let realFrameGrace: CFTimeInterval = 0.25
 
     private var format: CMFormatDescription!
     private var placeholder: CVPixelBuffer?
@@ -167,6 +181,7 @@ final class AirliveDeviceSource: NSObject, CMIOExtensionDeviceSource {
 
             if self.streamSource.isStreaming {
                 self.streamSource.stream.send(sbuf, discontinuity: [], hostTimeInNanoseconds: nowNs)
+                self.lastRealFrame = CACurrentMediaTime()
                 self.forwarded.tick()
             }
             // The acknowledgement CoreMediaIO needs to retire the buffer.  Skipping it
@@ -201,9 +216,13 @@ final class AirliveDeviceSource: NSObject, CMIOExtensionDeviceSource {
         }
     }
 
-    /// Runs only when the Bridge is NOT pushing — real frames always take precedence.
+    /// The camera's DEFAULT picture. It yields to the program for exactly as long as the
+    /// program keeps arriving, and comes back on its own the moment it stops — whether the
+    /// operator switched the output off, quit the Bridge, or the machine simply went quiet.
+    /// Nothing has to be told; nothing can be forgotten.
     private func publishPlaceholder() {
-        guard !sinkStarted, streamSource.isStreaming else { return }
+        guard streamSource.isStreaming else { return }
+        guard CACurrentMediaTime() - lastRealFrame > Self.realFrameGrace else { return }
         guard let buffer = currentPlaceholder(), let format else { return }
 
         var timing = CMSampleTimingInfo(
