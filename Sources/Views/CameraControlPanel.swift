@@ -133,6 +133,16 @@ struct CameraControlPanel: View {
         Self.wbPresets.first { abs($0.temp - temp) < 1 }?.tint
     }
 
+    /// Camera COMMANDS need a live, permitted control link.  Output delay does not — it is
+    /// this Mac's own jitter buffer for this channel, and nothing about it travels to the
+    /// phone.  Keeping the two apart matters: the whole panel used to be disabled together,
+    /// so an operator who had set a delay lost the ability to change it the moment the phone
+    /// withdrew remote control or simply dropped — a saved setting with no way back, the same
+    /// trap the shortcuts switch fell into.
+    private var cameraControlAvailable: Bool {
+        channel.remoteControlConnected && channel.remoteControlAllowed
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.md) {
             SectionLabel(text: "Camera control")
@@ -140,7 +150,14 @@ struct CameraControlPanel: View {
                 waitingNotice
             } else {
                 content
+                    .disabled(!cameraControlAvailable)
+                    .opacity(cameraControlAvailable ? 1.0 : 0.4)
             }
+            // Outside the gate above, and outside the `remote == nil` branch: always reachable.
+            HStack(alignment: .top, spacing: Spacing.md) {
+                delaySection.frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear { seed(from: channel.remote) }
@@ -182,14 +199,16 @@ struct CameraControlPanel: View {
             .fixedSize(horizontal: false, vertical: true)
             // Both cards `fillHeight` + `maxHeight: .infinity` + the row `.fixedSize(vertical:)` — the
             // same recipe as the Focus/Look row above, so the two bottoms line up exactly.
-            HStack(alignment: .top, spacing: Spacing.md) {
-                // Stabilization shows only when the camera supports it (it affects the pictured video);
-                // otherwise Output delay takes the whole row.  fps / resolution were removed — they only
-                // change the phone's LOCAL recording master, never the fixed 1080p/30 monitoring wire.
-                if hasStabilization { stabilizationSection.frame(maxWidth: .infinity, maxHeight: .infinity) }
-                delaySection.frame(maxWidth: .infinity, maxHeight: .infinity)
+            // Stabilization shows only when the camera supports it (it affects the pictured video).
+            // fps / resolution were removed — they only change the phone's LOCAL recording master,
+            // never the fixed 1080p/30 monitoring wire.  Output delay used to share this row; it
+            // now sits below, outside the camera-control gate — see `cameraControlAvailable`.
+            if hasStabilization {
+                HStack(alignment: .top, spacing: Spacing.md) {
+                    stabilizationSection.frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .fixedSize(horizontal: false, vertical: true)
             }
-            .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -579,12 +598,11 @@ private struct ControlPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
+            // The gate lives INSIDE the panel now: it covers the camera commands and leaves
+            // Output delay — this Mac's own buffer — always adjustable.  Disabling from out
+            // here could only ever disable everything, including the way back.
             CameraControlPanel(channel: c)
                 .id(c.id)   // reset the panel's local @State when the controlled channel changes
-                // `remoteControlConnected` = the ARLV control side for a combined channel, else
-                // the single connection — so the panel enables on CONTROL, not on AirPlay video.
-                .disabled(!c.remoteControlConnected || !c.remoteControlAllowed)
-                .opacity((c.remoteControlConnected && c.remoteControlAllowed) ? 1.0 : 0.4)
             if c.remoteControlConnected && !c.remoteControlAllowed { remoteControlDisabledNote }
         }
     }
