@@ -214,10 +214,16 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     }
 
     func stop() {
+        // The flag drops HERE, not inside the async block, exactly as `start()` raises it
+        // here. Asymmetry was a race with teeth: switch off then on, and the teardown block —
+        // queued first, run first — cleared the flag that `start()` had already set, so
+        // `openSink` found `wanted == false` and returned without a word. The card still read
+        // "on", because that is the same flag start() had set. Off-then-on silently produced
+        // a camera that was never opened.
+        lock.lock(); _isLive = false; lock.unlock()
         queue.async { [weak self] in
             guard let self else { return }
             self.lock.lock()
-            self._isLive = false                        // stop send() FIRST
             let connection = self.sink
             self.sink = nil
             if let t = self.transfer { VTPixelTransferSessionInvalidate(t) }
@@ -249,9 +255,11 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
             let connection = CMIOSinkConnection()
             if let reason = connection.open(deviceUUID: kVCamDeviceUUID) {
                 // Not a verdict on the camera: it may simply not have appeared yet. The
-                // device-list watcher will bring us back here the moment it does.
-                self.setStage(CMIOSinkConnection.deviceExists(uuid: kVCamDeviceUUID)
-                              ? .failed(reason) : .starting)
+                // device-list watcher will bring us back here the moment it does.  Logged
+                // either way — a silent stage is fine on the card, never in the log.
+                let present = CMIOSinkConnection.deviceExists(uuid: kVCamDeviceUUID)
+                vcamOutLog.notice("sink NOT opened — \(reason, privacy: .public) (device present: \(present))")
+                self.setStage(present ? .failed(reason) : .starting)
                 return
             }
             self.lock.lock()
@@ -259,6 +267,7 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
             self.framesSent = 0; self.framesDropped = 0
             self.reportedOnce = false      // a new session may fail in a new way
             self.lock.unlock()
+            vcamOutLog.notice("sink opened — pushing program into the camera")
             self.setStage(.live)
         }
     }
