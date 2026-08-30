@@ -36,15 +36,71 @@ echo "▶︎ Regenerating project + building Release…"
 /opt/homebrew/bin/xcodegen >/dev/null 2>&1 || xcodegen >/dev/null 2>&1 || true
 rm -rf "$BUILD_DIR"; mkdir -p "$STAGING"
 
-SIGN_BUILD=()
-[ -z "${DEVELOPER_ID_APP:-}" ] && SIGN_BUILD=(CODE_SIGNING_ALLOWED=NO)
+# ARCHIVE + EXPORT, never a plain `build`.
+#
+# The app ships a CAMERA SYSTEM EXTENSION, and a system extension carries a RESTRICTED
+# entitlement (com.apple.developer.system-extension.install).  macOS only honours a
+# restricted entitlement when the bundle carries a PROVISIONING PROFILE that grants it, and
+# only `-exportArchive` embeds a Developer ID profile.  A plain `build` produces an app that
+# runs perfectly on the build machine — its development certificate is right here — and whose
+# virtual camera REFUSES TO LOAD on every other Mac: the app installs, NDI / OBS / RTSP / SRT
+# / HDMI all work, and the camera silently never appears in anyone's camera list.  Sparkle
+# would have delivered exactly that to everyone on the previous version.
+#
+# Unsigned smoke-test builds skip the export (there is no profile to embed) and are marked
+# as such, so a DMG built that way can never be mistaken for a shippable one.
+ARCHIVE="$BUILD_DIR/$APP_NAME.xcarchive"
+EXPORT_DIR="$BUILD_DIR/export"
 
-DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" \
-xcodebuild -project AirliveBridge.xcodeproj -scheme "$SCHEME" \
-  -configuration Release -derivedDataPath "$DD" \
-  -destination 'platform=macOS' ${SIGN_BUILD[@]+"${SIGN_BUILD[@]}"} build >/dev/null
-[ -d "$APP" ] || { echo "✗ build did not produce $APP"; exit 1; }
-echo "  ✓ built $APP"
+if [ -n "${DEVELOPER_ID_APP:-}" ]; then
+  cat > "$BUILD_DIR/ExportOptions.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>method</key><string>developer-id</string>
+  <key>teamID</key><string>XWBJP49FTR</string>
+  <key>signingStyle</key><string>automatic</string>
+  <!-- Notarization is a separate, explicit step further down (with the stapling this
+       does not do), so the export must not try to run its own. -->
+  <key>destination</key><string>export</string>
+</dict>
+PLIST
+  echo "</plist>" >> "$BUILD_DIR/ExportOptions.plist"
+
+  DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" \
+  xcodebuild -project AirliveBridge.xcodeproj -scheme "$SCHEME" \
+    -configuration Release -derivedDataPath "$DD" \
+    -destination 'generic/platform=macOS' -archivePath "$ARCHIVE" archive >/dev/null
+  [ -d "$ARCHIVE" ] || { echo "✗ archive failed"; exit 1; }
+
+  DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" \
+  xcodebuild -exportArchive -archivePath "$ARCHIVE" \
+    -exportOptionsPlist "$BUILD_DIR/ExportOptions.plist" \
+    -exportPath "$EXPORT_DIR" >/dev/null
+  APP="$EXPORT_DIR/$APP_NAME.app"
+  [ -d "$APP" ] || { echo "✗ export did not produce $APP"; exit 1; }
+
+  # The whole reason for the archive path: prove the profile is actually in there.
+  # The profile belongs on the APP, which is where the restricted entitlement
+  # (system-extension.install) lives.  The extension itself needs none — its two
+  # entitlements, the sandbox and a TEAM-PREFIXED app group, are self-authorizing — but it
+  # must be Developer ID signed like everything else in the bundle.
+  EXT="$APP/Contents/Library/SystemExtensions/studio.airlive.bridge.AirliveBridge.vcam.systemextension"
+  [ -f "$APP/Contents/embedded.provisionprofile" ] \
+    || { echo "✗ no embedded.provisionprofile in the app — the virtual camera would be dead for users"; exit 1; }
+  [ -d "$EXT" ] || { echo "✗ the camera extension is missing from the exported app"; exit 1; }
+  codesign -dvv "$EXT" 2>&1 | grep -q "Authority=Developer ID Application" \
+    || { echo "✗ the camera extension is not Developer ID signed — it will not load on any other Mac"; exit 1; }
+  echo "  ✓ exported $APP (Developer ID, provisioning profile embedded, extension signed)"
+else
+  DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" \
+  xcodebuild -project AirliveBridge.xcodeproj -scheme "$SCHEME" \
+    -configuration Release -derivedDataPath "$DD" \
+    -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build >/dev/null
+  [ -d "$APP" ] || { echo "✗ build did not produce $APP"; exit 1; }
+  echo "  ⚠︎ UNSIGNED smoke-test build — the virtual camera will NOT load. Not shippable."
+fi
 
 # Make SRT self-contained: bundle libsrt (+ its deps) into Contents/Frameworks BEFORE any
 # signing, so the app-level codesign below seals it. Signs the added dylibs with the same
