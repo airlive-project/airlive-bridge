@@ -33,9 +33,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Flush the session autosave — a quit right after a change must not lose it
-    /// (the debounced write may still be pending).
+    /// (the debounced write may still be pending) — and take every live output down.
+    ///
+    /// Stopping matters most for the virtual camera: its extension is a SEPARATE process that
+    /// macOS keeps running after we exit, and it holds "the Bridge is pushing" until told
+    /// otherwise.  Quit without saying so and every conferencing app is left staring at the
+    /// last frame we sent, forever.  The socket outputs get a clean close out of the same call
+    /// instead of a dropped connection.
     func applicationWillTerminate(_ notification: Notification) {
         Self.model?.autosaveNow()
+        Self.model?.programOutputs.forEach { $0.stop() }
     }
 }
 

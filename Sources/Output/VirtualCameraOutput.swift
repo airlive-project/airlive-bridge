@@ -1,10 +1,10 @@
 // VirtualCameraOutput.swift — PROGRAM → macOS Virtual Camera.
 //
 // Publishes the program feed as a system camera, so Zoom / Meet / Teams / QuickTime
-// can pick "Airlive Virtual Camera" from their normal camera list.  Unlike every other
-// output there is no socket and no encode: frames are converted to the extension's
-// fixed 1080p BGRA and dropped into a shared App Group slot (see SharedFrameBuffer),
-// which the extension — a separate process macOS launches on demand — reads.
+// can pick "Airlive Bridge Virtual Camera" from their normal camera list.  Unlike every
+// other output there is no socket and no encode: frames are converted to the extension's
+// fixed 1080p BGRA and pushed into the extension's SINK stream (see CMIOSinkConnection),
+// which the extension — a separate process macOS launches on demand — pulls from.
 //
 // Two things make this output unlike the others, and both are macOS rules, not ours:
 //   • The extension can ONLY load when the Bridge runs from /Applications.
@@ -15,6 +15,26 @@ import Foundation
 import CoreVideo
 import VideoToolbox
 import SystemExtensions
+import os
+
+/// Same subsystem the extension logs under — one `log show` shows both ends of the hop.
+private let vcamOutLog = Logger(subsystem: "studio.airlive.vcam", category: "bridge")
+
+/// The virtual camera's fixed wire size and cadence.  The extension declares the same
+/// values; they are a compile-time contract between the two targets, not negotiated.
+let kVCamWidth: Int32 = 1920
+let kVCamHeight: Int32 = 1080
+let kVCamFrameRate: Int32 = 30
+/// The camera publishes 8-bit 4:2:0 bi-planar VIDEO RANGE — the exact format the program
+/// decoder produces, so the normal case is a pass-through with no conversion at all.
+/// Declared identically by the extension (AirliveProviderSource); the two are one contract.
+let kVCamPixelFormat: OSType = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+/// Device identity the extension publishes — how we find it among all cameras.
+let kVCamDeviceUUID = "6F1B7A54-2C3E-4B7E-9E4D-A1C0D2E3F4A5"
+/// The camera's name as every OTHER app lists it.  Declared by the extension
+/// (AirliveProviderSource) and repeated here for the UI: the operator has to recognise
+/// the same words in Zoom's picker, so the two must never drift apart.
+let kVCamDeviceName = "Airlive Bridge Virtual Camera"
 
 final class VirtualCameraOutput: NSObject, VideoOutput {
 
@@ -29,19 +49,28 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     var isLive: Bool { lock.lock(); defer { lock.unlock() }; return _isLive }
     var lastError: String? { lock.lock(); defer { lock.unlock() }; return _lastError }
 
-    /// Publishing happens here, never on the caller's thread: the copy into shared
-    /// memory is a full 1080p frame and the caller may be the main thread.
+    /// Opening and closing the sink talks to CoreMediaIO and can block; frames do NOT
+    /// come through here — see `send`.
     private let queue = DispatchQueue(label: "studio.airlive.bridge.vcam", qos: .userInitiated)
-    private var writer: SharedFrameWriter?
+    private var sink: CMIOSinkConnection?
 
-    /// Hardware format conversion + scale: whatever the program is (NV12 from a camera,
-    /// BGRA from a capture card, any size) becomes the one format the extension declares.
-    /// VTPixelTransferSession rather than CoreImage — a fixed-function block instead of a
-    /// filter graph, which is the difference between "free" and "warm" per frame.
+    /// Fallback conversion ONLY — built lazily the first time a frame arrives that is not
+    /// already the camera's format and size (an AirPlay mirror, a capture card at 720p, and
+    /// the black "no program" filler, which is BGRA).  The normal path never touches it: the
+    /// program decoder's buffers go across untouched.  VTPixelTransferSession rather than
+    /// CoreImage — a fixed-function block instead of a filter graph.
+    ///
+    /// GUARDED BY `lock`: `send` runs on the program bus and `stop` on this output's own
+    /// queue, so an unguarded pair could invalidate the session while a frame was mid-transfer.
     private var transfer: VTPixelTransferSession?
     private var pool: CVPixelBufferPool?
 
     private let installer = SystemExtensionInstaller()
+
+    /// Frames sent / skipped since start.  Touched only from the program bus, which delivers
+    /// frames one at a time; they exist so the log can answer "on but blank" without guessing.
+    private var framesSent: UInt64 = 0
+    private var framesDropped: UInt64 = 0
 
     init(id: UUID = UUID(), label: String = "Virtual Camera") {
         self.id = id
@@ -53,19 +82,29 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     func start() {
         queue.async { [weak self] in
             guard let self else { return }
-            guard let w = SharedFrameWriter() else {
-                self.setError("Couldn't open the shared frame buffer — reinstall Airlive Bridge.")
+            let connection = CMIOSinkConnection()
+            if let reason = connection.open(deviceUUID: kVCamDeviceUUID) {
+                // The extension isn't there or isn't the build we expect — say which, and
+                // do NOT claim to be live.
+                self.setError(reason)
                 return
             }
-            self.writer = w
-            self.buildConverter()
-            self.lock.lock(); self._isLive = true; self._lastError = nil; self.lock.unlock()
+            self.lock.lock()
+            self.sink = connection
+            self.framesSent = 0; self.framesDropped = 0
+            self.reportedOnce = false          // a new session may fail in a new way
+            self._isLive = true
+            // Do NOT clear an existing message here: the installer runs in parallel and may
+            // already have said "restart the Mac to finish installing".  Opening the sink
+            // SUCCEEDS in that case — against the outgoing extension, which is still live —
+            // and wiping the message left the operator running yesterday's build with no hint.
+            self.lock.unlock()
         }
         // Activation talks to macOS on the main thread and may show the approval prompt.
         installer.activate { [weak self] result in
             switch result {
-            case .installed:      self?.setError(nil)
-            case .needsApproval:  self?.setError("Approve “Airlive Virtual Camera” in System Settings → General → Login Items & Extensions.")
+            case .installed:      self?.sinkOpenedOrRetry()
+            case .needsApproval:  self?.setError("Approve “\(kVCamDeviceName)” in System Settings → General → Login Items & Extensions.")
             case .notInApplications: self?.setError("Move Airlive Bridge to /Applications — macOS only loads a camera extension from there.")
             case .failed(let m):  self?.setError(m)
             }
@@ -75,11 +114,17 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     func stop() {
         queue.async { [weak self] in
             guard let self else { return }
-            self.writer = nil
+            self.lock.lock()
+            self._isLive = false                        // stop send() FIRST
+            let connection = self.sink
+            self.sink = nil
             if let t = self.transfer { VTPixelTransferSessionInvalidate(t) }
             self.transfer = nil
             self.pool = nil
-            self.lock.lock(); self._isLive = false; self.lock.unlock()
+            self.lock.unlock()
+            // Outside the lock: this talks to the extension's process and its own close()
+            // must not be able to park an incoming frame behind it.
+            if let reason = connection?.close() { self.setError(reason) }
         }
         // The extension is deliberately LEFT INSTALLED: uninstalling on every toggle would
         // re-prompt the operator for approval each time, and a camera that vanishes from
@@ -88,20 +133,94 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
 
     func clearError() { lock.lock(); _lastError = nil; lock.unlock() }
 
-    // MARK: - Frames
-
-    func send(_ pixelBuffer: CVPixelBuffer, timeNs: UInt64) {
-        guard isLive else { return }
-        // Convert on the CALLER's thread (hardware, sub-millisecond) because the contract
-        // forbids retaining `pixelBuffer` past this call; the expensive part — the copy
-        // into shared memory — then happens on our own queue.
-        guard let converted = convert(pixelBuffer) else { return }
-        queue.async { [weak self] in self?.writer?.publish(converted) }
+    /// Remove the camera from macOS entirely.  Called when the operator DELETES the card —
+    /// not when they merely switch it off, where the extension deliberately stays installed
+    /// so a mid-call toggle doesn't make the camera vanish from Zoom's list.
+    func uninstallExtension() {
+        stop()
+        installer.deactivate { _ in }
     }
 
-    private func buildConverter() {
-        guard transfer == nil else { return }
-        VTPixelTransferSessionCreate(allocator: kCFAllocatorDefault, pixelTransferSessionOut: &transfer)
+    // MARK: - Frames
+
+    /// Open the sink now that the extension is installed.
+    ///
+    /// On a FIRST activation the two halves of `start()` race and the sink half always loses:
+    /// the device does not exist yet, so it fails immediately and gives up. The operator then
+    /// approves the extension in System Settings — and nothing retried, so the card went quiet
+    /// while the camera stayed dark until they toggled it off and on by hand.
+    private func sinkOpenedOrRetry() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.lock.lock(); let alreadyOpen = self.sink != nil; self.lock.unlock()
+            if alreadyOpen { self.setError(nil); return }
+            let connection = CMIOSinkConnection()
+            if let reason = connection.open(deviceUUID: kVCamDeviceUUID) { self.setError(reason); return }
+            self.lock.lock()
+            self.sink = connection
+            self.framesSent = 0; self.framesDropped = 0
+            self._isLive = true
+            self._lastError = nil
+            self.lock.unlock()
+        }
+    }
+
+    func send(_ pixelBuffer: CVPixelBuffer, timeNs: UInt64) {
+        lock.lock(); let live = _isLive; let sink = self.sink; lock.unlock()
+        guard live, let sink else { return }
+        // Enqueued on the CALLER's thread, deliberately.  The contract forbids holding the
+        // buffer past this call, and the enqueue itself is a pointer push into a lock-free
+        // queue — hopping to another thread would mean copying a full 1080p frame to avoid
+        // a few microseconds of work.
+        guard let frame = cameraReady(pixelBuffer) else {
+            reportOnce("The program couldn't be converted for the virtual camera.")
+            return
+        }
+        probe(frame)
+        switch sink.send(frame, timeNs: timeNs) {
+        case .sent:      framesSent &+= 1
+        // Nobody has the camera open — the extension stops draining and the queue stays full.
+        // That is the normal resting state of a virtual camera, not a fault, and calling it
+        // one told operators the camera was broken whenever Zoom simply wasn't running.
+        case .queueFull: framesDropped &+= 1
+        case .failed:    reportOnce("The virtual camera stopped accepting frames — toggle this output off and on.")
+        }
+    }
+
+    /// The program frame as the camera publishes it.
+    ///
+    /// PASS-THROUGH is the point of this function, not an optimisation of it: when the
+    /// frame is already the camera's format and size — which is every frame of a normal
+    /// 1080p program — the very same pixels the OBS output carries are handed to the
+    /// camera, so the two cannot look different.  Converting instead meant choosing a
+    /// colour matrix and a range, and choosing either differently from the source visibly
+    /// changed the picture.
+    private func cameraReady(_ src: CVPixelBuffer) -> CVPixelBuffer? {
+        if CVPixelBufferGetPixelFormatType(src) == kVCamPixelFormat,
+           CVPixelBufferGetWidth(src) == Int(kVCamWidth),
+           CVPixelBufferGetHeight(src) == Int(kVCamHeight) {
+            return src
+        }
+        // The converter is built and used under `lock`, but a failure is REPORTED after
+        // releasing it — `setError` takes the same lock, and NSLock is not recursive.
+        lock.lock()
+        var failure: String?
+        if transfer == nil { failure = buildConverterLocked() }
+        let converted = failure == nil ? convertLocked(src) : nil
+        lock.unlock()
+        if let failure { reportOnce(failure) }
+        return converted
+    }
+
+    /// Built on FIRST use, not at start: a program that is already the right shape never
+    /// needs it, and an unused VT session plus a 25 MB pool of IOSurfaces is exactly the
+    /// kind of idle allocation that shows up as heat.
+    private func buildConverterLocked() -> String? {
+        guard transfer == nil else { return nil }
+        let st = VTPixelTransferSessionCreate(allocator: kCFAllocatorDefault, pixelTransferSessionOut: &transfer)
+        guard st == noErr, transfer != nil else {
+            return "Couldn't create the video converter (\(st))."
+        }
         if let t = transfer {
             // Letterbox rather than crop: the program may be a portrait phone, and silently
             // cutting the operator's framing is worse than bars.
@@ -109,21 +228,46 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
                                  value: kVTScalingMode_Letterbox)
         }
         let attrs: [String: Any] = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-            kCVPixelBufferWidthKey as String: SharedFrame.width,
-            kCVPixelBufferHeightKey as String: SharedFrame.height,
+            kCVPixelBufferPixelFormatTypeKey as String: kVCamPixelFormat,
+            kCVPixelBufferWidthKey as String: Int(kVCamWidth),
+            kCVPixelBufferHeightKey as String: Int(kVCamHeight),
             kCVPixelBufferIOSurfacePropertiesKey as String: [:],
         ]
-        CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, attrs as CFDictionary, &pool)
+        let ps = CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, attrs as CFDictionary, &pool)
+        guard ps == kCVReturnSuccess, pool != nil else {
+            return "Couldn't allocate the video buffer pool (\(ps))."
+        }
+        return nil
     }
 
-    private func convert(_ src: CVPixelBuffer) -> CVPixelBuffer? {
+    private func convertLocked(_ src: CVPixelBuffer) -> CVPixelBuffer? {
         guard let transfer, let pool else { return nil }
         var dst: CVPixelBuffer?
         guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &dst) == kCVReturnSuccess,
               let dst else { return nil }
         guard VTPixelTransferSessionTransferImage(transfer, from: src, to: dst) == noErr else { return nil }
+        // Carry the source's colour tags across.  A pool buffer is born untagged, and an
+        // untagged frame is interpreted by whatever the consumer assumes — which is how a
+        // correctly converted picture still ends up looking wrong.
+        CVBufferPropagateAttachments(src, dst)
         return dst
+    }
+
+    /// 1 Hz luma reading of the frame handed to the camera.  Paired with the identical probe
+    /// on the extension's side (VCamLog.swift), so "the picture looks wrong" becomes a
+    /// comparison of two numbers rather than an argument about tags.
+    private var lastProbe = Date.distantPast
+    private func probe(_ buffer: CVPixelBuffer) {
+        guard Date().timeIntervalSince(lastProbe) >= 1.0 else { return }
+        lastProbe = Date()
+        let passthrough = CVPixelBufferGetPixelFormatType(buffer) == kVCamPixelFormat
+        vcamOutLog.notice("sending \(passthrough ? "pass-through" : "CONVERTED", privacy: .public) \(LumaProbe.describe(buffer), privacy: .public)")
+    }
+
+    private var reportedOnce = false
+    private func reportOnce(_ message: String) {
+        lock.lock(); let already = reportedOnce; reportedOnce = true; lock.unlock()
+        if !already { setError(message) }
     }
 
     private func setError(_ message: String?) {

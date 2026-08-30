@@ -3,14 +3,23 @@
 <plist version="1.0">
 <dict>
   <!--
-    The ONLY entitlement a camera extension needs (Apple's own template ships exactly
-    this): the App Group whose container holds the shared frame slot.  It must match
-    the Bridge's group id verbatim, or the two processes map different files and the
-    camera silently shows the placeholder forever.
+    Matches what every shipping camera extension does (compare OBS's, which is
+    sandboxed with a team-prefixed group).  A camera extension needs nothing else.
+  -->
+  <key>com.apple.security.app-sandbox</key>
+  <true/>
+  <!--
+    The App Group id MUST start with the Team ID.  A "TeamID.name" group is
+    SELF-AUTHORIZING outside the App Store — the prefix proves ownership, so no
+    capability has to be registered on the portal.  The "group.name" form is the
+    App Store shape and REQUIRES registration; claiming it unregistered made macOS
+    reject this extension outright (the signature asked for an entitlement the
+    provisioning profile never granted), and made the app prompt "would like to
+    access data from other apps" on every single launch.
   -->
   <key>com.apple.security.application-groups</key>
   <array>
-    <string>group.studio.airlive.bridge</string>
+    <string>XWBJP49FTR.studio.airlive.bridge</string>
   </array>
 </dict>
 </plist>

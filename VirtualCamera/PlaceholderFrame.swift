@@ -8,10 +8,36 @@ import Foundation
 import CoreVideo
 import CoreGraphics
 import CoreText
+import VideoToolbox
 
 enum PlaceholderFrame {
 
+    /// Returns the placeholder in the camera's published format.  Text is laid out in
+    /// RGB — CoreGraphics cannot draw into a bi-planar buffer — and converted ONCE, at
+    /// creation; the result is cached by the caller, so this costs nothing per frame.
     static func make(width: Int, height: Int) -> CVPixelBuffer? {
+        guard let rgb = drawRGB(width: width, height: height) else { return nil }
+        return convertToCameraFormat(rgb, width: width, height: height) ?? rgb
+    }
+
+    /// One-shot RGB→camera-format conversion.  A session is created and thrown away: this
+    /// runs exactly once in the life of the extension.
+    private static func convertToCameraFormat(_ src: CVPixelBuffer, width: Int, height: Int) -> CVPixelBuffer? {
+        let attrs: [String: Any] = [kCVPixelBufferIOSurfacePropertiesKey as String: [:]]
+        var dst: CVPixelBuffer?
+        guard CVPixelBufferCreate(kCFAllocatorDefault, width, height,
+                                  kVCamPixelFormat, attrs as CFDictionary, &dst) == kCVReturnSuccess,
+              let dst else { return nil }
+        var session: VTPixelTransferSession?
+        guard VTPixelTransferSessionCreate(allocator: kCFAllocatorDefault,
+                                           pixelTransferSessionOut: &session) == noErr,
+              let session else { return nil }
+        defer { VTPixelTransferSessionInvalidate(session) }
+        guard VTPixelTransferSessionTransferImage(session, from: src, to: dst) == noErr else { return nil }
+        return dst
+    }
+
+    private static func drawRGB(width: Int, height: Int) -> CVPixelBuffer? {
         let attrs: [String: Any] = [kCVPixelBufferIOSurfacePropertiesKey as String: [:]]
         var px: CVPixelBuffer?
         CVPixelBufferCreate(kCFAllocatorDefault, width, height,
@@ -35,7 +61,7 @@ enum PlaceholderFrame {
         ctx.setFillColor(CGColor(red: 0.043, green: 0.047, blue: 0.055, alpha: 1))
         ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
 
-        draw("Airlive Virtual Camera", in: ctx, size: 56, y: Double(height) / 2 + 18,
+        draw("Airlive Bridge Virtual Camera", in: ctx, size: 56, y: Double(height) / 2 + 18,
              width: width, gray: 0.92)
         draw("No program — open Airlive Bridge and put a camera on air",
              in: ctx, size: 28, y: Double(height) / 2 - 46, width: width, gray: 0.55)

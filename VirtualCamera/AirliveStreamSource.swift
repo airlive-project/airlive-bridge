@@ -48,12 +48,14 @@ final class AirliveStreamSource: NSObject, CMIOExtensionStreamSource {
     func authorizedToStartStream(for client: CMIOExtensionClient) -> Bool { true }
 
     func startStream() throws {
-        lock.lock(); clients += 1; lock.unlock()
+        lock.lock(); clients += 1; let n = clients; lock.unlock()
+        vcamLog.notice("source: consumer opened (\(n) now watching)")
         (device?.source as? AirliveDeviceSource)?.startStreaming()
     }
 
     func stopStream() throws {
-        lock.lock(); if clients > 0 { clients -= 1 }; let none = clients == 0; lock.unlock()
+        lock.lock(); if clients > 0 { clients -= 1 }; let none = clients == 0; let n = clients; lock.unlock()
+        vcamLog.notice("source: consumer closed (\(n) still watching)")
         if none { (device?.source as? AirliveDeviceSource)?.stopStreaming() }
     }
 }

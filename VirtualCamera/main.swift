@@ -1,4 +1,4 @@
-// main.swift — entry point of the Airlive Virtual Camera system extension.
+// main.swift — entry point of the Airlive Bridge Virtual Camera system extension.
 //
 // The extension is a separate process macOS launches on demand; every app that
 // opens a camera (Zoom, Meet, QuickTime…) talks to it, never to the Bridge.  All

@@ -19,9 +19,6 @@ targets:
     platform: macOS
     sources:
       - Sources
-      # Compiled into BOTH targets: it is the shared-memory contract between the app and
-      # its camera extension, so a change can never land on one side only.
-      - VirtualCamera/SharedFrameBuffer.swift
     info:
       path: Sources/Info.plist
       properties:
@@ -137,7 +134,7 @@ targets:
 
   # ── Virtual Camera ────────────────────────────────────────────────────────────
   # A CoreMediaIO camera extension: a separate process macOS launches when any app
-  # opens the camera, so Zoom / Meet / QuickTime see "Airlive Virtual Camera" whether
+  # opens the camera, so Zoom / Meet / QuickTime see "Airlive Bridge Virtual Camera" whether
   # or not the Bridge happens to be running.  It reads program frames from the shared
   # App Group slot and shows a spoken-for placeholder when there is nothing on air.
   AirliveVirtualCamera:
@@ -148,7 +145,14 @@ targets:
     info:
       path: VirtualCamera/Info.plist
       properties:
-        CFBundleDisplayName: Airlive Virtual Camera
+        CFBundleDisplayName: Airlive Bridge Virtual Camera
+        # SYSX is how macOS RECOGNISES this bundle as a system extension.  xcodegen does
+        # not add it for the system-extension product type, and without it the OS does not
+        # see an extension here at all: activation fails with "extension not found" while
+        # the bundle sits in Contents/Library/SystemExtensions with a perfectly good
+        # identifier and signature.  (Apple's own extensions all carry it — compare any
+        # shipping .systemextension.)
+        CFBundlePackageType: SYSX
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSMinimumSystemVersion: "13.0"
@@ -158,10 +162,33 @@ targets:
         # service name must be unique across every extension on the machine.
         CMIOExtension:
           CMIOExtensionMachServiceName: $(TeamIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)
+        # Identity of the device and its two streams.  The DEVICE uuid is the contract with
+        # the app (it matches on it to find us) and anchors the user's camera permission —
+        # it must never change across releases.
+        AirliveCameraDeviceUUID: 6F1B7A54-2C3E-4B7E-9E4D-A1C0D2E3F4A5
+        AirliveCameraSourceUUID: 3A2B1C0D-4E5F-4A6B-8C7D-9E0F1A2B3C4D
+        AirliveCameraSinkUUID: 5C4D3E2F-1A0B-4C9D-8E7F-6A5B4C3D2E1F
     settings:
       base:
-        PRODUCT_NAME: AirliveVirtualCamera
+        # The bundle, its executable and its identifier must all be THE SAME STRING.
+        # macOS resolves a system extension inside Contents/Library/SystemExtensions by
+        # its identifier, so a bundle named anything else is simply not found — the
+        # activation request fails with "extension not found" while the extension sits
+        # right there, correctly signed. Every shipping camera extension follows this
+        # (compare OBS's com.obsproject.obs-studio.mac-camera-extension.systemextension).
+        PRODUCT_NAME: studio.airlive.bridge.AirliveBridge.vcam
         PRODUCT_BUNDLE_IDENTIFIER: studio.airlive.bridge.AirliveBridge.vcam
+        # These MUST be declared on THIS target.  They were written as
+        # $(MARKETING_VERSION)/$(CURRENT_PROJECT_VERSION) in the info block, but those are
+        # defined on the APP target only — here they expanded to nothing and both version
+        # keys silently vanished from the extension's Info.plist.  macOS stages and
+        # compares system extensions BY VERSION, so a version-less extension can never be
+        # staged: activation fails with "extension not found" while the bundle sits in
+        # place, correctly named and signed.  Kept equal to the app's so an update is
+        # recognised as newer.
+        MARKETING_VERSION: "1.0.6"
+        # Stamped with a build timestamp by the script phase below — see there for why.
+        CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.9"
         ARCHS: "arm64"
         EXCLUDED_ARCHS: x86_64
@@ -170,6 +197,19 @@ targets:
         DEVELOPMENT_TEAM: XWBJP49FTR
         CODE_SIGN_STYLE: Automatic
         SKIP_INSTALL: YES
+    # macOS replaces a staged system extension ONLY when the new one reports a HIGHER
+    # CFBundleVersion.  Tying that to the app's release version means every rebuild during
+    # development reports the same number, so the OS keeps running the previously staged
+    # copy and the app talks to yesterday's extension — which presents as a working camera
+    # that is missing whatever you just added.  A build timestamp makes every build newer
+    # than the last, which is also what shipping camera extensions do (OBS's reads
+    # 24742303888).  Stamped into the BUILT plist, before signing, so the signature covers it.
+    postBuildScripts:
+      - name: Stamp extension build number
+        script: |
+          plist="$TARGET_BUILD_DIR/$INFOPLIST_PATH"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $(date +%s)" "$plist"
+        basedOnDependencyAnalysis: false
 
 schemes:
   AirliveBridge:

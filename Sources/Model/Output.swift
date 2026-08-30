@@ -49,6 +49,9 @@ enum OutputKind: String, CaseIterable, Identifiable {
     var badgeLabel: String {
         switch self {
         case .hdmi: return "HDMI"          // rawValue "hdmi" is already the tag, but be explicit
+        // "VCAM" is a made-up abbreviation nobody has seen before; the kind has a short
+        // real name, so it is used as-is.
+        case .vcam: return "Virtual Camera"
         default:    return rawValue.uppercased()   // ndi → "NDI", obs → "OBS", …
         }
     }
@@ -72,6 +75,15 @@ enum OutputKind: String, CaseIterable, Identifiable {
     /// source of truth so the card and the menu can never disagree about which
     /// kinds are real.
     var isImplemented: Bool { true }   // every kind ships now — Virtual Camera was the last placeholder
+
+    /// Kinds there can only ever be ONE of, so the "+" menu stops offering a second.
+    ///
+    /// OBS: one local plugin to feed (a single loopback slot).
+    /// Virtual Camera: macOS publishes exactly ONE camera device, and the extension keeps one
+    /// set of books for it — two cards would fight over the same sink, the second one's frames
+    /// would be silently dropped, and switching either card off would kill the other's picture
+    /// while its own card still read "on".
+    var isSingleton: Bool { self == .obs || self == .vcam }
 }
 
 /// One downstream re-publishing sink.  Reference type (`AnyObject`) because an

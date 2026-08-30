@@ -103,9 +103,9 @@ struct OutputsRail: View {
             // menu of output TYPES: NDI adds a real output; SRT / RTSP / Virtual
             // Camera show as "soon" (disabled).
             MenuButton(rows: {
-                // OBS is offered only while absent — one local plugin to feed (single loopback slot).
-                let hasOBS = model.programOutputs.contains { $0.kind == .obs }
-                return OutputKind.allCases.filter { $0 != .obs || !hasOBS }.map { kind in
+                // A singleton kind is offered only while absent — see OutputKind.isSingleton.
+                let present = Set(model.programOutputs.map(\.kind))
+                return OutputKind.allCases.filter { !$0.isSingleton || !present.contains($0) }.map { kind in
                     DropdownRow(id: kind.displayName,
                                 label: kind.isImplemented ? kind.displayName : "\(kind.displayName) — soon",
                                 icon: kind.symbolName,
@@ -402,10 +402,26 @@ private struct OutputCard: View {
     }
 
     // BOTTOM: ▲/▼ chip · editable name.
+    //
+    // Virtual Camera has NO name: macOS exposes exactly one virtual camera device, whose
+    // label is baked into the extension, so a per-output name would be a field that
+    // renames nothing.  What is shown instead is that baked-in label, character for
+    // character, so the operator can match it against the entry in Zoom's camera list.
+    // (Every other kind can have several instances — two NDI senders, two RTSP servers —
+    // where the name is what tells them apart.)
     private var bottomRow: some View {
         HStack(spacing: Spacing.sm) {
             reorderArrows
-            nameField
+            if output.kind == .vcam {
+                Text(kVCamDeviceName)
+                    .font(.system(size: 13))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .foregroundColor(Theme.textSecondary)
+                Spacer(minLength: 0)
+            } else {
+                nameField
+            }
         }
     }
 
@@ -749,7 +765,7 @@ private extension OutputKind {
         case .hdmi: return "Second screen"
         case .srt:  return "srt://host:port"
         case .rtsp: return "rtsp://0.0.0.0:8554/live/cam"
-        case .vcam: return "Pick “Airlive Virtual Camera” in Zoom / Meet / Teams"
+        case .vcam: return "Pick “\(kVCamDeviceName)” in Zoom / Meet / Teams"
         }
     }
 }
