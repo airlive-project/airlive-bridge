@@ -187,8 +187,8 @@ targets:
         # place, correctly named and signed.  Kept equal to the app's so an update is
         # recognised as newer.
         MARKETING_VERSION: "1.1.0"
-        # Stamped with a build timestamp by the script phase below — see there for why.
-        CURRENT_PROJECT_VERSION: "1"
+        # Kept EQUAL to the app's, so the pair moves together and only on a real release.
+        CURRENT_PROJECT_VERSION: "8"
         SWIFT_VERSION: "5.9"
         ARCHS: "arm64"
         EXCLUDED_ARCHS: x86_64
@@ -197,19 +197,23 @@ targets:
         DEVELOPMENT_TEAM: XWBJP49FTR
         CODE_SIGN_STYLE: Automatic
         SKIP_INSTALL: YES
-    # macOS replaces a staged system extension ONLY when the new one reports a HIGHER
-    # CFBundleVersion.  Tying that to the app's release version means every rebuild during
-    # development reports the same number, so the OS keeps running the previously staged
-    # copy and the app talks to yesterday's extension — which presents as a working camera
-    # that is missing whatever you just added.  A build timestamp makes every build newer
-    # than the last, which is also what shipping camera extensions do (OBS's reads
-    # 24742303888).  Stamped into the BUILT plist, before signing, so the signature covers it.
-    postBuildScripts:
-      - name: Stamp extension build number
-        script: |
-          plist="$TARGET_BUILD_DIR/$INFOPLIST_PATH"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $(date +%s)" "$plist"
-        basedOnDependencyAnalysis: false
+    # The extension's build number is the APP's build number, and changes only when we ship
+    # a new one.
+    #
+    # It used to be a fresh `date +%s` on every build, so that a development rebuild would
+    # always outrank the staged copy. That reasoning is sound and the cost is not: macOS
+    # REPLACES a staged extension whose version rose, which tears down its process and
+    # unpublishes the camera, and defers removing the outgoing copy until the next restart.
+    # So every single build — including one that changed nothing in the extension at all —
+    # cost a restart and left the camera missing until it happened. Three builds in one
+    # afternoon left three staged copies and no camera. For users it would be worse: an
+    # update that only touched app code would still take their camera away until they rebooted.
+    #
+    # Tied to the app's build number, an unchanged extension reports an unchanged version, and
+    # SystemExtensionInstaller answers `.cancel` — nothing is replaced, nothing is torn down,
+    # nothing waits for a restart. Shipping a real change means bumping CURRENT_PROJECT_VERSION,
+    # which is a deliberate, visible act, exactly as it should be. When iterating ON the
+    # extension itself, bump it to see your change.
 
 schemes:
   AirliveBridge:
