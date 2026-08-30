@@ -285,9 +285,7 @@ final class BridgeChannel: ObservableObject, Identifiable {
     /// the passthrough relay to OBS (forward the camera's existing encode, no
     /// transcode).  `onProgramFormat` carries the length-prefixed SPS/PPS the
     /// camera resends each keyframe.
-    var onProgramFrame: ((CVPixelBuffer, UInt64) -> Void)?
-
-    // The two RAW taps are written on MAIN (BridgeModel, on a program switch) and read on the
+    // ALL THREE taps are written on MAIN (BridgeModel, on a program switch) and read on the
     // receiver's network queue, once per encoded frame.  They are lock-guarded so the receiver can
     // call them DIRECTLY from that queue.  Previously the receiver hopped every packet through
     // `DispatchQueue.main.async` just to read these safely — which put the outgoing video for OBS /
@@ -296,9 +294,20 @@ final class BridgeChannel: ObservableObject, Identifiable {
     // preview is paced off-main from the decoded ring) but juddered once relayed to OBS, because the
     // relay inherited the UI thread's scheduling.  The taps only hand a payload to an output that
     // immediately re-dispatches to its own queue, so nothing here needs the main thread at all.
+    //
+    // `onProgramFrame` was left on main in that first pass, because NDI / HDMI / the virtual
+    // camera take a decoded CVPixelBuffer rather than raw bytes.  It carried the same defect for
+    // the same reason and is now guarded the same way — see ProgramBus.swift for the other half,
+    // the output list those outputs are read from.
     private let programTapLock = NSLock()
+    private var _onProgramFrame: ((CVPixelBuffer, UInt64) -> Void)?
     private var _onProgramSample: ((Data, Int64) -> Void)?
     private var _onProgramFormat: ((Data) -> Void)?
+
+    var onProgramFrame: ((CVPixelBuffer, UInt64) -> Void)? {
+        get { programTapLock.lock(); defer { programTapLock.unlock() }; return _onProgramFrame }
+        set { programTapLock.lock(); _onProgramFrame = newValue; programTapLock.unlock() }
+    }
 
     var onProgramSample: ((Data, Int64) -> Void)? {
         get { programTapLock.lock(); defer { programTapLock.unlock() }; return _onProgramSample }

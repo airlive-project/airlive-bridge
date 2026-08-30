@@ -8,6 +8,7 @@
 import Foundation
 import CoreVideo
 import Combine   // session-autosave subscriptions (model + per-channel objectWillChange)
+import AppKit    // the one alert this model raises: an unreadable saved session (see restoreLastSession)
 
 /// ⚠️ Solo is REMOVED FROM THE UI for launch (2026-07-03): the toolbar switch is
 /// gone and `mode` stays `.multiview` for the app's whole life (profile load pins
@@ -138,8 +139,14 @@ final class BridgeModel: ObservableObject {
     ///                      encode those frames with `programEncoder`;
     ///   • `.black`       — no live video at all: a 30 fps black frame, encoded the same way.
     /// NDI always takes the decoded frames directly and is unaffected by the mode.
-    enum ProgramFeedMode { case passthrough, transcode, black }
-    private var programFeedMode: ProgramFeedMode = .black
+    /// Mirrored into `programBus` on every change so the frame path can read it off main.
+    private var programFeedMode: ProgramFeedMode = .black {
+        didSet { programBus.publish(feedMode: programFeedMode) }
+    }
+
+    /// The only thread-safe view of the model the frame path is allowed to read — see
+    /// ProgramBus.swift for why reading `programOutputs` directly is a crash.
+    let programBus = ProgramBus()
 
     private var blackTimer: DispatchSourceTimer?
     private lazy var programEncoder: ProgramEncoder = {
@@ -306,8 +313,11 @@ final class BridgeModel: ObservableObject {
     // (the conflict-free switch).  Cameras stream in our own protocol; only the
     // program is converted to NDI.
 
-    /// Downstream program outputs (NDI today; SRT/RTSP later).
-    @Published var programOutputs: [VideoOutput] = []
+    /// Downstream program outputs (NDI today; SRT/RTSP later).  Mutated on main only;
+    /// every change is republished to `programBus`, which is what the frame path reads.
+    @Published var programOutputs: [VideoOutput] = [] {
+        didSet { programBus.publish(outputs: programOutputs) }
+    }
 
     /// The channel currently feeding the program: the PGM camera in Multiview, the
     /// selected camera in Solo.
@@ -362,7 +372,7 @@ final class BridgeModel: ObservableObject {
         }
         // An output added mid-stream starts with the CURRENT program SPS/PPS (the camera won't
         // resend them — once per connection), so its first decoded frame is the forced IDR above.
-        if let cached = lastProgramFormatPayload { output.relayFormat(cached) }
+        if let cached = programBus.lastFormatPayload { output.relayFormat(cached) }
     }
 
     /// Add an EXTRA program output (from "+").  Created OFF — a fresh output must never
@@ -382,6 +392,10 @@ final class BridgeModel: ObservableObject {
     }
     func removeProgramOutput(_ output: VideoOutput) {
         guard let index = programOutputs.firstIndex(where: { $0.id == output.id }) else { return }
+        // Deleting the Virtual Camera card also takes the extension out of macOS.  Every other
+        // output disappears with its card; this one would otherwise stay in every conferencing
+        // app's camera list forever, fed by nobody.
+        (output as? VirtualCameraOutput)?.uninstallExtension()
         let cfg = outputConfig(of: output)
         let ref = Ref(output)
         registerUndo(
@@ -416,7 +430,7 @@ final class BridgeModel: ObservableObject {
         let pc = channels.first(where: { $0.id == pid })
         let programProducesRaw = (pc?.producesRawH264 ?? true) && (pc?.videoActive ?? true)
         if !programProducesRaw {
-            lastProgramFormatPayload = nil
+            programBus.lastFormatPayload = nil
             for output in programOutputs { output.clearLastFormat() }   // OBS + RTSP + SRT (NDI no-op)
         }
         // Pick how the passthrough outputs are fed for THIS program state (LAW: every output
@@ -459,14 +473,7 @@ final class BridgeModel: ObservableObject {
     /// Any LIVE passthrough consumer that needs a clean IDR after a CUT — the OBS relay (connected),
     /// or an RTSP/SRT output that's serving.  RTSP/SRT are gated on the same awaitFormat() as the OBS
     /// relay now, so they too need the forced keyframe or they freeze/corrupt for a whole GOP on a cut.
-    private func hasLivePassthroughConsumer() -> Bool {
-        programOutputs.contains { out in
-            if let relay = out as? AirliveRelayOutput { return relay.isConnected }   // real TCP peer
-            if let rtsp = out as? RTSPOutput { return rtsp.hasPlayingClient }         // a client is PLAYING
-            if let srt = out as? SRTOutput { return srt.isLive }                      // caller-mode: connected peer
-            return false   // NDI decodes frames, needs no IDR request
-        }
-    }
+    private func hasLivePassthroughConsumer() -> Bool { programBus.hasLivePassthroughConsumer }
 
     private func requestKeyframeForProgram(force: Bool = false) {
         guard hasLivePassthroughConsumer() else { return }
@@ -491,31 +498,30 @@ final class BridgeModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + keyframeDebounceSeconds, execute: work)
     }
 
+    /// Runs on the RECEIVER's queue, not on main — see ProgramBus.
     private func feedProgram(_ buffer: CVPixelBuffer, timeNs: UInt64) {
-        for output in programOutputs where output.isLive {
-            output.send(buffer, timeNs: timeNs)   // buffer outputs (NDI)
+        for output in programBus.outputs where output.isLive {
+            output.send(buffer, timeNs: timeNs)   // buffer outputs (NDI, HDMI, virtual camera)
         }
         // TRANSCODE mode (AirPlay mirror / HDMI capture on air — no raw bitstream): the same
         // decoded frame is hardware-encoded so OBS/RTSP/SRT carry the program too.  LAW: the
-        // program streams to every output, no exceptions.
-        if programFeedMode == .transcode {
+        // program streams to every output, no exceptions — but only while an output that
+        // needs the ENCODE is actually listening.  With just NDI/HDMI/virtual camera on air
+        // there is nobody to encode for, and the encoder is the most expensive thing in the
+        // app; the black-frame path already gates exactly this way.
+        if programBus.feedMode == .transcode, programBus.hasLivePassthroughConsumer {
             programEncoder.encode(buffer, timeNs: timeNs)
         }
     }
-    /// Latest program SPS/PPS payload — handed to a passthrough output the moment it starts, so a
-    /// mid-stream toggle-on can decode.  CRITICAL: the camera sends formatDescription ONCE per
-    /// connection (deliberate, thermal) and its LAN GOP is 6–10 s — an output that missed the one
-    /// format packet would mux slices with NO SPS/PPS forever (found live: SRT "non-existing PPS").
-    private var lastProgramFormatPayload: Data?
     private func feedProgramFormat(_ payload: Data) {
-        lastProgramFormatPayload = payload
+        programBus.lastFormatPayload = payload
         // ALL outputs, live or not: relayFormat only caches parameter sets (cheap) — samples
         // stay isLive-gated in feedProgramSample.  An OFF output must still track the current
         // format so flipping it on later starts from valid decode state.
-        for output in programOutputs { output.relayFormat(payload) }
+        for output in programBus.outputs { output.relayFormat(payload) }
     }
     private func feedProgramSample(_ payload: Data, _ ts: Int64) {
-        for output in programOutputs where output.isLive { output.relaySample(payload, timestampMicros: ts) }
+        for output in programBus.outputs where output.isLive { output.relaySample(payload, timestampMicros: ts) }
     }
 
     // MARK: - Multiview grid (adaptive 4 / 8 / 12 / 16)
@@ -1058,7 +1064,20 @@ final class BridgeModel: ObservableObject {
                 }
             }
             catch {
+                // SAY IT OUT LOUD.  This used to be a line in the console: the operator got an
+                // app with no channels — visually identical to a legitimately empty one — and no
+                // way to know their setup had not been lost but simply not read.  The file is
+                // deliberately left in place, so Profiles ▸ Open can still recover it.
                 print("[Bridge] ⚠️ couldn't restore the last session: \(error.localizedDescription)")
+                let detail = error.localizedDescription
+                DispatchQueue.main.async {
+                    let alert = NSAlert()
+                    alert.alertStyle = .warning
+                    alert.messageText = "Couldn’t open your last session"
+                    alert.informativeText = "Airlive Bridge started with default settings because the saved session file couldn’t be read. Your channels and outputs have NOT been deleted — try Profiles ▸ Open to load a saved profile.\n\n" + detail
+                    alert.addButton(withTitle: "OK")
+                    alert.runModal()
+                }
             }
         }
         profileName = UserDefaults.standard.string(forKey: "bridge.profileName") ?? "Default"

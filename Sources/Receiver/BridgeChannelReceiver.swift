@@ -749,8 +749,8 @@ final class BridgeChannelReceiver: ChannelReceiver {
         guard isProgramSource else { return }   // H1: no main hop for a non-program channel
         forwardDelayed { [weak self] in self?.channel?.onProgramSample?(payload, timestampMicros) }
     }
-    /// Hand a passthrough payload (raw SPS/PPS or H.264) to the main-thread relay taps
-    /// (OBS / RTSP / SRT), DELAYED by the SAME `bufferSeconds` the decoded jitter ring
+    /// Hand a passthrough payload (raw SPS/PPS or H.264) to the relay taps (OBS / RTSP / SRT)
+    /// ON THIS QUEUE — never main — DELAYED by the SAME `bufferSeconds` the decoded jitter ring
     /// uses — so the passthrough outputs stay aligned with the preview + NDI/HDMI the
     /// operator sees (the whole point of the per-channel delay, which previously only
     /// reached the DECODED path).  bufferSeconds == 0 (the default "Lowest" preset with
@@ -1236,10 +1236,13 @@ final class BridgeChannelReceiver: ChannelReceiver {
     ///      points its own `CALayer.contents` at the SAME IOSurface-backed buffer.
     ///      One decode feeds any number of tiles (multiview + Program + Preview),
     ///      and a busy main thread can never freeze the preview.
-    ///   2. OUTPUT fan-out + the published "no signal" gate — these touch
-    ///      `@Published` / main-isolated state, so they hop to main.  The buffer is
-    ///      IOSurface-backed, so handing it across threads is a retained-CF pass,
-    ///      not a copy.
+    ///   2. OUTPUT fan-out — straight from this queue.  It used to hop to main, which
+    ///      put NDI / HDMI / the virtual camera on the same thread as SwiftUI's rendering
+    ///      of the multiview, previews and controls — the same defect that made the OBS
+    ///      relay judder, left behind when that one was fixed because these outputs take a
+    ///      decoded buffer rather than raw bytes.
+    ///   3. The published "no signal" gate — genuinely main-isolated, and touched ONCE per
+    ///      (re)connect, not per frame.
     private func present(_ buffer: CVPixelBuffer) {
         let timeNs = UInt64(CACurrentMediaTime() * 1_000_000_000.0)
 
@@ -1260,19 +1263,21 @@ final class BridgeChannelReceiver: ChannelReceiver {
                                                           // queue-confined — never read it
                                                           // from the main hop below (race)
 
+        // Program tap: forward to the program output(s) while this is the source — on THIS
+        // queue.  The tap is lock-guarded (Channel.swift) and the outputs are read from the
+        // lock-guarded ProgramBus, so main is not needed and must not be used.
+        if isPgm { channel?.onProgramFrame?(buffer, timeNs) }
+
+        guard needGateFlip else { return }
         DispatchQueue.main.async { [weak self] in
             guard let self, let channel = self.channel else { return }
-            if needGateFlip {
-                if !self.didLogFirstFrame {
-                    self.didLogFirstFrame = true
-                    print("[BridgeReceiver \(srcName)] ✅ first frame presented")
-                }
-                // Flip the published "no signal" gate on the first frame only (guarded —
-                // never a per-frame published write).
-                if channel.latestFrame == nil { channel.latestFrame = buffer }
+            if !self.didLogFirstFrame {
+                self.didLogFirstFrame = true
+                print("[BridgeReceiver \(srcName)] ✅ first frame presented")
             }
-            // Program tap: forward to the program output(s) while this is the source.
-            if isPgm { channel.onProgramFrame?(buffer, timeNs) }
+            // Flip the published "no signal" gate on the first frame only (guarded —
+            // never a per-frame published write).
+            if channel.latestFrame == nil { channel.latestFrame = buffer }
         }
     }
 

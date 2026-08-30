@@ -50,18 +50,18 @@ final class AirPlayReceiver: ChannelReceiver {
                 self.stateLock.lock(); let stopped = self._stopped; self.stateLock.unlock()
                 if stopped { return }
                 channel.publishFrame(pixelBuffer)        // off-thread mirror (zero-copy) — every tile
-                // Main-isolated work ONLY when needed: the program tap (per frame) or the
-                // one-shot connect / latestFrame flip.  A non-program AirPlay channel does ZERO
-                // per-frame main hops after its first frame (H1).  Channel captured WEAKLY so a
-                // late hop can't keep a stopped channel alive or flip its state back on.
-                guard isPgm || needGate else { return }
+                // Program tap right here: the tap is lock-guarded and the outputs come from the
+                // lock-guarded ProgramBus, so it never needs main.  Routing it through main put
+                // NDI / HDMI / the virtual camera behind SwiftUI's rendering — the same defect
+                // that made the OBS relay judder.
+                if isPgm { channel.onProgramFrame?(pixelBuffer, ptsNs) }
+                // The published connect / no-signal gate IS main-isolated — and flips once.
+                // Channel captured WEAKLY so a late hop can't resurrect a stopped channel.
+                guard needGate else { return }
                 DispatchQueue.main.async { [weak channel] in
                     guard let channel else { return }
-                    if needGate {
-                        if !channel.isConnected { channel.isConnected = true }
-                        if channel.latestFrame == nil { channel.latestFrame = pixelBuffer }
-                    }
-                    if isPgm { channel.onProgramFrame?(pixelBuffer, ptsNs) }   // program bus (NDI)
+                    if !channel.isConnected { channel.isConnected = true }
+                    if channel.latestFrame == nil { channel.latestFrame = pixelBuffer }
                 }
             }
             // Fixed additive delay (0 → immediate, the original zero-risk path).

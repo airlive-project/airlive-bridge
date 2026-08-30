@@ -115,11 +115,17 @@ final class CaptureDeviceReceiver: NSObject, ChannelReceiver, AVCaptureVideoData
         channel?.publishFrame(buffer)                    // off-main mirror (zero-copy)
         let seconds = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
         let timeNs = UInt64(max(0, seconds) * 1_000_000_000)
-        DispatchQueue.main.async { [weak self] in
-            guard let self, let channel = self.channel else { return }
+        // Program tap straight from the capture queue — lock-guarded, and the outputs come
+        // from the lock-guarded ProgramBus, so main is neither needed nor wanted here.
+        channel?.onProgramFrame?(buffer, timeNs)
+        // The published gate is genuinely main-isolated, but it only ever flips ONCE.  Testing
+        // it here keeps the steady state at zero main hops per frame — the sibling ARLV
+        // receiver already worked this way; this one hopped on every frame, on air or not.
+        guard let channel, !channel.isConnected || channel.latestFrame == nil else { return }
+        DispatchQueue.main.async { [weak channel] in
+            guard let channel else { return }
             if !channel.isConnected { channel.isConnected = true }
-            channel.onProgramFrame?(buffer, timeNs)      // program-bus (NDI)
-            if channel.latestFrame == nil { channel.latestFrame = buffer }   // flip the no-signal gate once
+            if channel.latestFrame == nil { channel.latestFrame = buffer }
         }
     }
 }
