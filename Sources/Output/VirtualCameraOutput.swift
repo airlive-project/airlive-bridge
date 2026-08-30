@@ -15,6 +15,7 @@ import Foundation
 import CoreVideo
 import VideoToolbox
 import SystemExtensions
+import AppKit    // one notification: the operator returning from System Settings (see watchForApproval)
 import os
 
 /// Same subsystem the extension logs under — one `log show` shows both ends of the hop.
@@ -101,6 +102,7 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
             self.lock.unlock()
         }
         // Activation talks to macOS on the main thread and may show the approval prompt.
+        watchForApproval()
         installer.activate { [weak self] result in
             switch result {
             case .installed:      self?.sinkOpenedOrRetry()
@@ -126,6 +128,7 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
             // must not be able to park an incoming frame behind it.
             if let reason = connection?.close() { self.setError(reason) }
         }
+        DispatchQueue.main.async { [weak self] in self?.stopWatchingForApproval() }
         // The extension is deliberately LEFT INSTALLED: uninstalling on every toggle would
         // re-prompt the operator for approval each time, and a camera that vanishes from
         // Zoom's list mid-call is worse than one that shows a "no program" placeholder.
@@ -133,12 +136,28 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
 
     func clearError() { lock.lock(); _lastError = nil; lock.unlock() }
 
-    /// Remove the camera from macOS entirely.  Called when the operator DELETES the card —
-    /// not when they merely switch it off, where the extension deliberately stays installed
-    /// so a mid-call toggle doesn't make the camera vanish from Zoom's list.
-    func uninstallExtension() {
-        stop()
-        installer.deactivate { _ in }
+    /// Watches for the operator coming back from System Settings.
+    ///
+    /// Approving an extension happens in another app, and the callback that tells us it
+    /// finished does not always arrive — it certainly does not when the request was made
+    /// before the approval.  Rather than leaving a stale "approve this" on the card forever,
+    /// the sink is retried the moment the Bridge is frontmost again: by then the operator has
+    /// either approved it or not, and the answer is one cheap device lookup away.
+    private var activationObserver: NSObjectProtocol?
+
+    private func watchForApproval() {
+        guard activationObserver == nil else { return }
+        activationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self, self.isLive == false || self.lastError != nil else { return }
+            self.sinkOpenedOrRetry()
+        }
+    }
+
+    private func stopWatchingForApproval() {
+        if let o = activationObserver { NotificationCenter.default.removeObserver(o) }
+        activationObserver = nil
     }
 
     // MARK: - Frames

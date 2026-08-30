@@ -392,10 +392,16 @@ final class BridgeModel: ObservableObject {
     }
     func removeProgramOutput(_ output: VideoOutput) {
         guard let index = programOutputs.firstIndex(where: { $0.id == output.id }) else { return }
-        // Deleting the Virtual Camera card also takes the extension out of macOS.  Every other
-        // output disappears with its card; this one would otherwise stay in every conferencing
-        // app's camera list forever, fed by nobody.
-        (output as? VirtualCameraOutput)?.uninstallExtension()
+        // NOTE: removing the card does NOT uninstall the camera extension, deliberately.
+        // It used to, and that was wrong in both directions.  A system extension is not the
+        // app's to churn: every add/remove cycle asked the operator to approve it again, and
+        // macOS defers a removal to the next restart — so re-adding the card while the old
+        // removal was still pending left the SAME version listed twice, one "waiting to
+        // uninstall", one "waiting for user", with an approval that could never complete.
+        // The camera is installed once and stays, publishing its "No program" placeholder when
+        // nothing is pushed; this card only decides whether the program is pushed into it.
+        // Full removal belongs to the uninstaller and to System Settings, where the operator
+        // expects to find it.
         let cfg = outputConfig(of: output)
         let ref = Ref(output)
         registerUndo(
