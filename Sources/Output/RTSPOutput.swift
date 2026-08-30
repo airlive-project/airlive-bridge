@@ -153,6 +153,14 @@ final class RTSPOutput: VideoOutput {
 
     private func startListener() {
         let tcp = NWProtocolTCP.Options(); tcp.noDelay = true
+        // Dead-peer detection, the same knobs the camera receiver tunes: a player that sleeps
+        // or drops off Wi-Fi mid-PLAY never sends a FIN, so without probes it counts as alive
+        // for minutes of TCP retransmission — and every frame's RTP payload is queued for it
+        // the whole time.  Reaped in ~5+2×3 ≈ 11 s instead.
+        tcp.enableKeepalive = true
+        tcp.keepaliveIdle = 5      // seconds of silence before the first probe
+        tcp.keepaliveInterval = 2  // seconds between probes
+        tcp.keepaliveCount = 3     // unanswered probes → connection failed
         let params = NWParameters(tls: nil, tcp: tcp)
         params.allowLocalEndpointReuse = true
         let l: NWListener
