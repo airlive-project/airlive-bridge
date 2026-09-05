@@ -148,6 +148,16 @@ final class BridgeModel: ObservableObject {
     /// ProgramBus.swift for why reading `programOutputs` directly is a crash.
     let programBus = ProgramBus()
 
+    /// Is a broadcast happening right now?
+    ///
+    /// Deliberately BROAD: a connected camera counts, and so does any output carrying the
+    /// program.  Either alone is a live service to whoever is watching, and anything that could
+    /// interrupt one — an update installing itself, the app quitting — has to ask this first.
+    /// See UpdateGate in Updater.swift.
+    var isOnAir: Bool {
+        channels.contains { $0.anyConnected } || programBus.outputs.contains { $0.isLive }
+    }
+
     private var blackTimer: DispatchSourceTimer?
     private lazy var programEncoder: ProgramEncoder = {
         let enc = ProgramEncoder()

@@ -57,14 +57,21 @@ struct AirliveBridgeApp: App {
     /// a newer signed build is on the appcast the operator gets the standard
     /// "Install and Relaunch" prompt.  See Updater.swift for the release flow.
     private let updaterController: SPUStandardUpdaterController
+    /// Kept alive for the app's lifetime — Sparkle holds its delegate WEAKLY, and a gate that
+    /// deallocates is a gate that silently stops gating.
+    private let updateGate: UpdateGate
 
     init() {
         let m = BridgeModel()
         _model = StateObject(wrappedValue: m)
         _shortcuts = StateObject(wrappedValue: ShortcutCenter(model: m))
         AppDelegate.model = m   // quit guard reads live-stream state from here
+        // The gate is what stops an update prompt appearing — or installing — in the middle of
+        // a service.  See UpdateGate.
+        let gate = UpdateGate(model: m)
+        updateGate = gate
         updaterController = SPUStandardUpdaterController(startingUpdater: true,
-                                                        updaterDelegate: nil,
+                                                        updaterDelegate: gate,
                                                         userDriverDelegate: nil)
     }
 
