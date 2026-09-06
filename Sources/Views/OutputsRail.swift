@@ -267,7 +267,7 @@ private struct ChooserCard: View {
                         .foregroundColor(kind.isImplemented ? Theme.accentBlue : Theme.textFaint)
                         .frame(width: 24)
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(kind.displayName)
+                        Text(kind.isRetiring ? "\(kind.displayName) (retiring)" : kind.displayName)
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundColor(Theme.textPrimary)
                         Text(kind.configFieldExample)
@@ -326,9 +326,6 @@ private struct OutputCard: View {
     /// Flashes the SRT destination field red for ~2 s when the operator tries to
     /// turn SRT on with no destination — otherwise the click just does nothing.
     @State private var flashConfigError = false
-    /// Persisted: once the operator ✕-dismisses the "Get Plugin for OBS" line it
-    /// stays hidden (there's exactly one OBS card, so a global flag is correct).
-    @AppStorage("bridge.obsPluginLinkDismissed") private var pluginLinkDismissed = false
 
     /// Same template as the channel cards: TOP = On/Off chip · protocol tag ··· trash;
     /// BOTTOM = ▲/▼ chip · editable name.  The On/Off chip and the ▲/▼ chip share one
@@ -342,13 +339,12 @@ private struct OutputCard: View {
             VStack(alignment: .leading, spacing: Spacing.sm) {
                 if output.kind == .obs {
                     obsRow(live: live)
-                    // Not connected → a dismissable "Get Plugin for OBS ↗" line under a
-                    // divider (the operator who forgot the plugin has a way forward; the ✕
-                    // hides it for good once they've got it).  Connected → nothing extra.
-                    if !live && !pluginLinkDismissed {
-                        Divider().overlay(Theme.stroke)
-                        pluginLinkRow
-                    }
+                    // ALWAYS shown, and NOT dismissable. It replaced a "Get Plugin for OBS ↗"
+                    // link, which now points at something we are retiring. And the operator who
+                    // most needs to read this is the one for whom the plugin is working fine:
+                    // they have no other reason to learn the path is going away.
+                    Divider().overlay(Theme.stroke)
+                    retirementNotice
                 } else if output.kind == .hdmi {
                     // HDMI Out: toggle · tag ··· trash on top; ▲/▼ · display picker below
                     // (no editable name — the "name" is which screen it fills).
@@ -505,36 +501,18 @@ private struct OutputCard: View {
         return "Display \(index + 1) (\(w)×\(h))"
     }
 
-    /// Second line on the OBS card when not connected: link (left) + ✕ dismiss (right).
-    private static let pluginDownloadURL = URL(string: "https://airlive.vercel.app/downloads")!
-    private var pluginLinkRow: some View {
-        HStack(spacing: Spacing.sm) {
-            Button {
-                NSWorkspace.shared.open(Self.pluginDownloadURL)
-            } label: {
-                HStack(spacing: 4) {
-                    Text("Get Plugin for OBS")
-                        .font(.system(size: 11, weight: .medium))
-                    Image(systemName: "arrow.up.right")
-                        .font(.system(size: 9, weight: .semibold))
-                }
-                .foregroundColor(Theme.accentBlue)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .onHover { NSCursor.pointingHand.set(); if !$0 { NSCursor.arrow.set() } }
-            .help("Opens the download page for the OBS plugin")
-            Spacer(minLength: Spacing.xs)
-            Button { pluginLinkDismissed = true } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(Theme.textSecondary)
-                    .frame(width: 22, height: 22)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("Hide this")
+    /// The OBS relay is on its way out; this is where the operator finds out, and what to do.
+    private var retirementNotice: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Retiring soon - switch to Virtual Camera.")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(Theme.textPrimary)
+            Text("In OBS: add a Video Capture Device source and pick “\(kVCamDeviceName)”.")
+                .font(.system(size: 10))
+                .foregroundColor(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// A card-visible transport error with a ✕ to dismiss it — so a message doesn't hang forever (e.g.
@@ -761,11 +739,11 @@ private extension OutputKind {
     var configFieldExample: String {
         switch self {
         case .ndi:  return "public"
-        case .obs:  return "Add the OBS Airlive Bridge source in OBS"
+        case .obs:  return "Replaced by Virtual Camera"
         case .hdmi: return "Second screen"
         case .srt:  return "srt://host:port"
         case .rtsp: return "rtsp://0.0.0.0:8554/live/cam"
-        case .vcam: return "Pick “\(kVCamDeviceName)” in Zoom / Meet / Teams"
+        case .vcam: return "Publishes the program as a system camera"
         }
     }
 }

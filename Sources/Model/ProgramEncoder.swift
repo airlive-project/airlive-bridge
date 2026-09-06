@@ -37,6 +37,8 @@ final class ProgramEncoder {
         var session: VTCompressionSession?
         var sessionW: Int32 = 0
         var sessionH: Int32 = 0
+        /// Ask the encoder for an IDR on the very next frame - see `forceKeyframeNext()`.
+        var forceKeyframe = false
     }
     private let state = OSAllocatedUnfairLock(uncheckedState: State())
 
@@ -68,6 +70,13 @@ final class ProgramEncoder {
     /// The session is created / recreated to the frame's own dimensions, so a source
     /// switch (1080p black → portrait mirror) re-negotiates cleanly: fresh session ⇒
     /// first frame is an IDR with new SPS/PPS ⇒ receivers re-sync.
+    /// Emit an IDR (with fresh SPS/PPS) on the next frame instead of waiting out the GOP.
+    ///
+    /// Needed when a passthrough output has just been told to re-sync: the natural interval is a
+    /// second, and a second of held picture is a second the receiver spends showing the wrong
+    /// camera. Costs one larger frame.
+    func forceKeyframeNext() { state.withLockUnchecked { $0.forceKeyframe = true } }
+
     func encode(_ pixelBuffer: CVPixelBuffer, timeNs: UInt64) {
         let w = Int32(CVPixelBufferGetWidth(pixelBuffer))
         let h = Int32(CVPixelBufferGetHeight(pixelBuffer))
@@ -94,9 +103,17 @@ final class ProgramEncoder {
         guard let session else { return }
 
         let pts = CMTime(value: CMTimeValue(timeNs), timescale: 1_000_000_000)
+        // Consume the request: one forced IDR, not a stream of them.
+        let forced = state.withLockUnchecked { st -> Bool in
+            defer { st.forceKeyframe = false }
+            return st.forceKeyframe
+        }
+        let props: CFDictionary? = forced
+            ? [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue!] as CFDictionary
+            : nil
         VTCompressionSessionEncodeFrame(
             session, imageBuffer: pixelBuffer, presentationTimeStamp: pts, duration: .invalid,
-            frameProperties: nil, infoFlagsOut: nil
+            frameProperties: props, infoFlagsOut: nil
         ) { [weak self] status, _, sampleBuffer in
             guard status == noErr, let self, let sb = sampleBuffer else { return }
             self.emit(sb)
@@ -124,6 +141,26 @@ final class ProgramEncoder {
                              value: kCFBooleanFalse)   // no B-frames — same as the camera's wire
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate,
                              value: Self.averageBitRate as CFNumber)
+
+        // COLOUR IDENTITY - and it has to be stated here, not inherited.
+        //
+        // While the program was forwarded untouched, the PHONE wrote the SPS/PPS and its Rec.709
+        // tags travelled with the picture. Now this encoder writes them, and VideoToolbox writes
+        // NO colour into the VUI unless asked - MEASURED, including with a fully Rec.709-tagged
+        // buffer on the input, which does NOT carry through. An untagged stream is not a neutral
+        // stream: every receiver falls back to its own assumption, and two receivers assuming
+        // differently is how the same picture ends up two colours.
+        //
+        // Rec.709 because that is what the wire is, deliberately, everywhere in this product: the
+        // stream is a monitoring proxy of what the operator sees, so it is tagged the way the
+        // operator's own preview is (see the wire-path doctrine in the camera's CLAUDE.md). The
+        // values are not touched - this is a label on pixels that already are what they are.
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ColorPrimaries,
+                             value: kCVImageBufferColorPrimaries_ITU_R_709_2)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_TransferFunction,
+                             value: kCVImageBufferTransferFunction_ITU_R_709_2)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_YCbCrMatrix,
+                             value: kCVImageBufferYCbCrMatrix_ITU_R_709_2)
         VTCompressionSessionPrepareToEncodeFrames(session)
         return session
     }

@@ -84,6 +84,16 @@ enum OutputKind: String, CaseIterable, Identifiable {
     /// would be silently dropped, and switching either card off would kill the other's picture
     /// while its own card still read "on".
     var isSingleton: Bool { self == .obs || self == .vcam }
+
+    /// On its way out, and said so wherever it can be chosen or seen.
+    ///
+    /// The OBS plugin relay carries a compressed stream, which belongs to the camera that
+    /// produced it - so switching cameras made the receiver resynchronise and the picture held
+    /// for a moment. The virtual camera carries frames and cuts instantly, needs no plugin, and
+    /// cannot take OBS down with it (it runs in its own process). Both paths are kept for now so
+    /// the camera can prove itself in the field; this flag is what tells the operator which one
+    /// has a future.
+    var isRetiring: Bool { self == .obs }
 }
 
 /// One downstream re-publishing sink.  Reference type (`AnyObject`) because an

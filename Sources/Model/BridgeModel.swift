@@ -175,6 +175,14 @@ final class BridgeModel: ObservableObject {
     }()
 
     /// The mode the CURRENT program state calls for.  Main-confined.
+    ///
+    /// A camera's own H.264 is forwarded UNTOUCHED - no decode, no re-encode, no generation of
+    /// loss. Encoding the program ourselves was tried here to make cuts seamless and REJECTED:
+    /// it buys a clean cut with a permanent tax on every frame, which is the wrong trade for a
+    /// product whose whole point is that the picture is not degraded on the way through.
+    ///
+    /// The cut seam this leaves is being solved where it belongs - by handing the same-machine
+    /// OBS plugin decoded FRAMES instead of a stream, so there is no bitstream to splice at all.
     private func computeFeedMode() -> ProgramFeedMode {
         guard let pc = channels.first(where: { $0.id == effectiveProgramID }),
               pc.isConnected, pc.videoActive else { return .black }
@@ -339,7 +347,11 @@ final class BridgeModel: ObservableObject {
     /// adapter…).  Not started here; `feedProgram*` only sends to live outputs.
     private func seedDefaultOutputs() {
         let defaults: [VideoOutput] = [
-            AirliveRelayOutput(label: OutputKind.obs.displayName),   // OBS Plugin pinned at the TOP
+            // The virtual camera leads: it is how the program reaches OBS, Zoom and anything else
+            // that lists cameras, and unlike a relayed stream it cuts between cameras with no seam
+            // (there is no bitstream to re-sync - see computeFeedMode). Created OFF, and creating
+            // it asks macOS for nothing; the first switch-on does that.
+            VirtualCameraOutput(label: OutputKind.vcam.displayName),
             NDIOutput(label: OutputKind.ndi.displayName),
             HDMIOutput(label: OutputKind.hdmi.displayName),
             RTSPOutput(label: OutputKind.rtsp.displayName, port: 8554),
@@ -362,9 +374,6 @@ final class BridgeModel: ObservableObject {
             // relay just keeps retrying — zero operator action, nothing to mis-toggle.
             relay.start()
         }
-        // SRT peer accepted the call / RTSP client hit PLAY — force one IDR so the viewer decodes
-        // NOW, not at the next natural keyframe (the camera's LAN GOP is 6–10 s; a mid-GOP join
-        // would sit dark that long).
         if let srt = output as? SRTOutput {
             srt.onReady = { [weak self] in self?.requestKeyframeForProgram(force: true) }
             // Spinner → green on the card the moment the caller actually connects (and back on drop).
@@ -432,12 +441,19 @@ final class BridgeModel: ObservableObject {
     /// the tap on every other channel so exactly one feeds the program.
     func routeProgram() {
         let pid = effectiveProgramID
+        // Decided BEFORE the taps are wired: they depend on it.
+        let rawPassthrough = computeFeedMode() == .passthrough
         for channel in channels {
             let isProgram = channel.id == pid
             if isProgram {
                 channel.onProgramFrame = { [weak self] buffer, timeNs in self?.feedProgram(buffer, timeNs: timeNs) }
-                channel.onProgramFormat = { [weak self] payload in self?.feedProgramFormat(payload) }
-                channel.onProgramSample = { [weak self] payload, ts in self?.feedProgramSample(payload, ts) }
+                // RAW taps ONLY while the wire really is this camera's bitstream. With the program
+                // encoded by us, its samples and the encoder's would otherwise both pour into the
+                // same socket and interleave into nonsense. (Today nothing selects passthrough -
+                // see computeFeedMode - so these stay nil.)
+                let raw = rawPassthrough
+                channel.onProgramFormat = raw ? { [weak self] payload in self?.feedProgramFormat(payload) } : nil
+                channel.onProgramSample = raw ? { [weak self] payload, ts in self?.feedProgramSample(payload, ts) } : nil
             } else {
                 channel.onProgramFrame = nil
                 channel.onProgramFormat = nil
@@ -459,22 +475,49 @@ final class BridgeModel: ObservableObject {
         // Pick how the passthrough outputs are fed for THIS program state (LAW: every output
         // always carries the program): camera → raw passthrough, AirPlay/capture → transcode,
         // no live video → continuous black.  handleConnectivityChange re-applies on drops.
-        applyFeedMode(computeFeedMode())
-        // On a REAL source change, gate EVERY passthrough output until the new source's format
-        // arrives (#20 — was OBS-relay-only; RTSP/SRT decoded ~300 ms against the old SPS/PPS), and
-        // FORCE an IDR for the new source.  Forcing (not the lastKeyframeProgramID dedup) is
-        // essential: after A→AirPlay→A the dedup sees A unchanged and skips, leaving the relay gated
-        // with no keyframe → OBS frozen for a GOP.  The force still no-ops safely if the new source
-        // can't produce a keyframe (requestKeyframe re-checks producesRawH264/videoActive).
-        if pid != lastRoutedProgramID {
-            lastRoutedProgramID = pid
+        let mode = computeFeedMode()
+        applyFeedMode(mode)
+
+        // Gate the passthrough outputs only when the BITSTREAM they carry actually changes.
+        //
+        // It used to gate whenever the program CHANNEL changed, and those are the same thing in
+        // exactly one mode. In passthrough the wire IS the camera's own H.264, so a cut really
+        // does swap streams: the new frames mean nothing against the old parameter sets, and the
+        // receiver must re-sync. In transcode and black the wire is OUR encoder's single
+        // continuous stream - the same parameter sets from the first frame to the last - and a
+        // cut changes nothing in it whatsoever. Gating there shut the outputs for no reason and
+        // then had nothing to open them: the forced-IDR path only works on a real camera, so
+        // OBS held a still until the encoder's own GOP came round, up to a full second, on a cut
+        // that needed no interruption at all.
+        // No program at all means black, which the encoder feeds - so it is the encoder's wire.
+        let wire: ProgramWire = {
+            if mode == .passthrough, let pid { return .camera(pid) }
+            return .encoder
+        }()
+        if wire != lastProgramWire {
+            lastProgramWire = wire
             for output in programOutputs { output.awaitFormat() }        // OBS + RTSP + SRT (NDI no-op)
-            requestKeyframeForProgram(force: true)
-        } else {
-            requestKeyframeForProgram()   // routine re-route (mode toggle, add/remove): dedup, no re-poke
+            switch wire {
+            case .camera:
+                // Ask the phone. Forcing (not the lastKeyframeProgramID dedup) is essential:
+                // after A→AirPlay→A the dedup sees A unchanged and skips, leaving the relay gated
+                // with no keyframe → OBS frozen for a GOP.
+                requestKeyframeForProgram(force: true)
+            case .encoder:
+                // Ask ourselves - the encoder is right here, so this costs a frame, not a round trip.
+                programEncoder.forceKeyframeNext()
+            }
         }
     }
-    private var lastRoutedProgramID: UUID?
+
+    /// What the passthrough outputs are actually carrying: a camera's own bitstream, or the one
+    /// continuous stream our encoder produces regardless of which source feeds it.
+    private enum ProgramWire: Equatable {
+        case camera(UUID)
+        case encoder
+    }
+    /// The bitstream the passthrough outputs last saw - see routeProgram.
+    private var lastProgramWire: ProgramWire?
 
     /// Last program we asked an IDR for — so routine re-routes (mode toggle, channel
     /// add/remove, re-selecting the SAME source, staging to Preview) never re-poke the
@@ -482,10 +525,15 @@ final class BridgeModel: ObservableObject {
     /// real CUT) or when a relay first connects (`force`).
     private var lastKeyframeProgramID: UUID?
     private var keyframeDebounce: DispatchWorkItem?
-    /// Coalesce window for forced IDRs.  ≥ the camera's own ~250 ms rate-limit and a
-    /// GOP floor, so a director hammering CUT (A→B→A…) yields ONE forceKeyframe on
-    /// the SETTLED program, not one per intermediate click (per the camera team's
-    /// thermal note — bursts pushed the phone nominal→fair).
+    /// Coalesce window for forced IDRs.  It protects the phone from a director hammering CUT
+    /// (A→B→A…), per the camera team's thermal note - bursts pushed the phone nominal→fair.
+    ///
+    /// It fires on the LEADING edge.  It used to fire only on the trailing one, which meant a
+    /// single, isolated cut - the normal case, the one that happens in every service - sat here
+    /// for the full window before the request was even SENT, while `awaitFormat` had already
+    /// shut the passthrough outputs. OBS/RTSP/SRT held the outgoing camera's last frame for
+    /// 300 ms of pure self-harm on top of the unavoidable round trip. The window still coalesces
+    /// a burst; it just no longer taxes the cut that isn't one.
     private let keyframeDebounceSeconds = 0.3
 
     /// Ask the on-air camera for a fresh keyframe — but ONLY when an OBS relay is
@@ -509,13 +557,26 @@ final class BridgeModel: ObservableObject {
         guard force || pid != lastKeyframeProgramID else { return }   // real source change only
         lastKeyframeProgramID = pid
 
+        // LEADING EDGE — ask NOW.  Every millisecond between here and the phone's IDR is a
+        // frozen picture on every passthrough output.
+        pc.send(.forceKeyframe())
+        let askedFor = pid
+
+        // TRAILING EDGE — and ask again only if the program MOVED during the window.  Without
+        // this a burst would leave the settled source gated with no keyframe: we would have
+        // poked the one the director passed through, not the one they landed on, and OBS would
+        // hold a still until that camera's next natural keyframe, which is 6-10 s away.
         keyframeDebounce?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             // Re-check at fire time: the program may have moved again and every passthrough consumer
             // may have dropped — never poke the phone for nothing.
             guard self.hasLivePassthroughConsumer() else { return }
-            self.channels.first { $0.id == self.effectiveProgramID }?.send(.forceKeyframe())
+            let settled = self.effectiveProgramID
+            guard settled != askedFor, let sc = self.channels.first(where: { $0.id == settled }),
+                  sc.producesRawH264, sc.videoActive else { return }
+            self.lastKeyframeProgramID = settled
+            sc.send(.forceKeyframe())
         }
         keyframeDebounce = work
         DispatchQueue.main.asyncAfter(deadline: .now() + keyframeDebounceSeconds, execute: work)
@@ -817,12 +878,13 @@ final class BridgeModel: ObservableObject {
             configureOutput(output)
             programOutputs.append(output)
         }
-        // The always-on OBS Plugin card must exist even when restoring a profile saved
-        // before it did (configureOutput starts its reconnect loop).
-        if !programOutputs.contains(where: { $0.kind == .obs }) {
-            let relay = AirliveRelayOutput(label: OutputKind.obs.displayName)
-            configureOutput(relay)
-            programOutputs.insert(relay, at: 0)   // pinned at the TOP, same as seedDefaultOutputs
+        // A profile saved by an older build may still carry the retired "OBS Airlive Bridge"
+        // relay. `makeOutput` drops it, and nothing puts it back: the program reaches OBS through
+        // the virtual camera now, which cuts without a seam and needs no plugin at all.
+        if !programOutputs.contains(where: { $0.kind == .vcam }) {
+            let vcam = VirtualCameraOutput(label: OutputKind.vcam.displayName)
+            configureOutput(vcam)
+            programOutputs.insert(vcam, at: 0)
         }
 
         routeProgram()       // wire the program tap across the new channels
@@ -1133,8 +1195,8 @@ final class BridgeModel: ObservableObject {
         guard let kind = OutputKind(rawValue: cfg.kind) else { return nil }
         let output: VideoOutput?
         switch kind {
-        case .ndi:  output = NDIOutput(label: cfg.label)
         case .obs:  output = AirliveRelayOutput(label: cfg.label)
+        case .ndi:  output = NDIOutput(label: cfg.label)
         case .rtsp: output = RTSPOutput(label: cfg.label, port: UInt16(cfg.port ?? 8554))
         case .hdmi: output = HDMIOutput(label: cfg.label)
         case .srt:  output = SRTOutput(label: cfg.label)

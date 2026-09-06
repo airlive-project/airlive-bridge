@@ -51,6 +51,7 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     /// an activation callback, the camera list changing, the sink opening — so the card
     /// cannot show a state the machine has left.
     private enum Stage {
+        case notSetUp                   // the card exists; nothing has been asked of macOS yet
         case installing                 // request submitted, nothing to say yet
         case awaitingApproval           // macOS is asking the operator
         case needsInstall(String)       // it cannot be installed, and why
@@ -77,13 +78,13 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
                 // its device list while the extension was being replaced and never refreshed.
                 // Reopening the app costs seconds; logging out costs the operator their session.
                 return "Quit and reopen Airlive Bridge — this copy can’t see the virtual camera. If it’s still missing, log out and back in."
-            case .installing, .starting, .ready, .live: return nil
+            case .notSetUp, .installing, .starting, .ready, .live: return nil
             }
         }
     }
 
     private let lock = NSLock()
-    private var _stage: Stage = .installing
+    private var _stage: Stage = .notSetUp
     private var _isLive = false
 
     /// macOS accepted a NEW extension but could not swap it in, because the old one is still
@@ -150,7 +151,9 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
         super.init()
         queue.setSpecific(key: Self.queueKey, value: ())
         watchDeviceList()
-        install()
+        // NOT install() - see `start()`. A camera already approved in an earlier session is found
+        // right here and the card simply reads "ready"; nothing is asked of macOS.
+        refreshFromDeviceList(fallback: .notSetUp)
     }
 
     deinit {
@@ -158,39 +161,6 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     }
 
     // MARK: - Installing the camera (ONCE, because the card exists)
-
-    /// Ask macOS for the camera. Runs when the card is created — adding a Virtual Camera
-    /// output IS the request for one — and never again for the life of this output.
-    ///
-    /// It used to run on every toggle-on, and that was the whole disease: each call submits
-    /// an activation request, and a request that replaces the staged extension tears its
-    /// process down and relaunches it, which unpublishes the device for a moment. The lookup
-    /// running beside it then failed and wrote "camera not found" about a camera that exists.
-    private func install() {
-        installer.activateOnce { [weak self] result in
-            guard let self else { return }
-            switch result {
-            case .installed:
-                // Approved and staged. The device usually appears within a second, and the
-                // list watcher below is what notices; do not call that gap an error — but do
-                // not let it last for ever either. See `expectDeviceShortly`.
-                self.refreshFromDeviceList(fallback: .starting)
-                self.expectDeviceShortly()
-            case .needsApproval:
-                self.setStage(.awaitingApproval)
-            case .notInApplications:
-                self.setStage(.needsInstall("Move Airlive Bridge to /Applications — macOS only loads a camera extension from there."))
-            case .afterRestart:
-                self.lock.lock(); self.pendingRestart = true; self.lock.unlock()
-                // Still refresh: the OLD extension is running and usable, so the operator can
-                // keep working — the latched message above is what stops that from reading as
-                // "everything is fine".
-                self.refreshFromDeviceList(fallback: .starting)
-            case .failed(let why):
-                self.setStage(.needsInstall(why))
-            }
-        }
-    }
 
     /// "Staged and enabled" is not the same as "running", and macOS will tell you the first
     /// while the second is false.
@@ -298,6 +268,30 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
 
     func start() {
         lock.lock(); _isLive = true; lock.unlock()
+        // ASK MACOS HERE, on the first switch-on, and never merely because the card exists.
+        //
+        // Installing a camera extension makes macOS demand an approval in System Settings. Doing
+        // that the moment the card is created would put a security prompt in front of someone who
+        // has just opened the app for the first time and asked for nothing - and a prompt nobody
+        // understands is a prompt people decline. Switching the output on IS the request; that is
+        // also where OBS puts it. `activateOnce` still guarantees one request per app session, so
+        // a toggle worked back and forth cannot churn the extension.
+        installer.activateOnce { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .installed:
+                self.refreshFromDeviceList(fallback: .starting)
+                self.expectDeviceShortly()
+            case .needsApproval:
+                self.setStage(.awaitingApproval)
+            case .notInApplications:
+                self.setStage(.needsInstall("Move Airlive Bridge to /Applications - macOS only loads a camera extension from there."))
+            case .afterRestart:
+                self.setStage(.needsInstall("Restart the Mac to finish installing the virtual camera."))
+            case .failed(let why):
+                self.setStage(.needsInstall(why))
+            }
+        }
         openSink()
     }
 
