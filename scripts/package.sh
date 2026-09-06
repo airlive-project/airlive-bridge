@@ -203,4 +203,19 @@ elif [ -n "${DEVELOPER_ID_APP:-}" ]; then
   echo "   other Macs. Set NOTARY_PROFILE to notarize."
 fi
 
+# The website's download button points at the LATEST release's asset under a STABLE name,
+# not the versioned one - so a release that ships only Airlive-Bridge-X.Y.Z.dmg makes that
+# button 404 while the appcast keeps working perfectly. It is invisible from here: updates
+# reach existing users, only NEW downloads break. It has now happened twice, both times
+# because the copy was a step in a document instead of a file on disk. Make it a file.
+STABLE_DMG="$BUILD_DIR/Airlive-Bridge.dmg"
+if [ -f "$DMG" ]; then
+  cp "$DMG" "$STABLE_DMG"
+  echo ""
+  echo "▶︎ UPLOAD BOTH FILES TO THE RELEASE - the second one is the website's download link:"
+  echo "     $DMG"
+  echo "     $STABLE_DMG"
+  echo "   gh release create vX.Y.Z \"$DMG\" \"$STABLE_DMG\" --title ... --notes ..."
+fi
+
 echo "Done."
