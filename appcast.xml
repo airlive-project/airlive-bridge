@@ -35,6 +35,17 @@
     <description>Most recent updates to Airlive Bridge</description>
     <language>en</language>
     <item>
+      <title>Airlive Bridge 1.2.0</title>
+      <pubDate>Sat, 06 Sep 2026 08:20:00 +0000</pubDate>
+      <sparkle:version>15</sparkle:version>
+      <sparkle:shortVersionString>1.2.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <enclosure
+        url="https://github.com/airlive-project/airlive-bridge/releases/download/v1.2.0/Airlive-Bridge-1.2.0.dmg"
+        length="11323830"  type="application/octet-stream"
+        sparkle:edSignature="SNyYgnDi98HMKSqNaWcPI7mdDkPDWmgzQLRqsyjLzwwqPAmu8vNulCX+dU/vc3Vpo9mwiojqS+tGYtkGG2tqDg==" />
+    </item>
+    <item>
       <title>Airlive Bridge 1.1.1</title>
       <pubDate>Fri, 05 Sep 2026 16:30:00 +0000</pubDate>
       <sparkle:version>14</sparkle:version>
