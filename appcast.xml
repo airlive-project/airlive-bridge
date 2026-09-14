@@ -35,6 +35,18 @@
     <description>Most recent updates to Airlive Bridge</description>
     <language>en</language>
     <item>
+      <title>Airlive Bridge 1.3.0</title>
+      <pubDate>Mon, 15 Sep 2026 01:50:00 +0000</pubDate>
+      <sparkle:version>16</sparkle:version>
+      <sparkle:shortVersionString>1.3.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[The latency buffer is now one setting for the whole Bridge, in the footer of the channel list, and every channel follows it. A lock keeps it from being nudged during a service, and a 60 ms step joins the ladder between unbuffered and the 120 ms default.]]></description>
+      <enclosure
+        url="https://github.com/airlive-project/airlive-bridge/releases/download/v1.3.0/Airlive-Bridge-1.3.0.dmg"
+        length="11324250"  type="application/octet-stream"
+        sparkle:edSignature="tI9HqfbH8KcmKft2I4xtpvMZwSpTwZOr1Y1w2HztrKDqV/L3bGBd27t1xyAzWmui8AUn2mgDTEL//EImcsVUCg==" />
+    </item>
+    <item>
       <title>Airlive Bridge 1.2.0</title>
       <pubDate>Sat, 06 Sep 2026 08:20:00 +0000</pubDate>
       <sparkle:version>15</sparkle:version>
