@@ -133,12 +133,12 @@ struct CameraControlPanel: View {
         Self.wbPresets.first { abs($0.temp - temp) < 1 }?.tint
     }
 
-    /// Camera COMMANDS need a live, permitted control link.  Output delay does not — it is
-    /// this Mac's own jitter buffer for this channel, and nothing about it travels to the
-    /// phone.  Keeping the two apart matters: the whole panel used to be disabled together,
-    /// so an operator who had set a delay lost the ability to change it the moment the phone
-    /// withdrew remote control or simply dropped — a saved setting with no way back, the same
-    /// trap the shortcuts switch fell into.
+    /// Camera COMMANDS need a live, permitted control link: they travel to the phone, so without
+    /// the link there is nothing to send them to.  This gate covers the commands and nothing else -
+    /// the Mac's OWN settings must never be locked away by the phone's state.  That is why the
+    /// latency buffer now lives in the channel rail's footer instead of here: an operator whose
+    /// phone dropped kept a jitter buffer they could no longer change, a saved setting with no way
+    /// back, the same trap the shortcuts switch fell into.
     private var cameraControlAvailable: Bool {
         channel.remoteControlConnected && channel.remoteControlAllowed
     }
@@ -153,11 +153,10 @@ struct CameraControlPanel: View {
                     .disabled(!cameraControlAvailable)
                     .opacity(cameraControlAvailable ? 1.0 : 0.4)
             }
-            // Outside the gate above, and outside the `remote == nil` branch: always reachable.
-            HStack(alignment: .top, spacing: Spacing.md) {
-                delaySection.frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-            .fixedSize(horizontal: false, vertical: true)
+            // The latency buffer USED to sit here, as a segmented bar. It moved to the channel
+            // rail's footer (LatencyBufferFooter), behind a lock: it is a set-once transport
+            // setting, not a thing an operator adjusts while directing, and a full-width bar in
+            // the control panel invited exactly the mid-show mis-click it should never allow.
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear { seed(from: channel.remote) }
@@ -201,8 +200,8 @@ struct CameraControlPanel: View {
             // same recipe as the Focus/Look row above, so the two bottoms line up exactly.
             // Stabilization shows only when the camera supports it (it affects the pictured video).
             // fps / resolution were removed — they only change the phone's LOCAL recording master,
-            // never the fixed 1080p/30 monitoring wire.  Output delay used to share this row; it
-            // now sits below, outside the camera-control gate — see `cameraControlAvailable`.
+            // never the fixed 1080p/30 monitoring wire.  Output delay used to share this row; it is
+            // now the Bridge-wide latency buffer in the channel rail's footer (LatencyBufferFooter).
             if hasStabilization {
                 HStack(alignment: .top, spacing: Spacing.md) {
                     stabilizationSection.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -423,47 +422,6 @@ struct CameraControlPanel: View {
 
     // MARK: Output delay (jitter-buffer latency) — per channel, in BOTH modes
 
-    /// This channel's playout latency (jitter buffer).  A receiver-side Bridge setting, so
-    /// it lives with camera control and shows in Solo AND Multiview.  (A precise ms field is
-    /// roadmapped alongside these presets — see ROADMAP.md.)
-    private var delaySection: some View {
-        // The explainer lives behind the header ⓘ, not in a caption under the bar: a caption made
-        // this card taller than Stabilization beside it, and the honest "+0 isn't zero" story needs
-        // more room than one line anyway.
-        ControlSection(title: "Output delay (ms)", info: Self.delayInfo, fillHeight: true) {
-            SegmentedBar(
-                selection: Binding(
-                    get: { channel.delay },
-                    set: { channel.delay = $0 }
-                ),
-                options: LatencyPreset.allCases,
-                label: { delayShortLabel($0) }
-            )
-        }
-    }
-
-    /// Why "+0" is not "zero", and what buying delay actually buys.  Kept honest — the numbers are
-    /// the buffer ADDED on top of the pipeline's own unavoidable latency (see LatencyPreset).
-    private static let delayInfo = """
-        Buffer added on top of the delay the pipeline already has.
-
-        Unbuffered +0 is not zero delay — it is the least the capture → encode → network → \
-        decode path can physically deliver. It simply adds nothing of its own.
-
-        Each step up adds a jitter buffer: frames are held briefly so a network hiccup is \
-        absorbed instead of reaching air. The picture runs steadier the higher you go, and \
-        arrives that much later.
-        """
-
-    private func delayShortLabel(_ preset: LatencyPreset) -> String {
-        switch preset {
-        case .lowest: return "Unbuffered +0"
-        case .normal: return "Normal +120"
-        case .smooth: return "Smooth +200"
-        case .safe:   return "Safe +400"
-        }
-    }
-
     // Delivery mode (Video+Control / Control-only) lived here — REMOVED: standalone control-only
     // is a duplicate of the dedicated "Screen Mirroring + Remote Control" channel type (which
     // pairs AirPlay video + ARLV control), so it only confused the panel.  Use that channel for
@@ -598,9 +556,9 @@ private struct ControlPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
-            // The gate lives INSIDE the panel now: it covers the camera commands and leaves
-            // Output delay — this Mac's own buffer — always adjustable.  Disabling from out
-            // here could only ever disable everything, including the way back.
+            // The gate lives INSIDE the panel, on the camera commands themselves.  Disabling from
+            // out here could only ever disable everything at once, which is how the operator used
+            // to lose the settings that are this Mac's own and were never the phone's to gate.
             CameraControlPanel(channel: c)
                 .id(c.id)   // reset the panel's local @State when the controlled channel changes
             if c.remoteControlConnected && !c.remoteControlAllowed { remoteControlDisabledNote }

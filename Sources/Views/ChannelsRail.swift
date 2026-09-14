@@ -44,7 +44,8 @@ struct ChannelsRail: View {
             header
             list
                 .frame(maxHeight: .infinity)
-            SecurityFooter(model: model)   // ONE global password for the Bridge
+            LatencyBufferFooter(model: model)   // ONE jitter buffer for every channel, behind a lock
+            SecurityFooter(model: model)        // ONE global password for the Bridge
         }
     }
 
@@ -522,6 +523,121 @@ private struct ChannelSettingsView: View {
 /// IS turning auth on (it gates every channel); no password = open.  No toggle,
 /// no explanatory blurb — just the button, which opens a small sheet to enter /
 /// remove the password.  ACCESS control, not encryption (HMAC challenge; the
+
+// MARK: - Latency buffer footer
+
+/// The Bridge's playout latency buffer - every channel, not the selected one - behind a lock.
+///
+/// It was a full-width segmented bar in the camera control panel, where every rung sat one click
+/// away at all times. Wrong shape for what this is: a transport setting picked once for a room and
+/// then left alone. A bar invites the mid-show mis-click, and it spent a whole card on a decision
+/// nobody revisits.
+///
+/// The list is the app's shared `Dropdown`, and that is the whole point of this file's second
+/// rewrite. A hand-rolled overlay here renders inside the RAIL's layer, which the centre pane paints
+/// over, so anything wider than the rail was simply cut in half - and it knew nothing about the
+/// window edges, so it had no idea which way to open. `Dropdown` mounts its list at the window root
+/// (`DropdownOverlay`), clamps to the window on both axes and flips above the trigger by itself, so
+/// a footer control needs no special handling at all.
+private struct LatencyBufferFooter: View {
+    @ObservedObject var model: BridgeModel
+
+    /// OPEN by default, and REMEMBERED: a lock that forgets on relaunch is not protection, it is a
+    /// gesture. Fastened before a service, it is still fastened when the Mac is switched on for the
+    /// next one.
+    ///
+    /// It never moves on its own either. A previous version cleared it whenever the selected channel
+    /// changed, so it appeared to fasten and release itself while the operator merely clicked around
+    /// the rail - a control that changes state unasked is one nobody trusts, whatever it guards.
+    @AppStorage("bridge.latencyBufferLocked") private var locked = false
+
+    /// Honest about what the numbers are: the "+0 is not zero" paragraph is the reason this exists.
+    private static let info = """
+        Buffer added on top of the delay the pipeline already has.
+
+        Unbuffered +0 is not zero delay. It is the least the capture, encode, network and decode \
+        path can physically deliver. It simply adds nothing of its own.
+
+        Each step up holds frames a little longer, so a network hiccup is absorbed instead of \
+        reaching air. The picture runs steadier the higher you go, and arrives that much later.
+
+        It buffers the camera channels, which are the ones that cross the network. A screen \
+        mirroring source and a capture card arrive by other routes and are unaffected; line \
+        those up with a channel's own Additional delay.
+        """
+
+    var body: some View {
+        HStack(spacing: Spacing.sm) {
+            // Same weight and colour as the password row below: these two are a pair of quiet
+            // footer settings, and a white label here would make one shout over the other.
+            // No "(ms)" here: a unit in brackets on a label is a unit that has not been put where
+            // it belongs, which is beside the figure. It rides with the number now.
+            Text("Latency buffer")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(Theme.textSecondary)
+                .lineLimit(1)
+                .fixedSize()              // never wrap to two lines and double the row's height
+            InfoDot(text: Self.info)
+            Spacer(minLength: Spacing.sm)
+
+            // ONLY the picker dims. The lock guards the VALUE, so only the value should look
+            // guarded - greying the label and the ⓘ would say the whole row is out of reach, when
+            // reading what the setting means is exactly what stays allowed.
+            // Sized by its own content now, so "400 ms" cannot be clipped by a number I guessed.
+            picker
+                .opacity(locked ? 0.4 : 1)
+                .disabled(locked)
+
+            Button { locked.toggle() } label: {
+                Image(systemName: locked ? "lock.fill" : "lock.open")
+                    .font(.system(size: 12))
+                    .foregroundColor(Theme.textSecondary)
+                    .frame(width: 16)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(locked ? "Unlock to change" : "Lock so it can't be changed by accident")
+        }
+        .padding(.horizontal, Spacing.md)
+        .frame(height: 44)
+        .background(Theme.bgPanel)
+        .overlay(Rectangle().frame(height: 1).foregroundColor(Theme.stroke), alignment: .top)
+    }
+
+    /// The row shows the NUMBER; the names and their consequences live in the list.
+    private var picker: some View {
+        MenuButton(rows: {
+            LatencyPreset.allCases.map { preset in
+                DropdownRow(id: preset.name,
+                            label: preset.name,
+                            isSelected: preset == model.latencyBuffer,
+                            value: preset.ms,
+                            unit: "ms",
+                            action: { model.latencyBuffer = preset })
+            }
+        }) {
+            HStack(spacing: 5) {
+                Text(model.latencyBuffer.ms)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(Theme.textPrimary)
+                Text("ms")
+                    .font(.system(size: 10))
+                    .foregroundColor(Theme.textFaint)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(Theme.textSecondary)
+            }
+            .padding(.horizontal, Spacing.sm)
+            .frame(height: 26)
+            .background(RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+                            .fill(Theme.bgSelected))
+            .overlay(RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+                        .stroke(Theme.strokeDivider, lineWidth: 1))
+            .contentShape(Rectangle())
+        }
+    }
+}
+
 /// password is never sent).
 private struct SecurityFooter: View {
     @ObservedObject var model: BridgeModel
@@ -531,7 +647,12 @@ private struct SecurityFooter: View {
     var body: some View {
         Button { draft = ""; showSheet = true } label: {
             HStack(spacing: Spacing.sm) {
-                Image(systemName: model.hasPassword ? "lock.fill" : "lock")
+                // A KEY, not a padlock.  The padlock now means one specific thing in this app -
+                // "this control is fastened, click to release it" - and a second padlock two rows
+                // down, meaning something else entirely, would teach the operator to distrust both.
+                // A key is the right second noun: it is the thing you HAND someone, which is exactly
+                // what this row sets up - the secret a camera must present to be let in.
+                Image(systemName: model.hasPassword ? "key.fill" : "key")
                     .font(.system(size: 12))
                     .foregroundColor(model.hasPassword ? Theme.accentBlue : Theme.textFaint)
                     .frame(width: 16)

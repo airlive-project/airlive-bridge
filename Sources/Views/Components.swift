@@ -11,9 +11,8 @@
 //
 //   • NO native NSSlider.  Manual values use `ParamStrip` (a bounded value tape you
 //     scrub), not a slider — no AppKit chrome to leak stray tick marks in dark mode.
-//   • EQUAL-width segments.  `SegmentedBar` lays its segments out with
-//     `frame(maxWidth: .infinity)` inside one HStack, so they share the row
-//     evenly and can never overflow it — the old `.segmented` Picker rendered
+//   • EQUAL-width segments in any row of choices: `frame(maxWidth: .infinity)` inside one HStack,
+//     so they share the row evenly and can never overflow it - the `.segmented` Picker rendered
 //     uneven, crooked widths.
 //
 // ─────────────────────────────────────────────────────────────────────────────
@@ -21,7 +20,6 @@
 //
 //   Card { … }                         rounded panel container
 //   SectionLabel(text:)                small uppercase muted caption (no rule)
-//   SegmentedBar(selection:options:)   equal-width segmented control
 //   ParamStrip(…)                      one control row: label · value · chips · slim scrub tape
 //   ControlSection(title:auto:…) { … } titled card grouping rows, one section-level AUTO
 //   QuickTile(title:subtitle:selected:action:)  card-style quick-select tile
@@ -182,70 +180,6 @@ struct SectionLabel: View {
             .tracking(1.0)
             .foregroundColor(Theme.textFaint)
             .fixedSize(horizontal: false, vertical: true)
-    }
-}
-
-// MARK: - Segmented bar (equal-width segments)
-
-/// A clean segmented control whose segments are EQUAL width and never overflow
-/// their row.  Each segment is `frame(maxWidth: .infinity)` inside one HStack on
-/// a tracked background, so the row divides evenly however many options it holds
-/// — no crooked, ragged widths.  Used for Tally and Output delay.
-///
-/// `Option` is anything `Hashable & Identifiable`; the caller supplies a label
-/// for each.  The selected segment gets the accent fill (per-option accent is
-/// supported so a Program segment can read red while Preview reads yellow).
-struct SegmentedBar<Option: Hashable & Identifiable>: View {
-    @Binding var selection: Option
-    let options: [Option]
-    let label: (Option) -> String
-    /// Per-segment accent for the selected fill; defaults to blue for every
-    /// option.  Pass a closure to colour Program red / Preview yellow.
-    var accent: (Option) -> Color = { _ in Theme.accentBlue }
-    var onChange: (Option) -> Void = { _ in }
-
-    var body: some View {
-        HStack(spacing: Spacing.xxs) {
-            ForEach(options) { option in
-                segment(option)
-            }
-        }
-        .padding(Spacing.xxs)
-        .background(
-            RoundedRectangle(cornerRadius: Radius.control + Spacing.xxs,
-                             style: .continuous)
-                .fill(Theme.bgApp)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: Radius.control + Spacing.xxs,
-                             style: .continuous)
-                .stroke(Theme.stroke, lineWidth: 1)
-        )
-    }
-
-    private func segment(_ option: Option) -> some View {
-        let isSelected = option == selection
-        let tint = accent(option)
-        return Button {
-            selection = option
-            onChange(option)
-        } label: {
-            Text(label(option))
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(isSelected ? .white : Theme.textSecondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-                .frame(maxWidth: .infinity)
-                .frame(height: ControlMetrics.segmentHeight)
-                .background(
-                    RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                        .fill(isSelected ? tint : Color.clear)
-                )
-                .contentShape(RoundedRectangle(cornerRadius: Radius.control,
-                                               style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .animation(.easeOut(duration: 0.12), value: isSelected)
     }
 }
 
@@ -599,13 +533,22 @@ struct InfoDot: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .popover(isPresented: $show, arrowEdge: .bottom) {
+        // TWO things were making this land crooked, and both are here:
+        //
+        // 1. The width was applied OUTSIDE the padding, so the text was laid out at 300 and the
+        //    popover then measured 300 + padding - AppKit sized the window from a number SwiftUI
+        //    had already stopped agreeing with, and the prose came out clipped or oddly wrapped.
+        //    Padding first, width last: now the frame is what the popover actually is.
+        // 2. `arrowEdge: .bottom` FORCED it below the dot. For anything near the window's bottom
+        //    edge - the whole point of a footer control - below is off the window. Without the
+        //    argument AppKit picks the side that fits, which is what it is good at.
+        .popover(isPresented: $show) {
             Text(text)
                 .font(.system(size: 12))
                 .foregroundColor(Theme.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(width: 300, alignment: .leading)
                 .padding(Spacing.md)
+                .frame(width: 300, alignment: .leading)
         }
     }
 }

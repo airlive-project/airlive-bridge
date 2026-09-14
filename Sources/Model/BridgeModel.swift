@@ -144,6 +144,21 @@ final class BridgeModel: ObservableObject {
         didSet { programBus.publish(feedMode: programFeedMode) }
     }
 
+    /// ONE playout buffer for the whole Bridge, not one per channel.
+    ///
+    /// It WAS per-channel, because it grew up inside the per-channel control panel - and that is a
+    /// setting nobody wants: the buffer answers "how rough is the network in this room", which is a
+    /// property of the room, not of a camera. Per-channel it also produced the trap of two cameras
+    /// cutting to air a tenth of a second apart with nothing on screen to explain why. Every channel
+    /// carries the value so the receivers keep their own simple per-channel plumbing; this is the
+    /// single place it is decided.
+    @Published var latencyBuffer: LatencyPreset = .normal {
+        didSet {
+            guard latencyBuffer != oldValue else { return }
+            channels.forEach { $0.delay = latencyBuffer }
+        }
+    }
+
     /// The only thread-safe view of the model the frame path is allowed to read — see
     /// ProgramBus.swift for why reading `programOutputs` directly is a crash.
     let programBus = ProgramBus()
@@ -734,7 +749,8 @@ final class BridgeModel: ObservableObject {
                     captureDeviceID: String? = nil,
                     name: String? = nil) -> BridgeChannel {
         let channel = BridgeChannel(name: name ?? defaultChannelName(kind: kind),
-                                    kind: kind, captureDeviceID: captureDeviceID)
+                                    kind: kind, captureDeviceID: captureDeviceID,
+                                    delay: latencyBuffer)   // one buffer for the whole Bridge
         wireConnectivity(channel)
         channels.append(channel)
         selectedID = channel.id
@@ -878,6 +894,21 @@ final class BridgeModel: ObservableObject {
             configureOutput(output)
             programOutputs.append(output)
         }
+        // The buffer is one setting for the Bridge, but it is STORED per channel (no schema change,
+        // old profiles keep loading). Adopt the first channel's value and level the rest to it: a
+        // profile written before this was global can hold five different numbers, and silently
+        // keeping them would reproduce the very trap this change removes.
+        // The second fan-out is NOT redundant with the didSet's: when the loaded value happens to
+        // equal the one already showing, the didSet guards itself out and this loop is what levels
+        // the remaining channels. A profile with no channels at all leaves nothing to adopt, so the
+        // buffer returns to its default rather than keeping a number from the previous profile.
+        if let first = channels.first?.delay {
+            latencyBuffer = first
+            channels.forEach { $0.delay = first }
+        } else {
+            latencyBuffer = .normal
+        }
+
         // A profile saved by an older build may still carry the retired "OBS Airlive Bridge"
         // relay. `makeOutput` drops it, and nothing puts it back: the program reaches OBS through
         // the virtual camera now, which cuts without a seam and needs no plugin at all.
@@ -1031,11 +1062,16 @@ final class BridgeModel: ObservableObject {
         // list would be indistinguishable, so suffix the restored one.
         var name = cfg.name
         if channels.contains(where: { $0.name == name }) { name += " (restored)" }
+        // The latency buffer comes from the BRIDGE, not from `cfg`: it is one setting for the
+        // whole desk, and `cfg` froze whatever it was when the channel was removed. Restoring the
+        // frozen number would put a channel back on air running to a different clock than its
+        // neighbours - the exact trap the buffer became global to remove. `extraDelayMs` below IS
+        // per channel (it lines one source up with another), so that one is restored as saved.
         let channel = BridgeChannel(
             id: cfg.id, name: name,
             kind: ChannelKind(rawValue: cfg.kind) ?? .airlive,
             captureDeviceID: cfg.captureDeviceID,
-            delay: LatencyPreset(rawValue: cfg.delayRaw) ?? .normal)
+            delay: latencyBuffer)
         channel.extraDelayMs = cfg.extraDelayMs
         channel.previewEnabled = cfg.previewEnabled
         wireConnectivity(channel)

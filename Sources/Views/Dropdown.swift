@@ -26,6 +26,11 @@ struct DropdownRow: Identifiable {
     var isSeparator: Bool = false
     var isDisabled: Bool = false
     var isSelected: Bool = false     // trailing check (value pickers)
+    /// Right-aligned quantity, kept SEPARATE from the label so the numbers form a column the eye
+    /// can run down. Folding it into the label ("Normal 120 ms") makes five ragged sentences.
+    var value: String? = nil
+    /// Unit for `value`, set small and quiet beside it - the number is the data, the unit is a note.
+    var unit: String? = nil
     var action: () -> Void = {}
 
     static func separator(_ id: String) -> DropdownRow { DropdownRow(id: id, isSeparator: true) }
@@ -44,6 +49,12 @@ final class DropdownPresenter: ObservableObject {
         var anchor: CGRect          // trigger frame in `.global` space
         var rows: [DropdownRow]
         var fitContent: Bool        // value picker → match the trigger width; command menu → fit content
+        /// Whether every row leaves room for the leading check.  It is a property of the LIST, not of
+        /// what happens to be selected right now: a value picker reserves the column even when the
+        /// current value is not among the rows (an unset HDMI display, a camera that has not yet
+        /// reported its stabilization mode), or the same picker would sit flush left on one opening
+        /// and 22 pt further right on the next.  Command menus - nothing to choose - reserve nothing.
+        var reservesCheck: Bool = false
     }
 
     @Published var active: Active? {
@@ -161,7 +172,8 @@ struct Dropdown: View {
     var body: some View {
         Button {
             guard isEnabled else { return }
-            presenter.toggle(.init(id: id, anchor: anchor, rows: rows, fitContent: false))
+            presenter.toggle(.init(id: id, anchor: anchor, rows: rows, fitContent: false,
+                                   reservesCheck: true))
         } label: {
             HStack(spacing: Spacing.xs) {
                 Text(displayText)
@@ -205,7 +217,13 @@ struct MenuButton<Label: View>: View {
     @State private var anchor: CGRect = .zero
 
     var body: some View {
-        Button { presenter.toggle(.init(id: id, anchor: anchor, rows: rows(), fitContent: true)) } label: {
+        Button {
+            // A command menu ("+ Add source") has nothing selected and keeps its rows flush left; a
+            // MenuButton used as a VALUE picker (the latency buffer) always has one, so it reserves.
+            let r = rows()
+            presenter.toggle(.init(id: id, anchor: anchor, rows: r, fitContent: true,
+                                   reservesCheck: r.contains { $0.isSelected }))
+        } label: {
             label()
         }
         .buttonStyle(.plain)
@@ -293,7 +311,7 @@ struct DropdownOverlay: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(spacing: 1) {
-                    ForEach(a.rows) { rowView($0) }
+                    ForEach(a.rows) { rowView($0, reserveCheck: a.reservesCheck) }
                 }
                 .padding(DropdownMetric.listPad)          // uniform on ALL sides
             }
@@ -308,7 +326,7 @@ struct DropdownOverlay: View {
         }
     }
 
-    @ViewBuilder private func rowView(_ r: DropdownRow) -> some View {
+    @ViewBuilder private func rowView(_ r: DropdownRow, reserveCheck: Bool) -> some View {
         if r.isSeparator {
             Divider().overlay(Theme.strokeDivider)
                 .padding(.horizontal, 6)
@@ -316,20 +334,39 @@ struct DropdownOverlay: View {
         } else {
             let isHov = (hovered == r.id || presenter.keyFocusID == r.id) && !r.isDisabled
             HStack(spacing: 8) {
+                // The check LEADS the row, and every row in a list that has one reserves its column,
+                // so the labels stay on one left edge instead of the selected one jumping inward.
+                if reserveCheck {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(r.isSelected ? Theme.textPrimary : .clear)
+                        .frame(width: 14)
+                }
+                // Not an `else`: a row can carry BOTH (a list of things to pick that also names each
+                // one with a symbol). The check owns its own column, the icon keeps its place after it.
                 if let icon = r.icon {
                     Image(systemName: icon)
                         .font(.system(size: 12))
                         .foregroundColor(r.isDisabled ? Theme.textFaint : Theme.textSecondary)
                         .frame(width: 16)
                 }
+                // NOT accent-coloured when selected.  The check and the row's own fill already say
+                // which one it is; colouring the text as well makes one row shout in a list whose
+                // whole job is to be read evenly.
                 Text(r.label)
-                    .font(.system(size: 12, weight: r.isSelected ? .semibold : .regular))
-                    .foregroundColor(r.isDisabled ? Theme.textFaint
-                                     : (r.isSelected ? Theme.accentBlue : Theme.textPrimary))
+                    .font(.system(size: 12, weight: r.isSelected ? .medium : .regular))
+                    .foregroundColor(r.isDisabled ? Theme.textFaint : Theme.textPrimary)
                     .lineLimit(1)
                 Spacer(minLength: 8)
-                if r.isSelected {
-                    Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).foregroundColor(Theme.accentBlue)
+                if let value = r.value {
+                    HStack(alignment: .firstTextBaseline, spacing: 3) {
+                        Text(value)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(r.isDisabled ? Theme.textFaint : Theme.textPrimary)
+                        if let unit = r.unit {
+                            Text(unit).font(.system(size: 10)).foregroundColor(Theme.textFaint)
+                        }
+                    }
                 }
             }
             .padding(.horizontal, 10)
