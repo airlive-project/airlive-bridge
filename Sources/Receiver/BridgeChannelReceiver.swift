@@ -372,14 +372,33 @@ final class BridgeChannelReceiver: ChannelReceiver {
         let tcp = NWProtocolTCP.Options()
         tcp.noDelay = true
         // Dead-peer detection: a phone POWERED OFF mid-stream (or walking out of Wi-Fi range) never
-        // sends a FIN, so without probes the committed connection stays "alive" FOREVER — the slot
+        // sends a FIN, so without probes the committed connection stays "alive" FOREVER - the slot
         // reads busy, the TXT advertises busy=1, and the returning phone can't reconnect to its own
-        // channel.  Keepalive reaps the dead peer in ~5+2×3 ≈ 11 s → handleDisconnect frees the slot
-        // + re-advertises busy=0.  (The OBS plugin tunes the same knobs on its side.)
+        // channel.  Keepalive reaps it and `handleDisconnect` frees the slot + re-advertises busy=0.
+        //
+        // The numbers were 5 + 2×3 ≈ 11 s, and that was wrong twice over (field, 2026-09-19):
+        //
+        //   • 11 s of silence is not proof of death.  Real Wi-Fi hands you multi-second gaps for
+        //     ordinary reasons - reassociation, a radio leaving power-save, an access point
+        //     buffering for a sleeping client - and we were killing live connections over them.
+        //   • OUR probes are what wake the PHONE's radio to answer.  The camera deliberately
+        //     widened its own probes to 30 s because Energy Log showed each one as a periodic
+        //     power spike; probing it every 2 s from here simply undid that work on someone
+        //     else's battery, which is not ours to spend.
+        //
+        // 10 + 10×3 ≈ 40 s: still well inside a service, five times gentler on the phone's radio.
+        // The cost is only the case nobody waits for - a phone carried away and never brought back
+        // holds its channel ~40 s instead of ~11 s.  The case that matters, a phone that drops and
+        // RETURNS, never waited on this timer at all: `accept`'s takeover evicts the stale
+        // connection after 3 s and admits the newcomer immediately (auth off).
         tcp.enableKeepalive = true
-        tcp.keepaliveIdle = 5      // seconds of silence before the first probe
-        tcp.keepaliveInterval = 2  // seconds between probes
-        tcp.keepaliveCount = 3     // unanswered probes → connection failed
+        tcp.keepaliveIdle = 10      // seconds of silence before the first probe
+        tcp.keepaliveInterval = 10  // seconds between probes (was 2 - see above)
+        tcp.keepaliveCount = 3      // unanswered probes → connection failed
+        // Ceiling on unacknowledged data, which keepalive does NOT cover: a peer that stops ACKing
+        // mid-send is dead just as surely as one that stops answering probes.  The camera has set
+        // this for a while; we never had it, so that failure had no bound here at all.
+        tcp.connectionDropTime = 30
         let params = NWParameters(tls: nil, tcp: tcp)
         // SO_REUSEADDR — a fresh launch re-binds cleanly past a TIME_WAIT socket.
         params.allowLocalEndpointReuse = true
@@ -409,6 +428,10 @@ final class BridgeChannelReceiver: ChannelReceiver {
                 break
             }
         }
+        // A fresh listener has no connection, so it publishes free - and `advertisedBusy` is set
+        // to match. Publishing one value while remembering another is exactly how a later
+        // `readvertise` (a rename, a reorder) resurrected a stale `busy=1` on a free channel.
+        advertisedBusy = false
         l.service = NWListener.Service(name: instanceName,
                                        type: "_airlive._tcp",
                                        txtRecord: txtRecord(occupied: false))
@@ -435,10 +458,23 @@ final class BridgeChannelReceiver: ChannelReceiver {
         return r
     }
 
-    /// Republish the service with a fresh TXT (busy flip / rename / dev change).
-    /// Same listener instance — only the advertised metadata changes.  On `queue`.
-    private func updateOccupancyAdvertisement(occupied: Bool) {
+    /// Make the advertised `busy` flag say what is actually true: is there a live connection.
+    ///
+    /// It used to be SET by the caller, and that is how it got stuck. `busy` is not a decision
+    /// anyone makes, it is an observation - `connection != nil` - so the one place that publishes
+    /// it derives it, and no caller can publish a flag that disagrees with reality. A channel
+    /// advertising `busy=1` with nobody connected is invisible to every phone on the network, and
+    /// nothing on the phone can cure it: the lie is on this side. Found in the field 2026-09-19,
+    /// with the listener holding zero connections and the TXT still saying occupied.
+    ///
+    /// Republishes ONLY on a real change. Re-registering the Bonjour record under a connected
+    /// iPhone churns its endpoint resolution and drops the socket (see `readvertise`), so a
+    /// redundant republish is not merely wasteful, it is the "one frame then reconnect" bug.
+    private func reconcileOccupancy() {
+        let occupied = (connection != nil)
+        guard occupied != advertisedBusy else { return }
         advertisedBusy = occupied
+        print("[BridgeReceiver \(src)] 📡 advertising busy=\(occupied ? 1 : 0)")
         listener?.service = NWListener.Service(name: instanceName,
                                                type: "_airlive._tcp",
                                                txtRecord: txtRecord(occupied: occupied))
@@ -452,14 +488,17 @@ final class BridgeChannelReceiver: ChannelReceiver {
     /// churns its endpoint resolution → it drops the socket → FIN → reconnect loop
     /// (the "one frame → reconnect" bug; Studio forbids this too — spec §7).  The
     /// updated `src` / `order` are stored, so they flush on the next legitimate
-    /// re-advertise: the `busy=0` flip in `updateOccupancyAdvertisement` at
-    /// disconnect.  The busy-flip path (commit/disconnect) is the ONLY sanctioned
+    /// re-advertise: the `busy=0` reconcile at disconnect.  The busy-flip path (commit/disconnect) is the ONLY sanctioned
     /// mid-lifecycle service mutation and stays out of this guard.
     private func readvertise() {
         guard connection == nil else { return }
+        // The guard above means there is no connection, so the channel is free BY DEFINITION.
+        // This used to republish a remembered flag instead, which is what carried a stale
+        // `busy=1` across a rename or a reorder and left the channel unreachable.
+        advertisedBusy = false
         listener?.service = NWListener.Service(name: instanceName,
                                                type: "_airlive._tcp",
-                                               txtRecord: txtRecord(occupied: advertisedBusy))
+                                               txtRecord: txtRecord(occupied: false))
     }
 
     // MARK: - Connection (one iPhone per channel; keep listening for reconnect)
@@ -473,7 +512,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
         //  • age ≥ 3 s — a happy-eyeballs sibling of the JUST-committed connection (the losing
         //    IPv4/IPv6 socket arrives ms later) must not evict its own winner;
         //  • auth OFF only — with auth ON an unauthenticated stranger could kick a legit camera
-        //    (DoS) without knowing the password; there the keepalive reap (~11 s) frees the slot.
+        //    (DoS) without knowing the password; there the keepalive reap (~40 s) frees the slot.
         if let held = connection {
             let ageNs = DispatchTime.now().uptimeNanoseconds - committedAtNs
             let heldLongEnough = ageNs > 3_000_000_000
@@ -570,11 +609,18 @@ final class BridgeChannelReceiver: ChannelReceiver {
     /// Tear the active stream down but KEEP the listener running — the channel
     /// stays advertised (busy=0) so the iPhone can reconnect.  On `queue`.
     private func handleDisconnect(_ conn: NWConnection, reason: String) {
-        guard connection === conn else { return }
+        guard connection === conn else {
+            // A straggler died - it is NOT the live connection, so none of the channel's state
+            // may be torn down here (that guard is why this early return exists). But the
+            // advertisement is not state, it is a statement about reality, so reconcile it on
+            // this path too. Returning without doing so is how the flag got stuck at 1.
+            reconcileOccupancy()
+            return
+        }
         print("[BridgeReceiver \(src)] 🔌 disconnect (\(reason)) — clearing frame, busy=0")
         connection = nil
         resetAuthState()                          // drop any pending challenge/buffer
-        updateOccupancyAdvertisement(occupied: false)
+        reconcileOccupancy()
         teardownDecodeSession()
         pixelBufferLock.lock()
         frameRing.removeAll(keepingCapacity: true)
@@ -700,7 +746,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
         authorized = true
         challengeNonce = nil
         cancelAuthStallTimer()
-        updateOccupancyAdvertisement(occupied: true)
+        reconcileOccupancy()
         publishConnected(true)
         // One-shot hello — FIRST control message of the connection (PROTOCOL-COMPAT-SPEC
         // §2: receiver sends hello immediately after accept/auth).  An old camera hits

@@ -283,7 +283,13 @@ struct CameraControlPanel: View {
                            auto: focusAuto, onExitAuto: exitFocusAuto) { v in
                     channel.send(.setFocusPosition(Float(v)))
                 }
-                ParamStrip(label: "Zoom", values: zoomLadder, value: $zoom, display: { String(format: "%.1f×", $0) },
+                // "Digital Zoom", not "Zoom": the camera captures from ONE physical lens at a time
+                // (ultra-wide, wide and telephoto are separate devices, and changing lens changes
+                // device), so this only crops the active sensor - no glass moves. The LENS tiles are
+                // the optical choice; naming this one honestly is what tells the two apart. It does
+                // not mean "degraded": on the 48 MP main sensor the 2x crop is native, not upscaled.
+                ParamStrip(label: "Digital Zoom", values: zoomLadder, value: $zoom,
+                           display: { String(format: "%.1f×", $0) },
                            auto: false) { v in
                     channel.send(.setZoom(Float(v)))
                 }
