@@ -49,6 +49,12 @@ final class DropdownPresenter: ObservableObject {
         var anchor: CGRect          // trigger frame in `.global` space
         var rows: [DropdownRow]
         var fitContent: Bool        // value picker → match the trigger width; command menu → fit content
+        /// A PANEL instead of a list: arbitrary content anchored and clamped by the same machinery.
+        /// It exists so a settings popup can live on this host too - `ContentView` mounts one
+        /// overlay for the whole app precisely so nothing has to fall back to the system popover
+        /// and its foreign chrome.
+        var panel: AnyView? = nil
+        var panelSize: CGSize = .zero
         /// Whether every row leaves room for the leading check.  It is a property of the LIST, not of
         /// what happens to be selected right now: a value picker reserves the column even when the
         /// current value is not among the rows (an unset HDMI display, a camera that has not yet
@@ -66,7 +72,11 @@ final class DropdownPresenter: ObservableObject {
             keyFocusID = active.flatMap { a -> String? in
                 a.rows.first(where: { $0.isSelected })?.id ?? Self.firstSelectable(a.rows)
             }
-            if oldValue == nil, active != nil { installKeyMonitor() }
+            // NEVER for a panel. The monitor swallows bare printable keys for type-ahead, which
+            // would eat every character typed into a field inside it - the list's most useful
+            // behaviour is the panel's worst.
+            let isList = active?.panel == nil
+            if oldValue == nil, active != nil, isList { installKeyMonitor() }
             if active == nil, oldValue != nil { removeKeyMonitor() }
         }
     }
@@ -233,7 +243,7 @@ struct MenuButton<Label: View>: View {
 }
 
 /// Tracks a trigger's on-screen rect so the overlay can anchor to it.
-private func anchorReader(_ anchor: Binding<CGRect>, id: UUID) -> some View {
+func anchorReader(_ anchor: Binding<CGRect>, id: UUID) -> some View {
     GeometryReader { g in
         Color.clear
             .onAppear { anchor.wrappedValue = g.frame(in: .global) }
@@ -266,9 +276,13 @@ struct DropdownOverlay: View {
                 let contentH = a.rows.reduce(CGFloat(0)) {
                     $0 + ($1.isSeparator ? DropdownMetric.separatorHeight : DropdownMetric.itemHeight)
                 }
-                let listH = min(contentH + DropdownMetric.listPad * 2 + CGFloat(max(a.rows.count - 1, 0)),
-                                DropdownMetric.maxListHeight)     // capped → the list scrolls past it
-                let w = max(a.fitContent ? listW : local.width, DropdownMetric.minWidth)
+                let listH = a.panel != nil
+                    ? a.panelSize.height
+                    : min(contentH + DropdownMetric.listPad * 2 + CGFloat(max(a.rows.count - 1, 0)),
+                          DropdownMetric.maxListHeight)     // capped → the list scrolls past it
+                let w = a.panel != nil
+                    ? a.panelSize.width
+                    : max(a.fitContent ? listW : local.width, DropdownMetric.minWidth)
                 let m = DropdownMetric.edgeMargin
 
                 // Clamp INSIDE the window on BOTH axes so the list never runs off an edge (was only
@@ -300,7 +314,16 @@ struct DropdownOverlay: View {
 
     /// Value pickers match the trigger width; command menus size to their content (with a floor).
     @ViewBuilder private func sizedList(_ a: DropdownPresenter.Active, local: CGRect) -> some View {
-        if a.fitContent {
+        if let panel = a.panel {
+            // Same chrome the list wears - surface, hairline, radius, shadow - so a panel reads as
+            // the same kind of floating thing and not as a second design.
+            panel
+                .frame(width: a.panelSize.width, height: a.panelSize.height)
+                .background(RoundedRectangle(cornerRadius: Radius.button, style: .continuous).fill(Theme.bgPanel))
+                .overlay(RoundedRectangle(cornerRadius: Radius.button, style: .continuous).stroke(Theme.strokeDivider, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: Radius.button, style: .continuous))
+                .shadow(color: .black.opacity(0.45), radius: 14, y: 6)
+        } else if a.fitContent {
             list(a).fixedSize(horizontal: true, vertical: false).frame(minWidth: DropdownMetric.minWidth, alignment: .leading)
         } else {
             list(a).frame(width: max(local.width, DropdownMetric.minWidth))

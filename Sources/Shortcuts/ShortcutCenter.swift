@@ -23,6 +23,14 @@ import Combine
 /// notifications on the main queue, the tap callback hops via main.async), so no
 /// `@MainActor` annotation is needed — and that keeps it constructible from the
 /// non-isolated `App.init`.
+/// A view that owns the keyboard while it is first responder.
+///
+/// `isTyping()` used to ask only whether the responder was a text field, which is a guess about
+/// the class rather than a question about intent. A custom key-handling view then had its digits
+/// eaten by the camera shortcuts before they ever arrived - the operator could delete but not
+/// type. Anything that takes raw key presses declares itself here instead.
+protocol KeyboardCapturing {}
+
 final class ShortcutCenter: ObservableObject {
     private let model: BridgeModel
     private let monitor = ShortcutMonitor()
@@ -196,7 +204,7 @@ final class ShortcutCenter: ObservableObject {
     /// into the field, not the switcher).
     private func isTyping() -> Bool {
         guard let responder = NSApp.keyWindow?.firstResponder else { return false }
-        return responder is NSText || responder is NSTextView
+        return responder is NSText || responder is NSTextView || responder is KeyboardCapturing
     }
 
     // MARK: - Re-arm (the reliability)

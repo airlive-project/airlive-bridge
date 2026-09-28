@@ -100,6 +100,9 @@ final class BridgeModel: ObservableObject {
     /// On (re)connect, re-assert tally so a rejoined camera's LED matches its bus again; on full
     /// disconnect, clear its stale tally border so a dead channel doesn't keep glowing red/green.
     private func handleConnectivityChange(_ channel: BridgeChannel) {
+        // Auto rotation first: if the camera ON AIR just died, every output is carrying its black
+        // right now, and sitting out the rest of the timer would broadcast that.
+        autoSwitcher.refresh()
         // Tally: re-assert to a (re)connected camera; clear a fully-disconnected one's border.
         if channel.anyConnected {
             if mode == .multiview { syncMultiviewTally(force: true) }
@@ -158,6 +161,10 @@ final class BridgeModel: ObservableObject {
             channels.forEach { $0.delay = latencyBuffer }
         }
     }
+
+    /// Timed camera rotation for an unattended desk (the AUTO button). Its own observable so its
+    /// once-a-second countdown repaints one button instead of the whole multiview.
+    lazy var autoSwitcher = AutoSwitcher(model: self)
 
     /// The only thread-safe view of the model the frame path is allowed to read — see
     /// ProgramBus.swift for why reading `programOutputs` directly is a crash.
@@ -265,7 +272,12 @@ final class BridgeModel: ObservableObject {
         // A delivery-mode flip (control-only ↔ video) on the ON-AIR camera changes its feed mode
         // without a connectivity edge — re-pick it so every output keeps carrying the program.
         channel.onVideoActiveChanged = { [weak self, weak channel] in
-            guard let self, let channel, channel.id == self.effectiveProgramID else { return }
+            guard let self, let channel else { return }
+            // Going Control-only takes the picture away as surely as a drop does, and auto's pool
+            // is "connected WITH video". Without this the rotation only noticed at its next cut,
+            // with the programme sitting on black until then if it was the camera on air.
+            self.autoSwitcher.refresh()
+            guard channel.id == self.effectiveProgramID else { return }
             self.applyFeedMode(self.computeFeedMode())
         }
         // Keyed by channel id (NOT stored in the grow-forever set): the entry dies
@@ -291,6 +303,7 @@ final class BridgeModel: ObservableObject {
     /// Covers the CUT button, the Space shortcut, and double-click hot-cut (all route through here).
     func take() {
         guard let p = previewID, channels.contains(where: { $0.id == p }) else { return }
+        autoSwitcher.operatorTookOver()   // a hand on the CUT button outranks the clock
         // Flip-flop like Studio's cutTransition: Preview → Program, and the OUTGOING
         // Program drops back into Preview (so you can cut straight back).  Suppress the
         // per-didSet tally so the swap emits ONE cue per camera, no red→off→green flash.
@@ -323,7 +336,15 @@ final class BridgeModel: ObservableObject {
     func cutDirect(_ index: Int) {
         let list = multiviewChannels
         guard index >= 0, index < list.count else { return }
+        autoSwitcher.operatorTookOver()   // picking a camera by hand is taking the desk back
         programID = list[index].id
+    }
+
+    /// The rotation's own cut. Deliberately NOT `cutDirect`, which would read as the operator
+    /// intervening and switch auto off on its own first tick.
+    func autoCut(to id: UUID) {
+        guard channels.contains(where: { $0.id == id }) else { return }
+        programID = id
     }
 
     /// ⇧+digit N (0-based): set the FOCUSED camera's lens to its Nth available
@@ -655,6 +676,7 @@ final class BridgeModel: ObservableObject {
     var hasPassword: Bool { BridgeKeychain.password(account: Self.authAccount) != nil }
 
     init() {
+        _ = autoSwitcher   // realise it here, on main, so its first touch can never be a race
         seedDefaultOutputs()
         routeProgram()   // the program bus runs from launch — empty program = continuous black
         if !restoreLastSession() {   // a previous session replaces the seeded defaults
@@ -753,6 +775,7 @@ final class BridgeModel: ObservableObject {
                                     delay: latencyBuffer)   // one buffer for the whole Bridge
         wireConnectivity(channel)
         channels.append(channel)
+        autoSwitcher.refresh()   // a new camera is a candidate from the next cut, no restart
         selectedID = channel.id
         if previewID == nil { previewID = channel.id }   // stage the first camera
         channel.start(order: channels.count - 1)   // first advert already carries the right ord
@@ -777,6 +800,7 @@ final class BridgeModel: ObservableObject {
             redo: { [weak self] in self?.removeChannel(id) })
         channels[index].stop()
         channels.remove(at: index)
+        autoSwitcher.refresh()                        // the pool shrank; auto re-reads it
         channelAutosaveSubs.removeValue(forKey: id)   // its autosave sub dies with it
         TallyStore.shared.clear(id)   // don't leak the channel's tally entry
 
@@ -836,6 +860,10 @@ final class BridgeModel: ObservableObject {
     /// slots (no live connection — the iPhone reconnects by the preserved id); outputs
     /// come back OFF (a restored output must not auto-publish).
     func applyProfile(_ profile: BridgeProfile) {
+        // Loading a profile replaces the whole setup, which is the operator's hands on the desk
+        // as surely as a CUT is. The rotation must not tick on across the swap and land its next
+        // cut in a channel list that changed underneath it.
+        autoSwitcher.operatorTookOver()
         clearUndoHistory()   // different world — old records reference dead channels
         // Silence the per-didSet tally broadcasts while the buses churn through the rebuild
         // (previewID/programID/mode/selectedID each fire on the way); we sync ONCE at the
@@ -925,11 +953,17 @@ final class BridgeModel: ObservableObject {
         // single-sync discipline).
         suppressTallySync = false
         if mode == .multiview { syncMultiviewTally() }
+        // And re-read the channel set. Without this the AUTO button stays dead after a restore
+        // until some unrelated event (a camera connecting, a channel added) happened to
+        // recompute it - the operator saw three channels, the condition plainly met, and a
+        // button that would not press.
+        autoSwitcher.refresh()
     }
 
     /// Reset to a first-launch setup: no channels, the full default output surface, OFF.
     /// (Menu "New Profile" — the caller confirms first when a show is built.)
     func newProfile() {
+        autoSwitcher.operatorTookOver()   // same as a profile load: the setup is being replaced
         clearUndoHistory()   // different world — old records reference dead channels
         suppressTallySync = true
         for channel in channels { channel.stop() }
@@ -944,6 +978,7 @@ final class BridgeModel: ObservableObject {
         suppressTallySync = false
         profileName = "Default"
         profileURL = nil
+        autoSwitcher.refresh()
     }
 
     // MARK: - Undo / Redo (⌘Z / ⇧⌘Z — config actions only)
@@ -1078,6 +1113,7 @@ final class BridgeModel: ObservableObject {
         let at = min(index ?? channels.count, channels.count)
         channels.insert(channel, at: at)
         channel.start(order: at)
+        autoSwitcher.refresh()   // undo put a channel back; the pool changed
         applyAuth(to: channel)
         if previewID == nil { previewID = channel.id }
         routeProgram()
