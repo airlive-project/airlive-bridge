@@ -2,7 +2,7 @@
 //
 // TWO columns so the window stays a normal height no matter how many channels exist
 // (a single stacked list overflowed the screen with no way to scroll):
-//   LEFT  — the fixed set: GENERAL switches, SWITCHER (Cut / Remove), LENSES (6).
+//   LEFT  — the fixed set: GENERAL switches, STREAM DECK, SWITCHER (Cut / Remove), LENSES (6).
 //   RIGHT — per-channel keys, ONE ROW per channel with BOTH bus chips side by side
 //           (PREVIEW = plain digit, PROGRAM = ⌘digit) — the two-bus switcher model
 //           reads as two columns, exactly like the buses themselves.
@@ -18,6 +18,7 @@ struct ShortcutSettings: View {
     @ObservedObject var shortcuts: ShortcutCenter
     @ObservedObject var bindings: ShortcutBindings
     @ObservedObject var model: BridgeModel
+    @ObservedObject var control: ControlServer
 
     /// One shared chip width — every key chip in the window sits on the same grid.
     private let chipWidth: CGFloat = 88
@@ -49,6 +50,14 @@ struct ShortcutSettings: View {
                       isOn: $shortcuts.global)
                 .disabled(!shortcuts.enabled)
             permissionWarning
+
+            // Independent of the keyboard switches above: turning keys off must not take the
+            // Stream Deck down with them.
+            sectionLabel("STREAM DECK").padding(.top, Spacing.md)
+            switchRow("Allow Stream Deck control",
+                      subtitle: "Apps on this Mac can switch cameras",
+                      isOn: $control.enabled)
+            controlWarning
 
             // Only the KEY-ASSIGNMENT sections grey out when shortcuts are off.  The
             // disable MUST NOT wrap the GENERAL rows above: it used to sit on the whole
@@ -157,6 +166,18 @@ struct ShortcutSettings: View {
             Toggle("", isOn: isOn)
                 .toggleStyle(.switch).controlSize(.small).tint(Theme.accentBlue)
                 .labelsHidden()
+        }
+    }
+
+    @ViewBuilder
+    private var controlWarning: some View {
+        if control.enabled, let failure = control.failure {
+            HStack(spacing: Spacing.sm) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11)).foregroundColor(Theme.accentYellow)
+                Text(failure)
+                    .font(.system(size: 12)).foregroundColor(Theme.accentYellow)
+            }
         }
     }
 

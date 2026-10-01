@@ -54,64 +54,8 @@ struct CameraControlPanel: View {
     private var caps: DeviceCapabilities { channel.remote?.capabilities ?? DeviceCapabilities() }
 
 
-    // ── Real camera ladders ──────────────────────────────────────────────────────────────────────
-    // Bridge mirrors the phone's OWN ISO / shutter ladders (AirliveCameraApp/VerticalParamPanel) so
-    // the operator only ever lands on a value the sensor actually offers — no invented `1/268`.  These
-    // are standard cinema stops filtered by the capability ranges the camera ALREADY sends, so they
-    // reproduce the phone's picker with NO new wire field.
-    private static let isoCinema: [Double] = [
-        32, 40, 50, 64, 80, 100, 125, 160, 200, 250, 320,
-        400, 500, 640, 800, 1000, 1250, 1600, 2000, 2500, 3200, 4000, 5000, 6400
-    ]
-    /// ISO 1/3-stop stops within [isoMin, isoMax], KEEPING the true endpoints so a max that falls
-    /// between cinema stops stays reachable (matches ISOPanel.stops).
-    private var isoLadder: [Double] {
-        let lo = Double(caps.isoMin).rounded(), hi = Double(caps.isoMax).rounded()
-        guard hi > lo + 0.5 else { return [lo] }
-        var s = Self.isoCinema.filter { $0 > lo + 0.5 && $0 < hi - 0.5 }
-        s.insert(lo, at: 0); s.append(hi)
-        return s
-    }
-
-    private static let shutterCinema: [Double] = [
-        24, 25, 30, 48, 50, 60, 100, 120, 180, 250, 500, 1000, 2000, 3000, 4000, 6000, 8000
-    ]
-    /// Shutter denominators = cinema stops ∪ fps-relative quick picks (1/fps, 1/2fps, 1/4fps, 1/50),
-    /// clamped to [max(minDenom, fps), maxDenom] — the slowest shutter can't exceed one frame, so the
-    /// floor is the current fps (matches ShutterPanel.stops; kills the invented `1/268`).
-    private var shutterLadder: [Double] {
-        let fps = Double(channel.remote?.fps ?? 30)
-        let lo = max(Double(caps.shutterMinDenom), fps)
-        let hi = Double(caps.shutterMaxDenom)
-        guard hi > lo else { return [lo] }
-        let quick: [Double] = [fps, 50, fps * 2, fps * 4]
-        let all = Set(Self.shutterCinema + quick).filter { $0 >= lo - 0.5 && $0 <= hi + 0.5 }
-        return all.isEmpty ? [lo] : all.sorted()
-    }
-
-    /// WB temperature — 100 K stops across the device envelope (matches WBPanel.stops).
-    private var tempLadder: [Double] {
-        let lo = Double(caps.wbTempMin), hi = Double(caps.wbTempMax)
-        guard hi > lo else { return [lo] }
-        return Array(stride(from: lo, through: hi, by: 100))
-    }
-    /// Tint — ±1 stops across the device envelope (matches TintPanel.stops).
-    private var tintLadder: [Double] {
-        let lo = Double(caps.wbTintMin), hi = Double(caps.wbTintMax)
-        guard hi > lo else { return [lo] }
-        return Array(stride(from: lo, through: hi, by: 1))
-    }
-    /// Focus — 0.000…1.000 in 0.01 steps (101 stops, matches FocusPanel.stops).
-    private static let focusLadder: [Double] = Array(stride(from: 0.0, through: 1.0, by: 0.01))
-    /// Zoom — up to THIS device's real max (`caps.zoomMax` = `videoMaxZoomFactor`); 0 from an older
-    /// camera → the 1–10 fallback.  0.1× steps to 10×, 0.5× above (zoom is CONTINUOUS on the phone —
-    /// any value is valid; the coarser high-end step just keeps a 100×+ ladder scrubbable).
-    private var zoomLadder: [Double] {
-        let maxZ = caps.zoomMax > 1 ? Double(caps.zoomMax) : 10.0
-        var out = Array(stride(from: 1.0, through: Swift.min(maxZ, 10.0), by: 0.1))
-        if maxZ > 10 { out += Array(stride(from: 10.5, through: maxZ, by: 0.5)) }
-        return out
-    }
+    /// The value ladders for THIS camera, shared with the Stream Deck dials (see CameraLadders).
+    private var ladders: CameraLadders { CameraLadders(channel.remote) }
 
     // ── Quick-pick presets (standard stops, clamped to the device's reachable range) ──────────────
     // Shown as CHIPS above each tape; a tap jumps the value there.  Same "standard values Bridge
@@ -234,11 +178,11 @@ struct CameraControlPanel: View {
                        onAuto: { on in exposureAuto = on; channel.send(.setExposureAuto(on)) },
                        accessory: AnyView(evControl), fillHeight: true) {
             VStack(spacing: Spacing.sm) {
-                ParamStrip(label: "ISO", values: isoLadder, value: $iso, display: { "\(Int($0))" },
+                ParamStrip(label: "ISO", values: ladders.iso, value: $iso, display: { "\(Int($0))" },
                            auto: exposureAuto, presets: isoPresets, onExitAuto: exitExposureAuto) { v in
                     channel.send(.setISO(Float(v)))
                 }
-                ParamStrip(label: "Shutter", values: shutterLadder, value: $shutterDenom, display: { "1/\(Int($0))" },
+                ParamStrip(label: "Shutter", values: ladders.shutter, value: $shutterDenom, display: { "1/\(Int($0))" },
                            auto: exposureAuto, presets: shutterPresets, onExitAuto: exitExposureAuto) { v in
                     channel.send(.setShutter(Float(v)))
                 }
@@ -251,7 +195,7 @@ struct CameraControlPanel: View {
                        onAuto: { on in whiteBalanceAuto = on; channel.send(.setWhiteBalanceAuto(on)) },
                        fillHeight: true) {
             VStack(spacing: Spacing.sm) {
-                ParamStrip(label: "Temperature", values: tempLadder, value: $wbKelvin, display: { "\(Int($0))K" },
+                ParamStrip(label: "Temperature", values: ladders.temperature, value: $wbKelvin, display: { "\(Int($0))K" },
                            auto: whiteBalanceAuto, presets: tempPresets,
                            onPresetTap: { temp in                       // phone sets BOTH temp + its paired tint
                                guard let t = wbTint(forTemp: temp) else { return }
@@ -265,7 +209,7 @@ struct CameraControlPanel: View {
                                return abs(wbKelvin - temp) < 50 && abs(tint - t) < 1
                            },
                            onExitAuto: exitWhiteBalanceAuto) { v in channel.send(.setWB(Float(v))) }
-                ParamStrip(label: "Tint", values: tintLadder, value: $tint,
+                ParamStrip(label: "Tint", values: ladders.tint, value: $tint,
                            display: { let i = Int($0); return i > 0 ? "+\(i)" : "\(i)" },
                            auto: whiteBalanceAuto, onExitAuto: exitWhiteBalanceAuto) { v in
                     channel.send(.setTint(Float(v)))
@@ -279,7 +223,7 @@ struct CameraControlPanel: View {
                        onAuto: { on in focusAuto = on; channel.send(.setFocusAuto(on)) },
                        fillHeight: true) {
             VStack(spacing: Spacing.sm) {
-                ParamStrip(label: "Focus", values: Self.focusLadder, value: $focus, display: { String(format: "%.3f", $0) },
+                ParamStrip(label: "Focus", values: ladders.focus, value: $focus, display: { String(format: "%.3f", $0) },
                            auto: focusAuto, onExitAuto: exitFocusAuto) { v in
                     channel.send(.setFocusPosition(Float(v)))
                 }
@@ -288,7 +232,7 @@ struct CameraControlPanel: View {
                 // device), so this only crops the active sensor - no glass moves. The LENS tiles are
                 // the optical choice; naming this one honestly is what tells the two apart. It does
                 // not mean "degraded": on the 48 MP main sensor the 2x crop is native, not upscaled.
-                ParamStrip(label: "Digital Zoom", values: zoomLadder, value: $zoom,
+                ParamStrip(label: "Digital Zoom", values: ladders.zoom, value: $zoom,
                            display: { String(format: "%.1f×", $0) },
                            auto: false) { v in
                     channel.send(.setZoom(Float(v)))

@@ -60,11 +60,16 @@ struct AirliveBridgeApp: App {
     /// Kept alive for the app's lifetime — Sparkle holds its delegate WEAKLY, and a gate that
     /// deallocates is a gate that silently stops gating.
     private let updateGate: UpdateGate
+    /// The local control channel (Stream Deck). A plain `let`, created in init, because it has to
+    /// be listening from launch - a `@StateObject` would only come up once a view first reads it,
+    /// which for the Shortcuts window is never, unless the operator opens it.
+    private let control: ControlServer
 
     init() {
         let m = BridgeModel()
         _model = StateObject(wrappedValue: m)
         _shortcuts = StateObject(wrappedValue: ShortcutCenter(model: m))
+        control = ControlServer(model: m)
         AppDelegate.model = m   // quit guard reads live-stream state from here
         // The gate is what stops an update prompt appearing — or installing — in the middle of
         // a service.  See UpdateGate.
@@ -164,7 +169,8 @@ struct AirliveBridgeApp: App {
 
         // The Shortcuts window itself (menu bar → Shortcuts → Customize Shortcuts…, ⌘K).
         Window("Shortcuts", id: shortcutsWindowID) {
-            ShortcutSettings(shortcuts: shortcuts, bindings: shortcuts.bindings, model: model)
+            ShortcutSettings(shortcuts: shortcuts, bindings: shortcuts.bindings, model: model,
+                             control: control)
                 .preferredColorScheme(.dark)
         }
         .windowResizability(.contentSize)
