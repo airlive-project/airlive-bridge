@@ -70,6 +70,16 @@ final class ControlServer: ObservableObject {
         let ws = NWProtocolWebSocket.Options()
         ws.autoReplyPing = true
         ws.maximumMessageSize = Self.maxMessageBytes
+        // Refuse web pages. Loopback keeps the LAN out but not the operator's own browser: any site
+        // they have open may open ws://127.0.0.1 from JavaScript, and the protocol is public. A
+        // browser ALWAYS sends Origin on a WebSocket handshake; the plugin's Node client never does
+        // (both checked 2026-10-03). So a handshake carrying Origin is a page, and it is turned away.
+        ws.setClientRequestHandler(.main) { _, headers in
+            let origin = headers.first { $0.name.caseInsensitiveCompare("Origin") == .orderedSame }
+            guard let origin else { return NWProtocolWebSocket.Response(status: .accept, subprotocol: nil) }
+            print("[Control] ⚠️ refused a web page (Origin: \(origin.value))")
+            return NWProtocolWebSocket.Response(status: .reject, subprotocol: nil)
+        }
         let params = NWParameters.tcp
         params.defaultProtocolStack.applicationProtocols.insert(ws, at: 0)
         params.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback),
@@ -219,18 +229,20 @@ final class ControlServer: ObservableObject {
             return
         }
         switch command.cmd {
+        // Positions are 1-based and checked here, not just range-checked downstream: `Int.min - 1`
+        // traps before any range check gets to look at it.
         case .preview:
-            guard let slot = command.slot else { return missing("slot", in: command) }
+            guard let slot = command.slot, slot >= 1 else { return missing("slot", in: command) }
             model.programSelect(slot - 1)
         case .program:
-            guard let slot = command.slot else { return missing("slot", in: command) }
+            guard let slot = command.slot, slot >= 1 else { return missing("slot", in: command) }
             model.cutDirect(slot - 1)
         case .cut:
             model.cutAction()
         case .auto:
             model.autoSwitcher.toggle()
         case .lens:
-            guard let lens = command.lens else { return missing("lens", in: command) }
+            guard let lens = command.lens, lens >= 1 else { return missing("lens", in: command) }
             model.lensSelect(lens - 1)
         case .adjust:
             guard let param = command.param else { return missing("param", in: command) }

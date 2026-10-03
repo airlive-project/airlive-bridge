@@ -124,7 +124,10 @@ final class CameraDials {
         let key = Key(channel: channel.id, param: param)
         let from = value(param, of: channel, snapshot)
         let index = Self.nearestIndex(of: from, in: ladder)
-        let to = ladder[min(max(index + steps, 0), ladder.count - 1)]
+        // Clamp the step BEFORE adding: `steps` arrives off the socket, and `index + Int.max` is a
+        // trap, not a big number - one bad message would take the whole Bridge down mid-show.
+        let step = min(max(steps, -ladder.count), ladder.count)
+        let to = ladder[min(max(index + step, 0), ladder.count - 1)]
         guard abs(to - from) > param.tolerance else { return true }   // at the end of the ladder
 
         let reported = Self.reported(param, snapshot)
