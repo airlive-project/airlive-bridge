@@ -35,6 +35,18 @@
     <description>Most recent updates to Airlive Bridge</description>
     <language>en</language>
     <item>
+      <title>Airlive Bridge 1.4.0</title>
+      <pubDate>Sat, 03 Oct 2026 10:30:00 +0000</pubDate>
+      <sparkle:version>18</sparkle:version>
+      <sparkle:shortVersionString>1.4.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[Auto Cut: a new AUTO button beside CUT switches between cameras that have a picture, holding each shot for a random time inside your range, and any manual cut hands control back to you. Bridge can also be driven from Stream Deck through the upcoming Airlive plugin. The top bar wraps to a second row on narrower windows instead of letting controls overlap.]]></description>
+      <enclosure
+        url="https://github.com/airlive-project/airlive-bridge/releases/download/v1.4.0/Airlive-Bridge-1.4.0.dmg"
+        length="11393066"  type="application/octet-stream"
+        sparkle:edSignature="OiUefWljmVZ61ITRacKtT0pKNmpdjtwnrNiroNK7HN0MlJx4WSjffDHaahMjUSEtszIGCSmvIoaDq45kV7x2CA==" />
+    </item>
+    <item>
       <title>Airlive Bridge 1.3.1</title>
       <pubDate>Sat, 19 Sep 2026 22:40:00 +0000</pubDate>
       <sparkle:version>17</sparkle:version>
