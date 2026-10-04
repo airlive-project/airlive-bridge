@@ -75,24 +75,29 @@ struct AutoSwitchButton: View {
 
 // MARK: - Settings panel
 
-/// The range, and nothing else. Two duration fields whose readout matches the countdown on the
-/// button, so what you set is what you read back there.
+/// The range, and nothing else, set by CLICKING. Each bound is an `MM:SS` timer with an arrow
+/// above and below every digit (operator's design, 2026-10-04): any value from 0:01 to 60:00 is a
+/// handful of clicks, where a single stepper needed hundreds to reach ten minutes.
+///
+/// No text entry, deliberately, and that is an operator decision (2026-10-04) after a live
+/// failure: 1.4.0 shipped a typed `M:SS` box that took the keyboard for itself, and on a long
+/// show the camera shortcuts stopped working altogether. A switcher's keyboard belongs to the
+/// switcher - Space and the digits must cut whatever panel is open - so this panel holds no
+/// keyboard focus at any moment.
 private struct AutoCutSettings: View {
     /// Read once and written on Apply - NOT observed. Observing it would rebuild the open panel on
     /// every tick of the countdown for a number the panel never shows.
     let auto: AutoSwitcher
     let close: () -> Void
 
-    static let size = CGSize(width: 330, height: 172)
+    /// Sized FROM the two timers: the panel is as wide as they are side by side, and the text wraps
+    /// to fit them rather than the panel stretching to fit the text.
+    static let size = CGSize(width: 2 * DigitTimer.width + Spacing.lg + 2 * Spacing.md, height: 256)
 
     @State private var lo: Int
     @State private var hi: Int
-    /// Which box has the keyboard, so the panel can ring it.
-    @State private var editing: Field?
-    private enum Field { case lo, hi }
 
-    /// Seeded here rather than in `onAppear`: the boxes are built with the stored range, instead
-    /// of first drawing `0:00` and being corrected a moment later.
+    /// Seeded here rather than in `onAppear`, so the panel draws the stored range from its first frame.
     init(auto: AutoSwitcher, close: @escaping () -> Void) {
         self.auto = auto
         self.close = close
@@ -100,11 +105,6 @@ private struct AutoCutSettings: View {
         _hi = State(initialValue: auto.maxSeconds)
     }
 
-    /// Checked live, and that is right for THIS field: every keystroke leaves a complete
-    /// duration behind (`0:06`, `1:00`, `6:00`), never a half-typed one, so there is no
-    /// unfinished state to be tactful about. Suppressing it while the box had focus meant the
-    /// warning never appeared at all - the operator sits in the field the whole time - and left
-    /// Apply looking pressable while it silently refused.
     private var orderWrong: Bool { hi < lo }
 
     var body: some View {
@@ -117,22 +117,22 @@ private struct AutoCutSettings: View {
                 .foregroundColor(Theme.textFaint)
                 .padding(.top, 4)
 
-            HStack(spacing: Spacing.sm) {
-                Text("Hold a camera")
-                    .font(.system(size: 12))
-                    .foregroundColor(Theme.textSecondary)
-                Spacer(minLength: Spacing.sm)
-                Text("from").font(.system(size: 11)).foregroundColor(Theme.textFaint)
-                field($lo, focus: .lo, bad: false)
-                Text("to").font(.system(size: 11)).foregroundColor(Theme.textFaint)
-                field($hi, focus: .hi, bad: orderWrong)
+            Text("Hold each camera between")
+                .font(.system(size: 12))
+                .foregroundColor(Theme.textSecondary)
+                .padding(.top, 14)
+
+            HStack(alignment: .top, spacing: Spacing.lg) {
+                bound("From", $lo, bad: false)
+                bound("To", $hi, bad: orderWrong)
             }
-            .padding(.top, 14)
+            .padding(.top, 10)
 
             Text(orderWrong ? "The second value cannot be smaller than the first."
                             : "A fresh random value inside the range before every cut.")
                 .font(.system(size: 11))
                 .foregroundColor(orderWrong ? Theme.accentRed : Theme.textFaint)
+                .fixedSize(horizontal: false, vertical: true)
                 .padding(.top, 8)
 
             Spacer(minLength: 0)
@@ -150,7 +150,6 @@ private struct AutoCutSettings: View {
                                     .fill(Theme.bgSelected.opacity(0.6)))
                     .overlay(RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
                                 .stroke(Theme.stroke, lineWidth: 1))
-                    .keyboardShortcut(.cancelAction)
                 Button("Apply") { apply() }
                     .buttonStyle(.plain)
                     .font(.system(size: 11))
@@ -160,7 +159,6 @@ private struct AutoCutSettings: View {
                                     .fill(Theme.accentBlue))
                     .opacity(orderWrong ? 0.35 : 1)
                     .disabled(orderWrong)
-                    .keyboardShortcut(.defaultAction)
             }
             .padding(.top, Spacing.sm)
         }
@@ -168,17 +166,12 @@ private struct AutoCutSettings: View {
         .frame(width: Self.size.width, height: Self.size.height, alignment: .topLeading)
     }
 
-    private func field(_ value: Binding<Int>, focus: Field, bad: Bool) -> some View {
-        DurationField(seconds: value,
-                      onFocusChange: { focused in editing = focused ? focus : (editing == focus ? nil : editing) },
-                      onSubmit: { apply() },
-                      onCancel: { close() })
-            .frame(width: 62, height: 26)
-            .background(RoundedRectangle(cornerRadius: Radius.button, style: .continuous).fill(Theme.bgSelected))
-            .overlay(RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
-                        .stroke(bad ? Theme.accentRed
-                                    : (editing == focus ? Theme.accentBlue : Theme.strokeDivider),
-                                lineWidth: 1))
+    /// One bound: the app's section label above its timer, the same pairing the side rails use.
+    private func bound(_ title: String, _ value: Binding<Int>, bad: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            SectionLabel(text: title)
+            DigitTimer(seconds: value, bad: bad)
+        }
     }
 
     private func apply() {
@@ -186,5 +179,100 @@ private struct AutoCutSettings: View {
         auto.minSeconds = lo
         auto.maxSeconds = hi
         close()
+    }
+}
+
+/// `MM:SS` with an arrow above and below each digit. A click moves that one digit up or down,
+/// wrapping inside its own range (minute tens 0-6, second tens 0-5, ones 0-9) without carrying, the
+/// way a digit wheel does; the result is then held inside 0:01-60:00. Plain buttons only - nothing
+/// here can take keyboard focus.
+///
+/// Built from the design system: the value face is the camera panel's readout (19 pt medium,
+/// tabular digits), the box is the dropdown trigger's surface, and the arrows stay faint until the
+/// pointer is on them, so the time reads first and the controls second.
+private struct DigitTimer: View {
+    @Binding var seconds: Int
+    let bad: Bool
+
+    /// Place value of each digit in seconds, and how many values it cycles through.
+    private static let digits: [(weight: Int, base: Int)] = [(600, 7), (60, 10), (10, 6), (1, 10)]
+    private static let face = Font.system(size: 19, weight: .medium).monospacedDigit()
+
+    var body: some View {
+        HStack(spacing: 0) {
+            column(0); column(1)
+            // The separator sits on the digit row, between the arrow rows, so it lines up with the
+            // numbers rather than with the middle of the whole column.
+            // Fixed width on the spacers too: a bare `Color.clear` is flexible and swallowed every
+            // spare point of the panel, stretching the box.
+            VStack(spacing: 0) {
+                Color.clear.frame(width: Self.colonWidth, height: Arrow.height)
+                Text(":")
+                    .font(Self.face)
+                    .foregroundColor(Theme.textSecondary)
+                    .frame(width: Self.colonWidth, height: Self.digitHeight)
+                    .offset(y: -1)
+                Color.clear.frame(width: Self.colonWidth, height: Arrow.height)
+            }
+            column(2); column(3)
+        }
+        .padding(.horizontal, Self.sidePadding)
+        .padding(.vertical, 2)
+        .background(RoundedRectangle(cornerRadius: Radius.button, style: .continuous).fill(Theme.bgSelected))
+        .overlay(RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+                    .stroke(bad ? Theme.accentRed : Theme.strokeDivider, lineWidth: 1))
+        .fixedSize()   // hug the digits, never stretch to the panel
+    }
+
+    private static let digitHeight: CGFloat = 24
+    private static let digitWidth: CGFloat = 18
+    private static let colonWidth: CGFloat = 10
+    private static let sidePadding: CGFloat = 6
+    /// The box's whole width - the settings panel sizes itself from it.
+    static let width = 4 * digitWidth + colonWidth + 2 * sidePadding
+
+    private func digit(_ i: Int) -> Int {
+        let d = Self.digits[i]
+        return (seconds / d.weight) % d.base
+    }
+
+    private func column(_ i: Int) -> some View {
+        VStack(spacing: 0) {
+            Arrow(up: true) { nudge(i, by: 1) }
+            Text("\(digit(i))")
+                .font(Self.face)
+                .foregroundColor(Theme.textPrimary)
+                .frame(width: Self.digitWidth, height: Self.digitHeight)
+            Arrow(up: false) { nudge(i, by: -1) }
+        }
+    }
+
+    private func nudge(_ i: Int, by delta: Int) {
+        let d = Self.digits[i]
+        let current = digit(i)
+        let next = (current + delta + d.base) % d.base
+        let value = seconds + (next - current) * d.weight
+        seconds = min(max(value, AutoSwitcher.minAllowed), AutoSwitcher.maxAllowed)
+    }
+
+    /// A small chevron that brightens and gets the hover surface under the pointer.
+    private struct Arrow: View {
+        static let height: CGFloat = 16
+        let up: Bool
+        let action: () -> Void
+        @State private var hovered = false
+
+        var body: some View {
+            Button(action: action) {
+                Image(systemName: up ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundColor(hovered ? Theme.textPrimary : Theme.textFaint)
+                    .frame(width: 18, height: Self.height)
+                    .background(RoundedRectangle(cornerRadius: 4).fill(hovered ? Theme.bgHover : .clear))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { hovered = $0 }
+        }
     }
 }

@@ -33,8 +33,7 @@ final class AutoSwitcher: ObservableObject {
     ///
     /// Whole, not fractional, and that is a decision rather than a shortcut: these are the bounds
     /// of a RANDOM draw, so a tenth of a second at the edge is unobservable - the hold that
-    /// actually happens is a random number in between either way. Sub-second precision would also
-    /// need a third segment in a `m:ss` field that is legible precisely because it has two.
+    /// actually happens is a random number in between either way.
     var minSeconds: Int {
         didSet { UserDefaults.standard.set(minSeconds, forKey: Keys.min) }
     }
@@ -43,8 +42,7 @@ final class AutoSwitcher: ObservableObject {
     }
 
     /// Bounds on the range. One second is the floor because below that a cut is a flicker, not a
-    /// shot. One hour is the ceiling: there is no scenario that wants longer, and an unbounded
-    /// field is a place for a typo to hide.
+    /// shot. One hour is the ceiling: there is no scenario that wants longer.
     static let minAllowed = 1
     static let maxAllowed = 3600
 

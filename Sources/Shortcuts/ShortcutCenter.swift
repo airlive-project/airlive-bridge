@@ -23,18 +23,11 @@ import Combine
 /// notifications on the main queue, the tap callback hops via main.async), so no
 /// `@MainActor` annotation is needed — and that keeps it constructible from the
 /// non-isolated `App.init`.
-/// A view that owns the keyboard while it is first responder.
-///
-/// `isTyping()` used to ask only whether the responder was a text field, which is a guess about
-/// the class rather than a question about intent. A custom key-handling view then had its digits
-/// eaten by the camera shortcuts before they ever arrived - the operator could delete but not
-/// type. Anything that takes raw key presses declares itself here instead.
-protocol KeyboardCapturing {}
-
 final class ShortcutCenter: ObservableObject {
     private let model: BridgeModel
     private let monitor = ShortcutMonitor()
     private var localMonitor: Any?
+    private var clickAwayMonitor: Any?
     private var watchdog: Timer?
 
     /// The reassignable binding table (exposed for the Settings UI).
@@ -72,7 +65,36 @@ final class ShortcutCenter: ObservableObject {
         self.showHints = (UserDefaults.standard.object(forKey: Keys.hints) as? Bool) ?? true
         monitor.onKeyDown = { [weak self] keycode, flags in self?.handleGlobal(keycode, flags) }
         wireReArm()
+        installClickAway()
         apply()
+    }
+
+    /// A click outside the field being edited ends the edit - anywhere in the app, not only in
+    /// the rails (operator decision, 2026-10-04; the Finder / Figma behaviour).
+    ///
+    /// While a text field holds the keyboard, Space and the digits go INTO it instead of cutting
+    /// (`isTyping`), which is right while someone is typing and a trap once they are not. The rails
+    /// released the field on an empty click, but a click on the multiview or the camera panel did
+    /// not: an operator who renamed a camera and clicked a thumbnail without pressing Return was
+    /// still "typing" - every shortcut silent, and Space and the digits landing in that camera's
+    /// name. Leaving a field already commits it (its focus-loss handler), so this changes nothing
+    /// about WHAT is saved, only that leaving happens wherever the click lands.
+    ///
+    /// It only observes: the click is never swallowed or altered, and nothing happens unless a
+    /// field is being edited. Independent of the shortcuts switch on purpose - a stuck field is
+    /// wrong whether or not the keys are bound.
+    private func installClickAway() {
+        clickAwayMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
+            guard let window = event.window,
+                  let editor = window.firstResponder as? NSTextView, editor.isFieldEditor,
+                  let content = window.contentView else { return event }
+            let hit = content.hitTest(content.convert(event.locationInWindow, from: nil))
+            // A click inside the field being edited is caret placement, not leaving it.
+            if let field = editor.delegate as? NSView, let hit,
+               hit === field || hit.isDescendant(of: field) { return event }
+            window.makeFirstResponder(nil)
+            return event   // the click itself still lands where it was aimed
+        }
     }
 
     /// Request Input Monitoring (user-initiated), then re-arm once it lands.
@@ -204,7 +226,7 @@ final class ShortcutCenter: ObservableObject {
     /// into the field, not the switcher).
     private func isTyping() -> Bool {
         guard let responder = NSApp.keyWindow?.firstResponder else { return false }
-        return responder is NSText || responder is NSTextView || responder is KeyboardCapturing
+        return responder is NSText || responder is NSTextView
     }
 
     // MARK: - Re-arm (the reliability)
