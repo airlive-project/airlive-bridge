@@ -1254,7 +1254,19 @@ final class BridgeChannelReceiver: ChannelReceiver {
             // baseline is preserved.  `frameRing` stays guarded by `pixelBufferLock`.
             queue.async { [weak self] in self?.promoteDue() }
         } else {
-            queue.asyncAfter(deadline: .now() + delay) { [weak self] in self?.promoteDue() }
+            // A STRICT one-shot timer, not `asyncAfter`. asyncAfter lets the system shift the
+            // wake-up to save power, and on air that moved frames by up to ±8 ms. Invisible in the
+            // Bridge's own window, which repaints whenever a frame lands - but the virtual camera
+            // re-times frames to its 11 ms pull grid and OBS samples at exactly 33.3 ms, so ±8 ms
+            // turned into repeated and dropped frames there. Measured 2026-10-05 on OBS's own
+            // recording of the camera: 22 repeated frames in 232 before this timer, 0 in 232 after.
+            let timer = DispatchSource.makeTimerSource(flags: .strict, queue: queue)
+            timer.schedule(deadline: .now() + delay, leeway: .nanoseconds(0))
+            timer.setEventHandler { [weak self] in
+                timer.cancel()   // one-shot; cancelling also releases this handler
+                self?.promoteDue()
+            }
+            timer.resume()
         }
     }
 

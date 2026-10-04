@@ -53,8 +53,17 @@ struct OutputsRail: View {
         VStack(spacing: 0) {
             header
             content
+                .frame(maxHeight: .infinity, alignment: .top)
+            if Self.showsRecordFooter {
+                RecordFooter(recorder: model.programRecorder)   // record the program to a file
+            }
         }
     }
+
+    /// Program recording works (ProgramRecorder, fed from the program tap) but is held back from
+    /// the UI while it is worked out as a feature of its own (operator, 2026-10-05). Flip this to
+    /// show the footer; nothing else changes.
+    private static let showsRecordFooter = false
 
     /// Focus mode strip: compact tags for the program outputs — LIVE ones red
     /// ("active") with white text, idle ones neutral + dimmed.  Mirrors the kind
@@ -745,5 +754,87 @@ private extension OutputKind {
         case .rtsp: return "rtsp://0.0.0.0:8554/live/cam"
         case .vcam: return "Publishes the program as a system camera"
         }
+    }
+}
+
+// MARK: - Record footer
+
+/// Pinned to the bottom of the Program Outputs rail, in the same footer shape as the Channels rail
+/// (44 pt, panel fill, hairline on top). Left: start / stop with the elapsed time. Right: the folder
+/// the takes go to. Records exactly what the program outputs are sent (see ProgramRecorder).
+private struct RecordFooter: View {
+    @ObservedObject var recorder: ProgramRecorder
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: Spacing.sm) {
+                Button { recorder.toggle() } label: {
+                    HStack(spacing: Spacing.sm) {
+                        // The icon appears only while a take is running: idle, the label alone says it.
+                        if let start = recorder.startedAt {
+                            Image(systemName: "stop.fill")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(Theme.accentRed)
+                                .frame(width: 16)
+                            TimelineView(.periodic(from: start, by: 1)) { context in
+                                Text("REC  " + Self.elapsed(from: start, to: context.date))
+                                    .font(.system(size: 12, weight: .medium).monospacedDigit())
+                                    .foregroundColor(Theme.accentRed)
+                            }
+                        } else {
+                            Text("Start Recording")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(Theme.textSecondary)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .frame(height: 28)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(recorder.isRecording ? "Stop recording" : "Record the program to a file")
+
+                Rectangle().fill(Theme.strokeDivider).frame(width: 1, height: 20)
+
+                Button(action: chooseFolder) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 12))
+                        .foregroundColor(Theme.textSecondary)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(recorder.isRecording)
+                .help("Recordings folder: \(recorder.folder.path)")
+            }
+            if let failure = recorder.failure {
+                Text(failure)
+                    .font(.system(size: 11))
+                    .foregroundColor(Theme.accentRed)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.horizontal, Spacing.md)
+        .padding(.vertical, 8)
+        .frame(minHeight: 44)
+        .background(Theme.bgPanel)
+        .overlay(Rectangle().frame(height: 1).foregroundColor(Theme.stroke), alignment: .top)
+    }
+
+    private func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = recorder.folder
+        panel.prompt = "Choose"
+        panel.message = "Where should program recordings be saved?"
+        if panel.runModal() == .OK, let url = panel.url { recorder.folder = url }
+    }
+
+    private static func elapsed(from start: Date, to now: Date) -> String {
+        let s = max(0, Int(now.timeIntervalSince(start)))
+        return String(format: "%d:%02d:%02d", s / 3600, (s / 60) % 60, s % 60)
     }
 }
