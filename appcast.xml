@@ -35,6 +35,18 @@
     <description>Most recent updates to Airlive Bridge</description>
     <language>en</language>
     <item>
+      <title>Airlive Bridge 1.4.1</title>
+      <pubDate>Sun, 04 Oct 2026 10:05:00 +0000</pubDate>
+      <sparkle:version>19</sparkle:version>
+      <sparkle:shortVersionString>1.4.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[Fixes shortcuts that could stop working after using Auto Cut: its settings no longer take the keyboard, and times are set with arrows on each digit. Clicking away from a text field now finishes the edit, so Space and the camera keys go back to switching.]]></description>
+      <enclosure
+        url="https://github.com/airlive-project/airlive-bridge/releases/download/v1.4.1/Airlive-Bridge-1.4.1.dmg"
+        length="11387897"  type="application/octet-stream"
+        sparkle:edSignature="aQUDVAVvy/tCW4FoGeILU2UoxEqFkifF9M0rKDecQ5Lp9cPOiEk9zKUfUcK7w+xRbluYEXdOARDksSPcafpjCA==" />
+    </item>
+    <item>
       <title>Airlive Bridge 1.4.0</title>
       <pubDate>Sat, 03 Oct 2026 10:30:00 +0000</pubDate>
       <sparkle:version>18</sparkle:version>
