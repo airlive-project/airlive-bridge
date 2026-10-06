@@ -35,6 +35,18 @@
     <description>Most recent updates to Airlive Bridge</description>
     <language>en</language>
     <item>
+      <title>Airlive Bridge 1.4.2</title>
+      <pubDate>Tue, 06 Oct 2026 09:00:00 +0000</pubDate>
+      <sparkle:version>20</sparkle:version>
+      <sparkle:shortVersionString>1.4.2</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[Smoother motion through the virtual camera and every program output: with a camera delay set, frames could leave a few milliseconds early or late, so apps reading the virtual camera sometimes showed the same frame twice. Frames now leave exactly on time.]]></description>
+      <enclosure
+        url="https://github.com/airlive-project/airlive-bridge/releases/download/v1.4.2/Airlive-Bridge-1.4.2.dmg"
+        length="11409696"  type="application/octet-stream"
+        sparkle:edSignature="/XaFWNp55qM0vFg/PFUxAOOBShUKSkkmdOUgmpTv+i5fhKAtW6e5qrLYXHE21j0vlW1WU8KyeTVvVIZXUOIqAg==" />
+    </item>
+    <item>
       <title>Airlive Bridge 1.4.1</title>
       <pubDate>Sun, 04 Oct 2026 10:05:00 +0000</pubDate>
       <sparkle:version>19</sparkle:version>
