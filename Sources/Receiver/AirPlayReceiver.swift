@@ -65,7 +65,9 @@ final class AirPlayReceiver: ChannelReceiver {
                 }
             }
             // Fixed additive delay (0 → immediate, the original zero-risk path).
-            if d <= 0 { deliver() } else { self.delayQueue.asyncAfter(deadline: .now() + d, execute: deliver) }
+            guard d > 0 else { return deliver() }
+            // Strict, like the camera playout (StrictTimer.swift).
+            self.delayQueue.strictAfter(d, execute: deliver)
         }
         // #12: the engine fires this (on a UxPlay network thread) when the mirror session drops —
         // the phone stopped mirroring or the connection reset.  Clear the channel's video state
