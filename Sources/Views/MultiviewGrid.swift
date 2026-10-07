@@ -292,6 +292,8 @@ private struct BigPane: View {
         .aspectRatio(16.0 / 9.0, contentMode: .fit)
         .frame(maxWidth: .infinity)
         .background(Color.black)
+        // The director's frame guide (Settings → Multiview) - on screen only, never in an output.
+        .overlay { if channel != nil { FrameGuideOverlay() } }
         .clipped()
         // Always selected (PVW green / PGM red) → 2px accent via the shared tile rule.
         .multiviewTile(accent: accent)
@@ -394,6 +396,8 @@ private struct ThumbCell: View {
     let isPreview: Bool
     let onStage: () -> Void
     let onTake: () -> Void
+    /// Settings → Multiview.
+    @AppStorage(SettingsDraft.previewClickCutsKey) private var previewClickCuts = true
 
     var body: some View {
         LivePane(channel: channel)
@@ -403,9 +407,17 @@ private struct ThumbCell: View {
             // Shared tile rule: 1px neutral seam, +2px accent when staged (green) / on air (red).
             .multiviewTile(accent: tileAccent)
             .contentShape(Rectangle())
-            .onTapGesture(count: 2) { onTake() }
-            .onTapGesture { onStage() }
-            .help(isProgram ? "On air" : "Click to stage in Preview · double-click to cut to Program")
+            // A click stages; a click on the camera ALREADY in Preview cuts it (operator,
+            // 2026-10-07) - the state decides, no timing. A double-click used to be the cut, and
+            // waiting to tell it from a single click made every click half a second late. A quick
+            // double-click still cuts (its second click lands on Preview). Off in Settings, every
+            // click only stages.
+            .onTapGesture {
+                if isPreview && previewClickCuts { onTake() } else { onStage() }
+            }
+            .help(isProgram ? "On air"
+                  : previewClickCuts ? "Click to stage in Preview · click again to cut to Program"
+                                     : "Click to stage in Preview")
     }
 
     private var tileAccent: Color? {

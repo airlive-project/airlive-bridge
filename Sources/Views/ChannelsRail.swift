@@ -549,22 +549,7 @@ private struct LatencyBufferFooter: View {
     /// It never moves on its own either. A previous version cleared it whenever the selected channel
     /// changed, so it appeared to fasten and release itself while the operator merely clicked around
     /// the rail - a control that changes state unasked is one nobody trusts, whatever it guards.
-    @AppStorage("bridge.latencyBufferLocked") private var locked = false
-
-    /// Honest about what the numbers are: the "+0 is not zero" paragraph is the reason this exists.
-    private static let info = """
-        Buffer added on top of the delay the pipeline already has.
-
-        Unbuffered +0 is not zero delay. It is the least the capture, encode, network and decode \
-        path can physically deliver. It simply adds nothing of its own.
-
-        Each step up holds frames a little longer, so a network hiccup is absorbed instead of \
-        reaching air. The picture runs steadier the higher you go, and arrives that much later.
-
-        It buffers the camera channels, which are the ones that cross the network. A screen \
-        mirroring source and a capture card arrive by other routes and are unaffected; line \
-        those up with a channel's own Additional delay.
-        """
+    @AppStorage(SettingsDraft.latencyLockKey) private var locked = false
 
     var body: some View {
         HStack(spacing: Spacing.sm) {
@@ -577,7 +562,7 @@ private struct LatencyBufferFooter: View {
                 .foregroundColor(Theme.textSecondary)
                 .lineLimit(1)
                 .fixedSize()              // never wrap to two lines and double the row's height
-            InfoDot(text: Self.info)
+            InfoDot(text: LatencyPreset.explainer)
             Spacer(minLength: Spacing.sm)
 
             // ONLY the picker dims. The lock guards the VALUE, so only the value should look
@@ -641,11 +626,11 @@ private struct LatencyBufferFooter: View {
 /// password is never sent).
 private struct SecurityFooter: View {
     @ObservedObject var model: BridgeModel
-    @State private var showSheet = false
-    @State private var draft = ""
 
     var body: some View {
-        Button { draft = ""; showSheet = true } label: {
+        // Opens Settings on Cameras, where the password lives - not a second, older password
+        // window of its own (operator, 2026-10-07: one place per setting).
+        Button { SettingsPresenter.shared.open(at: .cameras) } label: {
             HStack(spacing: Spacing.sm) {
                 // A KEY, not a padlock.  The padlock now means one specific thing in this app -
                 // "this control is fastened, click to release it" - and a second padlock two rows
@@ -675,17 +660,24 @@ private struct SecurityFooter: View {
         .buttonStyle(.plain)
         .background(Theme.bgPanel)
         .overlay(Rectangle().frame(height: 1).foregroundColor(Theme.stroke), alignment: .top)
-        .sheet(isPresented: $showSheet) { sheet }
     }
+}
 
-    private var sheet: some View {
+/// Set, change or remove the Bridge password (Settings → Cameras).
+struct PasswordSheet: View {
+    @ObservedObject var model: BridgeModel
+    @Binding var isPresented: Bool
+    @State private var draft = ""
+
+    var body: some View {
         VStack(alignment: .leading, spacing: Spacing.md) {
             Text(model.hasPassword ? "Change password" : "Set password")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
-            Text("Protects your Airlive Camera channels — the iPhone enters it to connect. Screen Mirroring and HDMI / USB sources aren’t gated by it.")
+            Text("Protects your Airlive Camera channels - the iPhone enters it to connect. Screen Mirroring and HDMI / USB sources aren’t gated by it.")
                 .font(.system(size: 11)).foregroundColor(Theme.textFaint)
                 .fixedSize(horizontal: false, vertical: true)
+            if camerasOnline > 0 { disconnectWarning }
             SecureField("Password", text: $draft)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
@@ -697,13 +689,13 @@ private struct SecurityFooter: View {
                 .onSubmit { commit() }
             HStack {
                 if model.hasPassword {
-                    Button("Remove") { model.setPassword(""); showSheet = false }
+                    Button("Remove") { model.setPassword(""); isPresented = false }
                         .buttonStyle(.plain)
                         .font(.system(size: 12, weight: .medium))
                         .foregroundColor(Theme.accentRed)
                 }
                 Spacer()
-                Button("Cancel") { showSheet = false }
+                Button("Cancel") { isPresented = false }
                     .buttonStyle(.plain)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(Theme.textSecondary)
@@ -719,11 +711,43 @@ private struct SecurityFooter: View {
         .background(Theme.bgPanel)
     }
 
+    /// Cameras a save would cut off right now: Airlive video channels and the control link of a
+    /// Screen Mirroring + Remote Control channel - the receivers the password gates.
+    private var camerasOnline: Int {
+        model.channels.filter { ($0.kind == .airlive && $0.isConnected) || $0.controlConnected }.count
+    }
+
+    /// Saving (or removing) the password drops every gated connection at once (`setPassword` →
+    /// `disconnectNow`), so during a show it takes the cameras off air. Said in red, before the
+    /// click, never after (operator, 2026-10-07).
+    private var disconnectWarning: some View {
+        HStack(alignment: .top, spacing: Spacing.sm) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 13))
+                .foregroundColor(Theme.accentRed)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(camerasOnline == 1 ? "1 camera will disconnect" : "\(camerasOnline) cameras will disconnect")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(Theme.textPrimary)
+                Text("Setting, changing or removing the password drops every connected camera at once.")
+                    .font(.system(size: 11))
+                    .foregroundColor(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(Spacing.sm)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+                        .fill(Theme.accentRed.opacity(0.12)))
+        .overlay(RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+                    .stroke(Theme.accentRed.opacity(0.45), lineWidth: 1))
+    }
+
     private func commit() {
         let pw = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !pw.isEmpty else { return }
         model.setPassword(pw)
         draft = ""
-        showSheet = false
+        isPresented = false
     }
 }

@@ -77,7 +77,10 @@ final class RTSPOutput: VideoOutput {
     /// under a typical MTU even though TCP wouldn't strictly require it.
     private let maxRTPPayload = 1400
 
-    init(label: String, port: UInt16 = 8554) {
+    /// The standard RTSP port; the first RTSP output takes it, the next ones count up from it.
+    static let defaultPort: UInt16 = 8554
+
+    init(label: String, port: UInt16 = RTSPOutput.defaultPort) {
         self._label = label
         self.port = port
     }

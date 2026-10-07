@@ -67,8 +67,9 @@ struct AirliveBridgeApp: App {
 
     init() {
         let m = BridgeModel()
+        let shortcutCenter = ShortcutCenter(model: m)
         _model = StateObject(wrappedValue: m)
-        _shortcuts = StateObject(wrappedValue: ShortcutCenter(model: m))
+        _shortcuts = StateObject(wrappedValue: shortcutCenter)
         control = ControlServer(model: m)
         AppDelegate.model = m   // quit guard reads live-stream state from here
         // The gate is what stops an update prompt appearing — or installing — in the middle of
@@ -78,6 +79,9 @@ struct AirliveBridgeApp: App {
         updaterController = SPUStandardUpdaterController(startingUpdater: true,
                                                         updaterDelegate: gate,
                                                         userDriverDelegate: nil)
+        // Settings opens from the Outputs rail's footer, as its own modal window.
+        SettingsPresenter.shared.dependencies = .init(model: m, shortcuts: shortcutCenter, control: control,
+                                                      updater: updaterController.updater)
     }
 
     var body: some Scene {
@@ -124,6 +128,10 @@ struct AirliveBridgeApp: App {
                         options: [NSApplication.AboutPanelOptionKey.version: ""])
                 }
             }
+            // No menu item and no key for Settings: it opens only from its row at the bottom of the
+            // Outputs rail (operator, 2026-10-07). Replacing the group with nothing keeps macOS from
+            // adding a stock "Settings…" item of its own.
+            CommandGroup(replacing: .appSettings) {}
             // "Check for Updates…" right under About — Sparkle's real updater:
             // downloads + verifies + installs in place, no website or browser.
             CommandGroup(after: .appInfo) {
@@ -135,7 +143,7 @@ struct AirliveBridgeApp: App {
                 // app that installed an extension may ask for its removal — so if this app
                 // does not offer it, "Airlive Bridge Virtual Camera" stays in every
                 // conferencing app's camera list for ever, with nothing left to feed it.
-                Button("Remove Virtual Camera…") { removeVirtualCamera() }
+                Button("Remove Virtual Camera…") { VirtualCameraRemoval.confirmAndRemove() }
             }
             // Our own Undo/Redo (⌘Z / ⇧⌘Z) — the model keeps a config-action history
             // (add/remove/reorder/rename of channels + outputs; never live switching).
@@ -168,7 +176,7 @@ struct AirliveBridgeApp: App {
         }
 
         // The Shortcuts window itself (menu bar → Shortcuts → Customize Shortcuts…, ⌘K).
-        Window("Shortcuts", id: shortcutsWindowID) {
+        Window("Shortcuts", id: ShortcutSettings.windowID) {
             ShortcutSettings(shortcuts: shortcuts, bindings: shortcuts.bindings, model: model,
                              control: control)
                 .preferredColorScheme(.dark)
@@ -206,51 +214,7 @@ struct AirliveBridgeApp: App {
         }
     }
 
-    // MARK: - Virtual camera (menu action)
-
-    /// Unstage the camera extension.  Destructive and easy to hit by accident from a menu, so
-    /// it asks first — and it says what actually happens afterwards, because macOS defers the
-    /// removal to the next restart and the camera keeps being listed until then.
-    private func removeVirtualCamera() {
-        let confirm = NSAlert()
-        confirm.messageText = "Remove the virtual camera from this Mac?"
-        confirm.informativeText = """
-        “\(kVCamDeviceName)” disappears from Zoom, Meet, Teams and every other app that lists \
-        cameras. Add a Virtual Camera output again to reinstall it — macOS will ask you to \
-        approve it once more.
-        """
-        confirm.alertStyle = .warning
-        confirm.addButton(withTitle: "Remove")
-        confirm.addButton(withTitle: "Cancel")
-        guard confirm.runModal() == .alertFirstButtonReturn else { return }
-
-        SystemExtensionInstaller.shared.deactivate { outcome in
-            let done = NSAlert()
-            switch outcome {
-            case .installed:
-                done.messageText = "Virtual camera removed."
-            case .afterRestart:
-                done.messageText = "Virtual camera removed."
-                done.informativeText = "macOS finishes removing it at the next restart; until then it may still appear in camera lists."
-            case .needsApproval:
-                done.messageText = "Confirm the removal in System Settings."
-                done.informativeText = "macOS is asking you to approve it: System Settings ▸ General ▸ Login Items & Extensions."
-            case .notInApplications:
-                done.messageText = "Move Airlive Bridge to /Applications first."
-                done.informativeText = "macOS only lets an app manage its camera extension from there."
-            case .failed(let why):
-                done.alertStyle = .warning
-                done.messageText = "The virtual camera couldn't be removed."
-                done.informativeText = why
-            }
-            done.runModal()
-        }
-    }
-
     // MARK: - Profiles (menu actions)
-
-    /// Stable id for the Shortcuts window scene.
-    fileprivate var shortcutsWindowID: String { "bridge-shortcuts" }
 
     /// Reset to a first-launch setup.  Deliberate destruction → confirm when a show
     /// is built (channels exist); an already-empty Bridge resets silently.
@@ -322,7 +286,7 @@ struct AirliveBridgeApp: App {
 private struct OpenShortcutsCommand: View {
     @Environment(\.openWindow) private var openWindow
     var body: some View {
-        Button("Customize Shortcuts…") { openWindow(id: "bridge-shortcuts") }
+        Button("Customize Shortcuts…") { openWindow(id: ShortcutSettings.windowID) }
             .keyboardShortcut("k", modifiers: [.command])
     }
 }

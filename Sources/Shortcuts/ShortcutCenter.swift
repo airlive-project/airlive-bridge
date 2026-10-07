@@ -182,10 +182,6 @@ final class ShortcutCenter: ObservableObject {
         if let action = bindings.action(forKeyCode: UInt16(keycode),
                                         shift: flags.contains(.maskShift),
                                         command: flags.contains(.maskCommand)) {
-            // Live-switching actions only from other apps.  Remove is an EDITING action —
-            // firing it while the operator types ⌘⌫ in some other tool would silently
-            // destroy a channel (and its confirm dialog would pop with no focus).
-            guard action.kind != .removeChannel else { return }
             fire(action)
         }
     }
@@ -194,32 +190,11 @@ final class ShortcutCenter: ObservableObject {
     private func fire(_ action: ShortcutAction) {
         switch action.kind {
         case .cut:           model.cutAction()
+        case .autoCut:       model.autoSwitcher.toggle()        // the AUTO button: does nothing while it is unavailable
         case .camera:        model.programSelect(action.index)   // plain digit → Preview
         case .programCut:    model.cutDirect(action.index)       // ⌘digit → straight to Program
         case .lens:          model.lensSelect(action.index)
-        case .removeChannel: removeSelectedChannel()
         }
-    }
-
-    /// ⌘⌫: remove the SELECTED channel, with the same live-guard as the rail's trash
-    /// button (an on-air / receiving channel confirms first).  ⌘Z restores it.
-    private func removeSelectedChannel() {
-        guard let id = model.selectedID,
-              let channel = model.channels.first(where: { $0.id == id }) else { return }
-        let onAir = channel.id == model.effectiveProgramID
-        if channel.anyConnected || onAir {
-            let alert = NSAlert()
-            alert.messageText = "Remove “\(channel.name)”?"
-            alert.informativeText = onAir
-                ? "This channel is ON AIR — removing it cuts the program feed."
-                : "This channel is receiving video — removing it drops the connection."
-            alert.alertStyle = .warning
-            alert.addButton(withTitle: "Remove")
-            alert.addButton(withTitle: "Cancel")
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-        }
-        TallyStore.shared.clear(id)
-        model.removeChannel(id)
     }
 
     /// True while a text field / editor is first responder (so Space / digits go

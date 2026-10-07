@@ -50,4 +50,19 @@ enum LatencyPreset: Int, CaseIterable, Identifiable {
 
     /// Same value as seconds, for the receiver's PTS / jitter-buffer math.
     var seconds: Double { Double(rawValue) / 1000.0 }
+
+    /// Honest about what the numbers are: the "+0 is not zero" paragraph is the reason this exists.
+    static let explainer = """
+        Buffer added on top of the delay the pipeline already has.
+
+        Unbuffered +0 is not zero delay. It is the least the capture, encode, network and decode \
+        path can physically deliver. It simply adds nothing of its own.
+
+        Each step up holds frames a little longer, so a network hiccup is absorbed instead of \
+        reaching air. The picture runs steadier the higher you go, and arrives that much later.
+
+        It buffers the camera channels, which are the ones that cross the network. A screen \
+        mirroring source and a capture card arrive by other routes and are unaffected; line \
+        those up with a channel's own Additional delay.
+        """
 }

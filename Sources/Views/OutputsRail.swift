@@ -57,13 +57,15 @@ struct OutputsRail: View {
             if Self.showsRecordFooter {
                 RecordFooter(recorder: model.programRecorder)   // record the program to a file
             }
+            SettingsFooter()                                    // opens the Bridge-wide Settings
         }
     }
 
-    /// Program recording works (ProgramRecorder, fed from the program tap) but is held back from
-    /// the UI while it is worked out as a feature of its own (operator, 2026-10-05). Flip this to
-    /// show the footer; nothing else changes.
-    private static let showsRecordFooter = false
+    /// Program recording (ProgramRecorder, fed from the program tap). Shown again 2026-10-07
+    /// (operator) for testing; it was hidden 2026-10-05 because the virtual camera stutters a little
+    /// while a take runs (ROADMAP "Next" item 4 - research how OBS keeps outputs apart first).
+    /// Decide before a release whether it ships visible.
+    private static let showsRecordFooter = true
 
     /// Focus mode strip: compact tags for the program outputs — LIVE ones red
     /// ("active") with white text, idle ones neutral + dimmed.  Mirrors the kind
@@ -209,7 +211,7 @@ private func addProgramOutput(_ kind: OutputKind, to model: BridgeModel) {
 /// Lowest free RTSP port from 8554 up, so multiple RTSP outputs don't collide.
 private func nextRTSPPort(_ model: BridgeModel) -> UInt16 {
     let used = Set(model.programOutputs.compactMap { ($0 as? RTSPOutput)?.port })
-    var p: UInt16 = 8554
+    var p: UInt16 = RTSPOutput.defaultPort
     while used.contains(p) { p += 1 }
     return p
 }
@@ -663,7 +665,7 @@ private struct OutputCard: View {
     /// The actual address a client connects to: rtsp://<this-mac>:<port>/program.
     /// Read-only (the path/port are fixed by the server) with a copy button.
     private var rtspURLLine: some View {
-        let port = (output as? RTSPOutput)?.port ?? 8554
+        let port = (output as? RTSPOutput)?.port ?? RTSPOutput.defaultPort
         let url = "rtsp://\(ProcessInfo.processInfo.hostName):\(port)/program"
         return HStack(spacing: Spacing.xs) {
             Text(url)
@@ -757,6 +759,52 @@ private extension OutputKind {
     }
 }
 
+// MARK: - Settings footer
+
+/// Opens Settings. Bottom right, in the same footer shape as the password row bottom
+/// left (44 pt, panel fill, hairline on top), so the two rails end on the same line (operator,
+/// 2026-10-06).
+private struct SettingsFooter: View {
+    var body: some View {
+        Button { SettingsPresenter.shared.open() } label: {
+            HStack(spacing: Spacing.sm) {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 12))
+                    .foregroundColor(Theme.textSecondary)
+                    .frame(width: 16)
+                Text("Settings")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(Theme.textSecondary)
+                Spacer()
+            }
+            .padding(.horizontal, Spacing.md)
+            .frame(height: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(Theme.bgPanel)
+        .overlay(Rectangle().frame(height: 1).foregroundColor(Theme.stroke), alignment: .top)
+        .help("Open Settings")
+    }
+}
+
+// MARK: - Recordings folder picker
+
+/// The one folder dialog for recordings: the rail's folder button and Settings → Outputs.
+enum RecordingFolderPicker {
+    static func choose(startingAt folder: URL) -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = folder
+        panel.prompt = "Choose"
+        panel.message = "Where should program recordings be saved?"
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+}
+
 // MARK: - Record footer
 
 /// Pinned to the bottom of the Program Outputs rail, in the same footer shape as the Channels rail
@@ -770,12 +818,14 @@ private struct RecordFooter: View {
             HStack(spacing: Spacing.sm) {
                 Button { recorder.toggle() } label: {
                     HStack(spacing: Spacing.sm) {
-                        // The icon appears only while a take is running: idle, the label alone says it.
+                        // The icon is always there, in a fixed slot, so the label never jumps
+                        // sideways when a take starts (operator, 2026-10-07): a grey ring-and-dot
+                        // record mark idle, the matching ring-and-square stop in red while recording.
+                        Image(systemName: recorder.isRecording ? "stop.circle" : "record.circle")
+                            .font(.system(size: 13))
+                            .foregroundColor(recorder.isRecording ? Theme.accentRed : Theme.textSecondary)
+                            .frame(width: 16)
                         if let start = recorder.startedAt {
-                            Image(systemName: "stop.fill")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundColor(Theme.accentRed)
-                                .frame(width: 16)
                             TimelineView(.periodic(from: start, by: 1)) { context in
                                 Text("REC  " + Self.elapsed(from: start, to: context.date))
                                     .font(.system(size: 12, weight: .medium).monospacedDigit())
@@ -804,7 +854,8 @@ private struct RecordFooter: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .disabled(recorder.isRecording)
+                // Open during a take too: the take keeps the folder it started in, the next one
+                // uses the new one (ProgramRecorder.start reads the folder once).
                 .help("Recordings folder: \(recorder.folder.path)")
             }
             if let failure = recorder.failure {
@@ -822,15 +873,7 @@ private struct RecordFooter: View {
     }
 
     private func chooseFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.directoryURL = recorder.folder
-        panel.prompt = "Choose"
-        panel.message = "Where should program recordings be saved?"
-        if panel.runModal() == .OK, let url = panel.url { recorder.folder = url }
+        if let url = RecordingFolderPicker.choose(startingAt: recorder.folder) { recorder.folder = url }
     }
 
     private static func elapsed(from start: Date, to now: Date) -> String {

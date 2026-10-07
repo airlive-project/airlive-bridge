@@ -394,7 +394,7 @@ final class BridgeModel: ObservableObject {
             VirtualCameraOutput(label: OutputKind.vcam.displayName),
             NDIOutput(label: OutputKind.ndi.displayName),
             HDMIOutput(label: OutputKind.hdmi.displayName),
-            RTSPOutput(label: OutputKind.rtsp.displayName, port: 8554),
+            RTSPOutput(label: OutputKind.rtsp.displayName, port: RTSPOutput.defaultPort),
             SRTOutput(label: OutputKind.srt.displayName),
         ]
         defaults.forEach { configureOutput($0) }
@@ -1274,7 +1274,7 @@ final class BridgeModel: ObservableObject {
         switch kind {
         case .obs:  output = AirliveRelayOutput(label: cfg.label)
         case .ndi:  output = NDIOutput(label: cfg.label)
-        case .rtsp: output = RTSPOutput(label: cfg.label, port: UInt16(cfg.port ?? 8554))
+        case .rtsp: output = RTSPOutput(label: cfg.label, port: cfg.port.map { UInt16($0) } ?? RTSPOutput.defaultPort)
         case .hdmi: output = HDMIOutput(label: cfg.label)
         case .srt:  output = SRTOutput(label: cfg.label)
         case .vcam: output = VirtualCameraOutput(label: cfg.label)

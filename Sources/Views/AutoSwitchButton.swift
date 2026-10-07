@@ -122,11 +122,8 @@ private struct AutoCutSettings: View {
                 .foregroundColor(Theme.textSecondary)
                 .padding(.top, 14)
 
-            HStack(alignment: .top, spacing: Spacing.lg) {
-                bound("From", $lo, bad: false)
-                bound("To", $hi, bad: orderWrong)
-            }
-            .padding(.top, 10)
+            AutoCutRangeEditor(lo: $lo, hi: $hi)
+                .padding(.top, 10)
 
             Text(orderWrong ? "The second value cannot be smaller than the first."
                             : "A fresh random value inside the range before every cut.")
@@ -166,19 +163,34 @@ private struct AutoCutSettings: View {
         .frame(width: Self.size.width, height: Self.size.height, alignment: .topLeading)
     }
 
-    /// One bound: the app's section label above its timer, the same pairing the side rails use.
-    private func bound(_ title: String, _ value: Binding<Int>, bad: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            SectionLabel(text: title)
-            DigitTimer(seconds: value, bad: bad)
-        }
-    }
 
     private func apply() {
         guard hi >= lo else { return }
         auto.minSeconds = lo
         auto.maxSeconds = hi
         close()
+    }
+}
+
+/// The FROM / TO timers, shared by the AUTO panel and Settings → Auto Cut so both set the range
+/// with the same control. TO turns red when it ends before FROM starts.
+struct AutoCutRangeEditor: View {
+    @Binding var lo: Int
+    @Binding var hi: Int
+
+    var body: some View {
+        HStack(alignment: .top, spacing: Spacing.lg) {
+            bound("From", $lo, bad: false)
+            bound("To", $hi, bad: hi < lo)
+        }
+    }
+
+    /// One bound: the app's section label above its timer, the same pairing the side rails use.
+    private func bound(_ title: String, _ value: Binding<Int>, bad: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            SectionLabel(text: title)
+            DigitTimer(seconds: value, bad: bad)
+        }
     }
 }
 

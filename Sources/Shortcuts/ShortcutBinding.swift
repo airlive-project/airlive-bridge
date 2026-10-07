@@ -43,17 +43,19 @@ struct KeyChord: Equatable, Codable {
 /// One rebindable action.  `camera`/`programCut`/`lens` carry a 0-based index.
 ///
 /// The two-bus switcher keyboard: plain digit = channel → PREVIEW (safe bus, same
-/// as clicking the tile), ⌘digit = channel → PROGRAM (direct cut).  Space = staged
-/// cut, ⌘Delete = remove the selected channel (in-app only — see ShortcutCenter).
+/// as clicking the tile), ⌘digit = channel → PROGRAM (direct cut).  Space = staged cut,
+/// ⇧⌘A = the AUTO button.
+/// Only switching actions have keys: a channel is removed with the trash in its row, never by
+/// a key (operator, 2026-10-07).
 struct ShortcutAction: Identifiable, Hashable {
-    enum Kind: String, Hashable { case cut, camera, programCut, lens, removeChannel }
+    enum Kind: String, Hashable { case cut, autoCut, camera, programCut, lens }
     let kind: Kind
-    let index: Int   // ignored for .cut / .removeChannel
+    let index: Int   // ignored for .cut / .autoCut
 
     var id: String {
         switch kind {
         case .cut:           return "cut"
-        case .removeChannel: return "removeChannel"
+        case .autoCut:       return "autoCut"
         default:             return "\(kind.rawValue)\(index)"
         }
     }
@@ -61,25 +63,26 @@ struct ShortcutAction: Identifiable, Hashable {
     var title: String {
         switch kind {
         case .cut:           return "Cut"
+        case .autoCut:       return "Auto Cut"
         case .camera:        return "Channel \(index + 1) → Preview"   // rail order, 1-based
         case .programCut:    return "Channel \(index + 1) → Program"
         case .lens:          return "Lens \(index + 1)"
-        case .removeChannel: return "Remove Selected Channel"
         }
     }
 
     /// Stock binding: Cut = Space, Channel N → Preview = digit N, → Program = ⌘N,
-    /// Lens N = the Z-row letter, Remove = ⌘Delete (Finder's delete idiom).
+    /// Lens N = the Z-row letter, Auto Cut = ⇧⌘A (A for Auto; two modifiers so it is never hit by
+    /// accident, and not ⌘A, which is Select All everywhere - operator, 2026-10-07).
     /// Lenses sit on Z X C V B N (6 = the deepest lens ladder an iPhone reports) —
     /// one plain key per lens, mirroring the digits-for-cameras idea on the row below.
     var defaultChord: KeyChord {
         switch kind {
         case .cut:           return KeyChord(keyCode: 49)                               // Space
+        case .autoCut:       return KeyChord(keyCode: 0, shift: true, command: true)    // ⇧⌘A
         case .camera:        return KeyChord(keyCode: KeyNames.digitKeyCode(index + 1)) // 1–9
         case .programCut:    return KeyChord(keyCode: KeyNames.digitKeyCode(index + 1),
                                              command: true)                             // ⌘1–⌘9
         case .lens:          return KeyChord(keyCode: Self.lensRowKeys[min(index, Self.lensRowKeys.count - 1)])
-        case .removeChannel: return KeyChord(keyCode: 51, command: true)                // ⌘Delete
         }
     }
 
@@ -89,7 +92,7 @@ struct ShortcutAction: Identifiable, Hashable {
     /// The full action set, in display order.
     static let all: [ShortcutAction] =
         [ShortcutAction(kind: .cut, index: 0),
-         ShortcutAction(kind: .removeChannel, index: 0)]
+         ShortcutAction(kind: .autoCut, index: 0)]
         + (0 ..< 9).map { ShortcutAction(kind: .camera, index: $0) }
         + (0 ..< 9).map { ShortcutAction(kind: .programCut, index: $0) }
         + (0 ..< 6).map { ShortcutAction(kind: .lens, index: $0) }
@@ -104,7 +107,10 @@ final class ShortcutBindings: ObservableObject {
     init() {
         if let data = UserDefaults.standard.data(forKey: Self.storeKey),
            let decoded = try? JSONDecoder().decode([String: KeyChord].self, from: data) {
-            custom = decoded
+            // Only keys of actions that still exist: a removed action (Remove Selected Channel,
+            // 2026-10-07) would otherwise sit in the store for ever.
+            let known = Set(ShortcutAction.all.map(\.id))
+            custom = decoded.filter { known.contains($0.key) }
         } else {
             custom = [:]
         }
@@ -119,9 +125,14 @@ final class ShortcutBindings: ObservableObject {
     func isCustomized(_ action: ShortcutAction) -> Bool { custom[action.id] != nil }
 
     /// Reverse lookup: which action owns this base chord (nil if none).
+    ///
+    /// A key the operator assigned wins over a stock default. Without that, a NEW action's
+    /// default (⇧⌘A for Auto Cut, 2026-10-07) would silently take over a key someone had already
+    /// given to another action - and the first-listed action is the one that fired.
     func action(forKeyCode code: UInt16, shift: Bool, command: Bool) -> ShortcutAction? {
         let probe = KeyChord(keyCode: code, shift: shift, command: command)
-        return ShortcutAction.all.first { chord(for: $0) == probe }
+        return ShortcutAction.all.first { custom[$0.id] == probe }
+            ?? ShortcutAction.all.first { chord(for: $0) == probe }
     }
 
     /// The action (other than `action`) already using `chord`, if any.
