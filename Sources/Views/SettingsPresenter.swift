@@ -86,20 +86,30 @@ final class SettingsPresenter: NSObject, NSWindowDelegate {
     /// Leave Settings, then run `action` (Check for Updates). Asks first when something is
     /// pending; staying put is a valid answer, and then nothing runs.
     func leave(then action: @escaping () -> Void) {
-        guard resolvePending() else { return }
-        window?.close()
-        DispatchQueue.main.async(execute: action)   // after the modal session has ended
+        resolvePending { [weak self] proceed in
+            guard proceed else { return }
+            self?.window?.close()
+            DispatchQueue.main.async(execute: action)   // after the modal session has ended
+        }
     }
 
-    /// The window's close button.
+    /// The window's close button: asks first when something is pending. Always answers "not yet"
+    /// while asking - the question is a sheet, and the window closes from its answer.
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        resolvePending()
+        guard draft?.hasChanges == true else { return true }
+        resolvePending { [weak self] proceed in
+            if proceed { self?.window?.close() }   // close() does not ask again
+        }
+        return false
     }
 
     /// One question for every way out with unapplied changes, like OBS's (operator, 2026-10-07):
-    /// silently dropping them, or silently keeping them, both surprise someone. True = go ahead.
-    private func resolvePending() -> Bool {
-        guard let draft, draft.hasChanges, let model = dependencies?.model else { return true }
+    /// silently dropping them, or silently keeping them, both surprise someone. A sheet on the
+    /// Settings window, so it opens on it and not beside it in the middle of the screen.
+    private func resolvePending(_ done: @escaping (_ proceed: Bool) -> Void) {
+        guard let draft, draft.hasChanges, let model = dependencies?.model, let window else {
+            return done(true)
+        }
         let alert = NSAlert()
         alert.alertStyle = .warning
         if draft.canApply {
@@ -108,20 +118,25 @@ final class SettingsPresenter: NSObject, NSWindowDelegate {
             alert.addButton(withTitle: "Apply")
             alert.addButton(withTitle: "Don't Apply")
             alert.addButton(withTitle: "Cancel")
-            switch alert.runModal() {
-            case .alertFirstButtonReturn:  draft.apply(model: model); return true
-            case .alertSecondButtonReturn: draft.discard();           return true
-            default:                       return false
+            alert.beginSheetModal(for: window) { answer in
+                switch answer {
+                case .alertFirstButtonReturn:  draft.apply(model: model); done(true)
+                case .alertSecondButtonReturn: draft.discard();           done(true)
+                default:                       done(false)
+                }
             }
+            return
         }
         // Pending changes that cannot be applied (an Auto Cut range that ends before it starts).
         alert.messageText = "Discard your changes?"
         alert.informativeText = "The Auto Cut range is not valid, so the changes cannot be applied."
         alert.addButton(withTitle: "Discard")
         alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return false }
-        draft.discard()
-        return true
+        alert.beginSheetModal(for: window) { answer in
+            guard answer == .alertFirstButtonReturn else { return done(false) }
+            draft.discard()
+            done(true)
+        }
     }
 
     /// `abortModal`, not `stopModal`. A SwiftUI button runs its action after the click event has
