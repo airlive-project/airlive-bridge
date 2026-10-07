@@ -627,7 +627,7 @@ final class BridgeModel: ObservableObject {
         for output in programBus.outputs where output.isLive {
             output.send(buffer, timeNs: timeNs)   // buffer outputs (NDI, HDMI, virtual camera)
         }
-        programRecorder.feed(buffer, timeNs: timeNs)   // a lock and a bool unless recording
+        programRecorder.feed(buffer)   // a lock and a bool unless recording
         // TRANSCODE mode (AirPlay mirror / HDMI capture on air — no raw bitstream): the same
         // decoded frame is hardware-encoded so OBS/RTSP/SRT carry the program too.  LAW: the
         // program streams to every output, no exceptions — but only while an output that
