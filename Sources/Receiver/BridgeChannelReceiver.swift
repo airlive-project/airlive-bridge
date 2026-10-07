@@ -504,6 +504,12 @@ final class BridgeChannelReceiver: ChannelReceiver {
     // MARK: - Connection (one iPhone per channel; keep listening for reconnect)
 
     private func accept(_ conn: NWConnection) {
+        // Every incoming socket is logged with where it came from and how it ends, so a failed
+        // connect shows which side dropped it (camera chat, 2026-10-07: one phone attempt opens an
+        // IPv6 AND an IPv4 socket; this log tells whether we kept the one the phone kept).
+        let slotNote = connection == nil ? "" : " (slot held)"
+        let otherNote = pendingConnections.isEmpty ? "" : ", \(pendingConnections.count) other candidate(s) open"
+        print("[BridgeReceiver \(src)] ⇢ incoming \(conn.endpoint)\(slotNote)\(otherNote)")
         // One iPhone per channel — but a NEW connect while the slot is held usually means the phone
         // died without a FIN (powered off / battery / Wi-Fi drop) and came back: the held connection
         // is a half-open corpse keepalive hasn't reaped yet.  TAKEOVER: evict the corpse, admit the
@@ -517,6 +523,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
             let ageNs = DispatchTime.now().uptimeNanoseconds - committedAtNs
             let heldLongEnough = ageNs > 3_000_000_000
             guard heldLongEnough, !effectiveAuthRequired else {
+                print("[BridgeReceiver \(src)] ✋ refused \(conn.endpoint): slot held \(ageNs / 1_000_000) ms\(effectiveAuthRequired ? ", password on (no takeover)" : " (sibling of the connection just taken)")")
                 conn.cancel()
                 return
             }
@@ -541,7 +548,10 @@ final class BridgeChannelReceiver: ChannelReceiver {
             switch state {
             case .ready:
                 self.commitConnection(conn)
-            case .cancelled, .failed:
+            case .failed(let error):
+                print("[BridgeReceiver \(self.src)] ✖ \(conn.endpoint) failed: \(error)")
+                self.dropConnection(conn)
+            case .cancelled:
                 self.dropConnection(conn)
             default:
                 break
@@ -571,14 +581,19 @@ final class BridgeChannelReceiver: ChannelReceiver {
     /// First candidate to `.ready` wins.  On `queue`.
     private func commitConnection(_ conn: NWConnection) {
         guard connection == nil else {
-            if conn !== connection { conn.cancel() }
+            if conn !== connection {
+                print("[BridgeReceiver \(src)] ✋ closing \(conn.endpoint): became ready after the slot was taken")
+                conn.cancel()
+            }
             return
         }
         connection = conn
         committedAtNs = DispatchTime.now().uptimeNanoseconds
         anchorSet = false                         // fresh stream → re-anchor PTS
         resetAuthState()                          // clean slate for this connection
-        for other in pendingConnections where other !== conn {
+        let siblings = pendingConnections.filter { $0 !== conn }
+        print("[BridgeReceiver \(src)] ✔︎ took \(conn.endpoint) (first ready)\(siblings.isEmpty ? "" : ", closing \(siblings.map { "\($0.endpoint)" }.joined(separator: ", "))")")
+        for other in siblings {
             other.stateUpdateHandler = nil
             other.cancel()
         }
@@ -617,7 +632,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
             reconcileOccupancy()
             return
         }
-        print("[BridgeReceiver \(src)] 🔌 disconnect (\(reason)) — clearing frame, busy=0")
+        print("[BridgeReceiver \(src)] 🔌 disconnect \(conn.endpoint) (\(reason)) — clearing frame, busy=0")
         connection = nil
         resetAuthState()                          // drop any pending challenge/buffer
         reconcileOccupancy()
