@@ -40,7 +40,7 @@ final class ProgramBus {
 
     /// Latest program SPS/PPS payload — handed to a passthrough output the moment it starts, so a
     /// mid-stream toggle-on can decode.  CRITICAL: the camera sends formatDescription ONCE per
-    /// connection (deliberate, thermal) and its LAN GOP is 6–10 s — an output that missed the one
+    /// connection (deliberate, thermal) and its keyframe interval is up to 15 s — an output that missed the one
     /// format packet would mux slices with NO SPS/PPS forever (found live: SRT "non-existing PPS").
     var lastFormatPayload: Data? {
         get { lock.lock(); defer { lock.unlock() }; return _lastFormatPayload }

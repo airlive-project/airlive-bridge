@@ -9,6 +9,12 @@ import Foundation
 import CoreVideo
 import Combine   // session-autosave subscriptions (model + per-channel objectWillChange)
 import AppKit    // the one alert this model raises: an unreadable saved session (see restoreLastSession)
+import os
+
+/// Every tally cue and what became of it, kept in the system log so a show's tally can be read
+/// back afterwards and lined up with the camera's own "[Tally] ..." lines. `.notice` is the level
+/// macOS keeps on disk; one line per cue change, so a show writes a few hundred at most.
+private let tallyLog = Logger(subsystem: "studio.airlive.bridge", category: "tally")
 
 /// ⚠️ Solo is REMOVED FROM THE UI for launch (2026-07-03): the toolbar switch is
 /// gone and `mode` stays `.multiview` for the app's whole life (profile load pins
@@ -80,20 +86,71 @@ final class BridgeModel: ObservableObject {
     /// iPhones (`setCue`) AND mirrored in `TallyStore` so the rail/preview show it.  Only
     /// fires on a real change, so it's event-driven (one packet per cut/stage, never per
     /// frame).  Solo keeps its manual Tally row untouched.
-    /// `force` re-sends every cue even if unchanged — used when a camera (re)connects so its
-    /// tally LED is re-asserted (the camera forgot its cue across the drop), bypassing the
-    /// TallyStore dedup that would otherwise skip the "unchanged" send.
-    private func syncMultiviewTally(force: Bool = false) {
+    /// A camera that reconnects is re-asserted on its own (`reassertTallyIfLinkReturned`).
+    private func syncMultiviewTally() {
         for ch in multiviewChannels {
-            let state: TallyState = ch.id == programID ? .program
-                                  : (ch.id == previewID ? .preview : .off)
-            if !force && TallyStore.shared.state(for: ch.id) == state { continue }
+            let state = busTally(of: ch)
+            if TallyStore.shared.state(for: ch.id) == state { continue }
+            // The store is the director's red / green borders, so it follows the buses even for a
+            // camera that has tally switched off; only the cue to the phone is held back.
             TallyStore.shared.set(state, for: ch.id)
-            // `ch.send` routes to the channel's back-channel — the ARLV control side for a
-            // combined "Screen Mirroring + Remote Control" channel, else its single receiver.
-            // Skip if the operator turned tally OFF on that camera.
-            if ch.tallyAllowed { ch.send(.setCue(state.rawValue)) }
+            sendCue(state, to: ch)
         }
+    }
+
+    /// What the buses say a camera's tally is.
+    private func busTally(of ch: BridgeChannel) -> TallyState {
+        ch.id == programID ? .program : (ch.id == previewID ? .preview : .off)
+    }
+
+    /// Send one camera its cue and log what became of it. A cue is never queued for later: with no
+    /// connection it is dropped, and the reconnect sends the current one (`handleConnectivityChange`),
+    /// so a phone that was away never receives a backlog of stale cues.
+    private func sendCue(_ state: TallyState, to ch: BridgeChannel) {
+        // Only an Airlive Camera has a tally light; AirPlay and capture sources have no way back.
+        guard ch.kind == .airlive || ch.kind == .screenMirroringPlusControl else { return }
+        let outcome: String
+        if !ch.tallyAllowed {
+            outcome = "not sent: camera disallows tally"
+        } else if !ch.remoteControlConnected {
+            outcome = "not sent: no connection"
+        } else {
+            // Routes to the channel's back-channel: the ARLV control side for a combined
+            // "Screen Mirroring + Remote Control" channel, else its single receiver.
+            ch.send(.setCue(state.rawValue))
+            outcome = "sent"
+        }
+        tallyLog.notice("[Tally] \(ch.name, privacy: .public) → \(state.rawValue, privacy: .public) (\(outcome, privacy: .public))")
+    }
+
+    /// Whether each channel's tally link (the connection a cue travels on) was up at its last
+    /// connectivity edge. A phone forgets its cue when that link drops, so it gets the current cue
+    /// when the link comes back - and only then: a combined channel's AirPlay side reconnecting
+    /// leaves the cue link alone, and the other cameras never hear about this one's reconnect.
+    private var tallyLinkUp: [UUID: Bool] = [:]
+
+    private func reassertTallyIfLinkReturned(_ channel: BridgeChannel) {
+        let up = channel.remoteControlConnected
+        guard up != (tallyLinkUp[channel.id] ?? false) else { return }
+        tallyLinkUp[channel.id] = up
+        guard up, mode == .multiview else { return }
+        let state = busTally(of: channel)
+        TallyStore.shared.set(state, for: channel.id)
+        sendCue(state, to: channel)
+    }
+
+    /// The camera came back on the same connection after going silent. It darkened its lamp when
+    /// it lost its route and waits for a cue (camera 52d2c7b), so it gets exactly one: the current
+    /// one. Nothing is replayed - cues sent into the silence, if any, already arrived in order.
+    private func resendTallyAfterSilence(_ channel: BridgeChannel) {
+        guard mode == .multiview else { return }
+        sendCue(busTally(of: channel), to: channel)
+    }
+
+    /// The camera switched its own tally back on: send it the current cue now, not at the next cut.
+    private func handleTallyAllowedChange(_ channel: BridgeChannel) {
+        guard mode == .multiview, channel.tallyAllowed, channel.remoteControlConnected else { return }
+        sendCue(busTally(of: channel), to: channel)
     }
 
     /// A channel's connectivity edge changed (wired to `BridgeChannel.onConnectivityChanged`).
@@ -103,17 +160,20 @@ final class BridgeModel: ObservableObject {
         // Auto rotation first: if the camera ON AIR just died, every output is carrying its black
         // right now, and sitting out the rest of the timer would broadcast that.
         autoSwitcher.refresh()
-        // Tally: re-assert to a (re)connected camera; clear a fully-disconnected one's border.
-        if channel.anyConnected {
-            if mode == .multiview { syncMultiviewTally(force: true) }
-        } else if TallyStore.shared.state(for: channel.id) != .off {
-            TallyStore.shared.set(.off, for: channel.id)
-        }
-        // Re-pick the program feed mode when the ON-AIR source's connectivity flips: a mid-air
-        // drop falls to continuous black, a reconnect goes back to passthrough/transcode — so
-        // every output keeps carrying the program across the gap (never a freeze, never silence).
+        refreshStayAwake()
+        // Tally: the director's border follows the buses for any live channel and goes dark on a
+        // dead one; the phone's cue is re-sent only when ITS link returned.
+        let border: TallyState = channel.anyConnected && mode == .multiview ? busTally(of: channel) : .off
+        if TallyStore.shared.state(for: channel.id) != border { TallyStore.shared.set(border, for: channel.id) }
+        reassertTallyIfLinkReturned(channel)
+        // Re-route the program when the ON-AIR source's connectivity flips: a mid-air drop falls
+        // to continuous black, a reconnect goes back to passthrough/transcode — so every output
+        // keeps carrying the program across the gap (never a freeze, never silence). A full
+        // re-route, not just the feed mode: a camera that went silent before it dropped had its
+        // raw taps taken off (onSignalLostChanged), and only routeProgram puts them back - with
+        // the feed mode alone, SRT / RTSP stayed empty after it reconnected.
         if channel.id == effectiveProgramID {
-            applyFeedMode(computeFeedMode())
+            routeProgram()
         }
     }
 
@@ -173,6 +233,14 @@ final class BridgeModel: ObservableObject {
     /// Records the program to a file (the footer of the Program Outputs rail). Fed from the same
     /// tap as every output, so a take is exactly what left the Bridge.
     let programRecorder = ProgramRecorder()
+    /// Holds the Mac awake while there is a show (StayAwake.swift).
+    private let stayAwake = StayAwake()
+
+    /// A show is a connected source or a running take. Outputs alone are not: with no camera they
+    /// carry black, and nothing is lost if the Mac sleeps.
+    private func refreshStayAwake() {
+        stayAwake.update(onShow: channels.contains { $0.anyConnected } || programRecorder.isRecording)
+    }
 
     /// Is a broadcast happening right now?
     ///
@@ -211,7 +279,7 @@ final class BridgeModel: ObservableObject {
     /// OBS plugin decoded FRAMES instead of a stream, so there is no bitstream to splice at all.
     private func computeFeedMode() -> ProgramFeedMode {
         guard let pc = channels.first(where: { $0.id == effectiveProgramID }),
-              pc.isConnected, pc.videoActive else { return .black }
+              pc.isConnected, pc.videoActive, !pc.signalLost else { return .black }
         return pc.producesRawH264 ? .passthrough : .transcode
     }
 
@@ -259,7 +327,7 @@ final class BridgeModel: ObservableObject {
     private func clearAllTally() {
         for ch in channels {
             if TallyStore.shared.state(for: ch.id) != .off { TallyStore.shared.set(.off, for: ch.id) }
-            if ch.tallyAllowed { ch.send(.setCue(TallyState.off.rawValue)) }
+            sendCue(.off, to: ch)
         }
     }
 
@@ -283,6 +351,27 @@ final class BridgeModel: ObservableObject {
             self.autoSwitcher.refresh()
             guard channel.id == self.effectiveProgramID else { return }
             self.applyFeedMode(self.computeFeedMode())
+        }
+        channel.onTallyAllowedChanged = { [weak self, weak channel] in
+            guard let self, let channel else { return }
+            self.handleTallyAllowedChange(channel)
+        }
+        // A camera that went silent still holds its connection, so no connectivity edge comes:
+        // the program and Auto Cut have to hear about it here - black after the threshold instead
+        // of a frozen picture, and its picture back the moment it speaks again.
+        channel.onSignalLostChanged = { [weak self, weak channel] in
+            guard let self, let channel else { return }
+            self.autoSwitcher.refresh()
+            guard channel.id == self.effectiveProgramID else { return }
+            // A full re-route, not just the feed mode: the passthrough outputs' WIRE changes too
+            // (camera bitstream ↔ our encoder's black), so the camera's raw taps must come off
+            // while it is silent and the outputs must re-sync on the way back - wait for the
+            // camera's format, ask it for a keyframe - exactly as on a cut.
+            self.routeProgram()
+        }
+        channel.onLinkResumed = { [weak self, weak channel] in
+            guard let self, let channel else { return }
+            self.resendTallyAfterSilence(channel)
         }
         // Keyed by channel id (NOT stored in the grow-forever set): the entry dies
         // with the channel in removeChannel / the profile teardown, so a long session
@@ -436,8 +525,9 @@ final class BridgeModel: ObservableObject {
             // this line none of it could reach the view.
             vcam.onStateChanged = { [weak self] in self?.objectWillChange.send() }
         }
-        // An output added mid-stream starts with the CURRENT program SPS/PPS (the camera won't
-        // resend them — once per connection), so its first decoded frame is the forced IDR above.
+        // An output added mid-stream starts with the CURRENT program SPS/PPS (the camera sends
+        // them once per connection, and again only with a keyframe a receiver asks for), so its
+        // first decoded frame is the forced IDR above.
         if let cached = programBus.lastFormatPayload { output.relayFormat(cached) }
     }
 
@@ -489,8 +579,7 @@ final class BridgeModel: ObservableObject {
                 channel.onProgramFrame = { [weak self] buffer, timeNs in self?.feedProgram(buffer, timeNs: timeNs) }
                 // RAW taps ONLY while the wire really is this camera's bitstream. With the program
                 // encoded by us, its samples and the encoder's would otherwise both pour into the
-                // same socket and interleave into nonsense. (Today nothing selects passthrough -
-                // see computeFeedMode - so these stay nil.)
+                // same socket and interleave into nonsense.
                 let raw = rawPassthrough
                 channel.onProgramFormat = raw ? { [weak self] payload in self?.feedProgramFormat(payload) } : nil
                 channel.onProgramSample = raw ? { [weak self] payload, ts in self?.feedProgramSample(payload, ts) } : nil
@@ -605,7 +694,7 @@ final class BridgeModel: ObservableObject {
         // TRAILING EDGE — and ask again only if the program MOVED during the window.  Without
         // this a burst would leave the settled source gated with no keyframe: we would have
         // poked the one the director passed through, not the one they landed on, and OBS would
-        // hold a still until that camera's next natural keyframe, which is 6-10 s away.
+        // hold a still until that camera's next natural keyframe, which is up to 15 s away.
         keyframeDebounce?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
@@ -688,6 +777,11 @@ final class BridgeModel: ObservableObject {
             seedFirstLaunchChannels()
         }
         wireAutosave()
+        // A take keeps the Mac awake on its own, even with every camera gone.
+        programRecorder.$isRecording
+            .removeDuplicates()
+            .sink { [weak self] _ in DispatchQueue.main.async { self?.refreshStayAwake() } }
+            .store(in: &autosaveCancellables)
     }
 
     /// Set (or clear) the global password.  Stored in the Keychain, then pushed
@@ -807,6 +901,7 @@ final class BridgeModel: ObservableObject {
         channels.remove(at: index)
         autoSwitcher.refresh()                        // the pool shrank; auto re-reads it
         channelAutosaveSubs.removeValue(forKey: id)   // its autosave sub dies with it
+        tallyLinkUp.removeValue(forKey: id)
         TallyStore.shared.clear(id)   // don't leak the channel's tally entry
 
 
@@ -880,6 +975,7 @@ final class BridgeModel: ObservableObject {
         channels.forEach { TallyStore.shared.clear($0.id) }
         channels = []
         channelAutosaveSubs.removeAll()
+        tallyLinkUp.removeAll()
         for output in programOutputs { output.stop() }
         programOutputs = []
         previewID = nil; programID = nil; selectedID = nil
@@ -975,6 +1071,7 @@ final class BridgeModel: ObservableObject {
         channels.forEach { TallyStore.shared.clear($0.id) }
         channels = []
         channelAutosaveSubs.removeAll()
+        tallyLinkUp.removeAll()
         for output in programOutputs { output.stop() }
         programOutputs = []
         previewID = nil; programID = nil; selectedID = nil

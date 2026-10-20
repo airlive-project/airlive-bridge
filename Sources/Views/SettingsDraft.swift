@@ -6,7 +6,7 @@
 //
 // Not held here, applied the moment they change (operator, 2026-10-07): the latency buffer and
 // its lock (a director raises it ON AIR when a camera starts stuttering - it must act at once,
-// like the rail's row), Shortcuts (a key is recorded when pressed, as in the ⌘K window) and the
+// like the rail's row), Shortcuts (a key is recorded when it is pressed) and the
 // Stream Deck switch.
 //
 // The frame guide is held like everything else but SHOWN at once: while a guide change is pending,
@@ -20,6 +20,7 @@ final class SettingsDraft: ObservableObject {
     // in step when adding one (a field missing from `discard` would outlive Cancel).
     @Published var autoCut: AutoCutRange?
     @Published var recordFolder: URL?
+    @Published var vcamResolution: VirtualCameraResolution?
     @Published var previewClickCuts: Bool?
     @Published var frameGuide: FrameGuide? {
         didSet { FrameGuidePreview.shared.guide = frameGuide }
@@ -42,7 +43,7 @@ final class SettingsDraft: ObservableObject {
     static let previewClickCutsKey = "bridge.previewClickCutsToProgram"
 
     var hasChanges: Bool {
-        autoCut != nil || recordFolder != nil || previewClickCuts != nil
+        autoCut != nil || recordFolder != nil || vcamResolution != nil || previewClickCuts != nil
             || frameGuide != nil || frameGuideStyle != nil
     }
 
@@ -66,6 +67,12 @@ final class SettingsDraft: ObservableObject {
         // Safe even mid-take: a take keeps the folder it started in, the next one uses this.
         if let recordFolder { model.programRecorder.folder = recordFolder }
         let defaults = UserDefaults.standard
+        if let vcamResolution {
+            defaults.set(vcamResolution.rawValue, forKey: VirtualCameraResolution.storageKey)
+            for camera in model.programOutputs.compactMap({ $0 as? VirtualCameraOutput }) {
+                camera.setResolution(vcamResolution)
+            }
+        }
         if let previewClickCuts { defaults.set(previewClickCuts, forKey: Self.previewClickCutsKey) }
         // Stored before `discard` clears the preview, so the panes never flash the old guide.
         if let frameGuide { defaults.set(frameGuide.rawValue, forKey: FrameGuide.storageKey) }
@@ -76,6 +83,7 @@ final class SettingsDraft: ObservableObject {
     func discard() {
         autoCut = nil
         recordFolder = nil
+        vcamResolution = nil
         previewClickCuts = nil
         frameGuide = nil
         frameGuideStyle = nil

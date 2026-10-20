@@ -41,6 +41,9 @@ final class CMIOSinkConnection {
     /// what stops a frame being enqueued into a queue that is being torn down.
     private let lock = NSLock()
     private var sent: UInt64 = 0
+    /// See `framesTakenByCamera`; `depthAfterLastSend` is the queue depth we left it at.
+    private var taken: UInt64 = 0
+    private var depthAfterLastSend = 0
     private var lastLog = Date.distantPast
 
     /// Last format description handed to CoreMediaIO, kept only as long as it still describes
@@ -117,6 +120,25 @@ final class CMIOSinkConnection {
         return nil
     }
 
+    /// Whether the next `send` would find room. Asked BEFORE the frame is converted, so a camera
+    /// nobody has open (its queue stays full) costs no conversion either - at 1440p and 4K every
+    /// frame is an upscale. A slot can still be taken in between; `send` then says `.queueFull`.
+    var hasRoom: Bool {
+        lock.lock(); defer { lock.unlock() }
+        // A sink that is not running answers yes, so `send` gets to report it as the failure it is.
+        guard started, let queue else { return true }
+        return CMSimpleQueueGetCount(queue) < CMSimpleQueueGetCapacity(queue)
+    }
+
+    /// Frames the CAMERA has taken out of the queue since the sink opened. Not the same as frames
+    /// enqueued: the queue holds several, so the first few go in whether or not anything reads
+    /// them. The extension only drains while an app has the camera open, so this counter moving
+    /// is the one proof that an app is actually receiving the program.
+    var framesTakenByCamera: UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        return taken
+    }
+
     /// Enqueue one frame in the camera's published format.  Returns whether it actually
     /// reached the queue — the caller counts these, so a camera that is "on" but never
     /// delivering can say so instead of showing black.
@@ -128,6 +150,10 @@ final class CMIOSinkConnection {
     func send(_ pixelBuffer: CVPixelBuffer) -> SinkSendResult {
         lock.lock(); defer { lock.unlock() }
         guard started, let queue else { return .failed }
+        // What the camera took since our last enqueue: the queue is shallower now than we left it.
+        let depthBefore = Int(CMSimpleQueueGetCount(queue))
+        if depthBefore < depthAfterLastSend { taken &+= UInt64(depthAfterLastSend - depthBefore) }
+        depthAfterLastSend = depthBefore
         // One buffer deep by design: if the extension hasn't drained the previous frame, the
         // newest one is worth more than queueing both, so skip rather than pile up.  A queue
         // that STAYS full means the extension stopped draining because no app has the camera
@@ -182,9 +208,10 @@ final class CMIOSinkConnection {
             return .failed
         }
         sent &+= 1
+        depthAfterLastSend = depthBefore + 1
         if Date().timeIntervalSince(lastLog) >= 1.0 {
             lastLog = Date()
-            sinkLog.notice("enqueued \(self.sent) frames total, queue depth \(CMSimpleQueueGetCount(queue))")
+            sinkLog.notice("enqueued \(self.sent) frames total, taken by the camera \(self.taken), queue depth \(CMSimpleQueueGetCount(queue))")
         }
         return .sent
     }

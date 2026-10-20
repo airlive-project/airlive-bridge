@@ -12,6 +12,12 @@
 
 import Foundation
 import SystemExtensions
+import os
+
+/// Every request and every answer from macOS, in the system log next to the camera's own lines
+/// (`log show --predicate 'subsystem == "studio.airlive.vcam"'`): without it a field report
+/// cannot tell "never approved" from "approved, never launched" from "refused".
+private let installLog = Logger(subsystem: "studio.airlive.vcam", category: "install")
 
 final class SystemExtensionInstaller: NSObject, OSSystemExtensionRequestDelegate {
 
@@ -23,23 +29,49 @@ final class SystemExtensionInstaller: NSObject, OSSystemExtensionRequestDelegate
     /// for nothing.
     static let shared = SystemExtensionInstaller()
 
-    private var outcome: Outcome?
+    /// A FINAL answer for this session - installed, or installed after a restart. Asked for
+    /// again it is answered from here, never by a new request.
+    private var settled: Outcome?
+    /// "Waiting for approval": the request is still open and its final answer is still to come.
+    private var interim: Outcome?
     private var waiting: [(Outcome) -> Void] = []
-    private var submitted = false
+    private var inFlight = false
 
-    /// Submit once; everyone else is told what happened, whenever it happened.
+    /// Submit once; everyone waiting hears EVERY answer until the final one.
+    ///
+    /// On a Mac that never had the camera the first answer is "needs approval" and the real one,
+    /// "installed", comes later, when the operator approves. Treating the first as final dropped
+    /// the second: on exactly the first-install path, nothing ever reacted to the installation.
+    /// A refusal is not kept either: switching the output on again asks again, rather than
+    /// replaying a failure for the rest of the session.
     func activateOnce(_ completion: @escaping (Outcome) -> Void) {
-        if let outcome { completion(outcome); return }
+        if let settled { completion(settled); return }
         waiting.append(completion)
-        guard !submitted else { return }
-        submitted = true
-        activate { [weak self] result in
-            guard let self else { return }
-            self.outcome = result
-            let pending = self.waiting
-            self.waiting = []
-            pending.forEach { $0(result) }
+        if let interim { completion(interim) }
+        guard !inFlight else { return }
+        inFlight = true
+        activate { [weak self] result in self?.deliver(result) }
+    }
+
+    private func deliver(_ result: Outcome) {
+        switch result {
+        case .needsApproval:
+            interim = result
+            waiting.forEach { $0(result) }        // keep listening: the final answer follows
+        case .installed, .afterRestart:
+            settled = result
+            finish(result)
+        case .notInApplications, .failed:
+            finish(result)                         // not kept: the next switch-on asks again
         }
+    }
+
+    private func finish(_ result: Outcome) {
+        interim = nil
+        inFlight = false
+        let pending = waiting
+        waiting = []
+        pending.forEach { $0(result) }
     }
 
     enum Outcome {
@@ -55,28 +87,38 @@ final class SystemExtensionInstaller: NSObject, OSSystemExtensionRequestDelegate
         case failed(String)
     }
 
-    /// Overwritten by each request.  Only one activation is ever in flight in practice
-    /// (the operator toggles one card), and a stale callback losing its turn is preferable
-    /// to a queue of them firing at once.
-    private var completion: ((Outcome) -> Void)?
+    /// Who hears each request's answers, keyed by the request itself. An activation and a removal
+    /// can both be open (the operator removes the camera while its approval is still pending), and
+    /// a single shared slot sent one request's answer to the other's caller. Main thread only, like
+    /// every delegate callback (requests are submitted with `queue: .main`).
+    private var handlers: [ObjectIdentifier: (Outcome) -> Void] = [:]
     private let bundleID = "studio.airlive.bridge.AirliveBridge.vcam"
 
     /// Submit the activation request.  Safe to call on every start: macOS treats a
     /// repeat request for an already-active extension as a no-op.
     func activate(_ completion: @escaping (Outcome) -> Void) {
-        self.completion = completion
-
         // Checked BEFORE submitting: the request would fail with an opaque code, and
         // "move the app" is far more useful than an error number.
         guard Bundle.main.bundlePath.hasPrefix("/Applications/") else {
+            installLog.error("not asking macOS: the app runs from \(Bundle.main.bundlePath, privacy: .public), not /Applications")
             completion(.notInApplications)
             return
         }
 
+        installLog.notice("asking macOS to activate the camera extension")
         let request = OSSystemExtensionRequest.activationRequest(
             forExtensionWithIdentifier: bundleID, queue: .main)
         request.delegate = self
+        handlers[ObjectIdentifier(request)] = completion
         OSSystemExtensionManager.shared.submitRequest(request)
+    }
+
+    /// Answer `request`'s caller; `final` answers end the request (approval does not).
+    private func answer(_ request: OSSystemExtensionRequest, _ outcome: Outcome, final: Bool) {
+        let key = ObjectIdentifier(request)
+        let handler = handlers[key]
+        if final { handlers[key] = nil }
+        handler?(outcome)
     }
 
     /// Ask macOS to unstage the extension.
@@ -89,12 +131,13 @@ final class SystemExtensionInstaller: NSObject, OSSystemExtensionRequestDelegate
         // Forget that we ever activated.  `activateOnce` answers from memory, so without this
         // a Virtual Camera output added after a removal would be told "already installed" and
         // never submit a request — the camera would stay gone until the app was relaunched.
-        outcome = nil
-        submitted = false
-        self.completion = completion
+        // An activation still waiting for approval keeps its own listeners and answers.
+        settled = nil
+        installLog.notice("asking macOS to remove the camera extension")
         let request = OSSystemExtensionRequest.deactivationRequest(
             forExtensionWithIdentifier: bundleID, queue: .main)
         request.delegate = self
+        handlers[ObjectIdentifier(request)] = completion
         OSSystemExtensionManager.shared.submitRequest(request)
     }
 
@@ -109,33 +152,39 @@ final class SystemExtensionInstaller: NSObject, OSSystemExtensionRequestDelegate
     func request(_ request: OSSystemExtensionRequest,
                  actionForReplacingExtension existing: OSSystemExtensionProperties,
                  withExtension ext: OSSystemExtensionProperties) -> OSSystemExtensionRequest.ReplacementAction {
-        .replace
+        installLog.notice("replacing camera extension \(existing.bundleShortVersion, privacy: .public) (\(existing.bundleVersion, privacy: .public)) with \(ext.bundleShortVersion, privacy: .public) (\(ext.bundleVersion, privacy: .public))")
+        return .replace
     }
 
     func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) {
-        completion?(.needsApproval)
+        installLog.notice("macOS needs the operator to approve the camera extension")
+        answer(request, .needsApproval, final: false)
     }
 
     func request(_ request: OSSystemExtensionRequest,
                  didFinishWithResult result: OSSystemExtensionRequest.Result) {
         switch result {
         case .completed:
-            completion?(.installed)
+            installLog.notice("camera extension request completed")
+            answer(request, .installed, final: true)
         case .willCompleteAfterReboot:
-            completion?(.afterRestart)
+            installLog.notice("camera extension request completes after a restart")
+            answer(request, .afterRestart, final: true)
         @unknown default:
-            completion?(.installed)
+            installLog.notice("camera extension request finished with an unknown result \(result.rawValue)")
+            answer(request, .installed, final: true)
         }
     }
 
     func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) {
         let ns = error as NSError
+        installLog.error("camera extension request failed: \(ns.domain, privacy: .public) \(ns.code) - \(ns.localizedDescription, privacy: .public)")
         // Translate ONLY errors that really come from SystemExtensions: these code numbers
         // are meaningless in any other domain, and mapping them blindly produces a
         // confident, wrong diagnosis (an early build claimed the extension was missing
         // from the bundle when it was sitting right there).
         guard ns.domain == OSSystemExtensionErrorDomain else {
-            completion?(.failed("Couldn't install the virtual camera: \(ns.localizedDescription) [\(ns.domain) \(ns.code)]"))
+            answer(request, .failed("Couldn't install the virtual camera: \(ns.localizedDescription) [\(ns.domain) \(ns.code)]"), final: true)
             return
         }
         let message: String
@@ -155,6 +204,6 @@ final class SystemExtensionInstaller: NSObject, OSSystemExtensionRequestDelegate
         default:
             message = "Couldn't install the virtual camera: \(ns.localizedDescription)"
         }
-        completion?(.failed(message))
+        answer(request, .failed(message), final: true)
     }
 }

@@ -178,8 +178,9 @@ final class ProgramEncoder {
             isKeyframe = !notSync
         }
 
-        // Re-emit SPS/PPS before every IDR — the camera does the same, and it's what lets a
-        // receiver that connected mid-stream start decoding at the next keyframe.
+        // Re-emit SPS/PPS before every IDR - what lets a receiver that connected mid-stream start
+        // decoding at the next keyframe. (The camera does NOT: it sends its format once per
+        // connection and with each keyframe a receiver asks for.)
         if isKeyframe, let fmt = CMSampleBufferGetFormatDescription(sample),
            let payload = Self.formatPayload(from: fmt) {
             DispatchQueue.main.async { [weak self] in self?.onFormat?(payload) }

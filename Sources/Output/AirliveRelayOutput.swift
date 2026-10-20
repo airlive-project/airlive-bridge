@@ -8,8 +8,8 @@
 // Direction: the OBS "Airlive Bridge" source is a SERVER listening on 127.0.0.1:47788.
 // OBS and the Bridge run on the SAME Mac, so the link is plain loopback — no Bonjour,
 // no LAN, no discovery.  This relay is the CLIENT: it connects straight there (retrying
-// until OBS is up) and sends.  On a program switch the new camera's formatDescription
-// (SPS/PPS, resent each keyframe) flows through and OBS resyncs on the next IDR.
+// until OBS is up) and sends.  On a program switch the model asks the new camera for a keyframe;
+// it comes with the camera's formatDescription (SPS/PPS) and OBS resyncs on it.
 //
 // It conforms to VideoOutput so it lives in the model's program-output list like
 // NDI, but it consumes the RAW packet taps (`relayFormat`/`relaySample`), not the

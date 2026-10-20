@@ -6,7 +6,8 @@
 // either: the decoder's own frame is pushed straight into the extension's SINK stream (see
 // CMIOSinkConnection), which the extension, a separate process macOS launches on demand,
 // pulls from.  Anything that is not already the camera's format and size is letterboxed
-// into it once, by VideoToolbox.
+// into it once, by VideoToolbox - including the program itself when the operator picked a size
+// above 1080p (VirtualCameraResolution).
 //
 // Two things make this output unlike the others, and both are macOS rules, not ours:
 //   • The extension can ONLY load when the Bridge runs from /Applications.
@@ -30,8 +31,56 @@ import Foundation
 import CoreVideo
 import CoreMediaIO
 import VideoToolbox
+import QuartzCore   // CACurrentMediaTime - the gap clock for holding the last frame
 import SystemExtensions
 import os
+
+/// The size the virtual camera's frames are sent at (Settings → Outputs). The program is 1080p; a
+/// larger size is the program scaled up ONCE here, so an app whose canvas is 1440p or 4K does not
+/// scale it again itself - visibly sharper in OBS on a 4K canvas (operator, 2026-10-05 test).
+/// Never below 1080p: the source is 1080p, and smaller would only throw detail away.
+///
+/// Bridge-side only: the extension forwards each frame with the frame's OWN size, and consumers
+/// size themselves from the frames - OBS switched to 4K live, without reopening the camera, when
+/// a 4K build started sending (2026-10-05). The camera's declared format stays 1080p.
+enum VirtualCameraResolution: String, CaseIterable, Identifiable {
+    case hd1080, qhd1440, uhd4k
+
+    /// Where the choice is stored (UserDefaults).
+    static let storageKey = "bridge.vcamResolution"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .hd1080:  return "1080p"
+        case .qhd1440: return "1440p"
+        case .uhd4k:   return "4K"
+        }
+    }
+
+    var width: Int {
+        switch self {
+        case .hd1080:  return 1920
+        case .qhd1440: return 2560
+        case .uhd4k:   return 3840
+        }
+    }
+
+    var height: Int { width * 9 / 16 }
+
+    /// Parked at 1080p for now (operator, 2026-10-16): the choice is hidden in Settings and a
+    /// value stored while it was offered is ignored. The live switch behind it stays as built
+    /// and reviewed; turning this back on is the whole change.
+    static let isSelectable = false
+
+    /// The stored choice, 1080p when none was ever made - so nothing changes for anyone who does
+    /// not choose.
+    static var stored: VirtualCameraResolution {
+        guard isSelectable else { return .hd1080 }
+        return UserDefaults.standard.string(forKey: storageKey).flatMap(Self.init(rawValue:)) ?? .hd1080
+    }
+}
 
 /// Same subsystem the extension logs under — one `log show` shows both ends of the hop.
 private let vcamOutLog = Logger(subsystem: "studio.airlive.vcam", category: "bridge")
@@ -85,7 +134,15 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
 
     private let lock = NSLock()
     private var _stage: Stage = .notSetUp
+    /// The installer's last word while the camera is NOT in the device list: awaiting approval,
+    /// or why it cannot be installed. Guarded by `lock`. It outranks the silent "starting" every
+    /// other path falls back to, which used to erase it a moment after it was shown - the card
+    /// stayed on with no message at all (a fresh install run from Downloads, for one).
+    private var installVerdict: Stage?
     private var _isLive = false
+    /// The size frames go to the camera at. Guarded by `lock`: read per frame on the program bus,
+    /// changed from Settings on main.
+    private var _resolution = VirtualCameraResolution.stored
 
     /// macOS accepted a NEW extension but could not swap it in, because the old one is still
     /// running — something has the camera open.  It finishes at the next restart, and until
@@ -124,10 +181,10 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     private static let queueKey = DispatchSpecificKey<Void>()
     private var sink: CMIOSinkConnection?
 
-    /// Fallback conversion ONLY — built lazily the first time a frame arrives that is not
-    /// already the camera's format and size (an AirPlay mirror, a capture card at 720p, and
-    /// the black "no program" filler, which is BGRA).  The normal path never touches it: the
-    /// program decoder's buffers go across untouched.  VTPixelTransferSession rather than
+    /// Conversion — built lazily the first time a frame arrives that is not already the
+    /// camera's format and size (an AirPlay mirror, a capture card at 720p, the black "no
+    /// program" filler, which is BGRA, and every frame when a size above 1080p is chosen).  At
+    /// 1080p the normal path never touches it: the program decoder's buffers go across untouched.  VTPixelTransferSession rather than
     /// CoreImage — a fixed-function block instead of a filter graph.
     ///
     /// GUARDED BY `lock`: `send` runs on the program bus and `stop` on this output's own
@@ -144,6 +201,44 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     /// once a second is what lets the log say which of the two is happening.
     private var framesSent: UInt64 = 0
     private var framesDropped: UInt64 = 0
+
+    /// Whether an app is actually RECEIVING the program right now: the camera has taken frames
+    /// out of the queue within `receivingWindow` (CMIOSinkConnection.framesTakenByCamera).
+    /// "On" on the card only means the camera was found and its input opened; this is what
+    /// tells "OBS shows black because it never opened the camera" from "OBS is getting frames".
+    /// Logged on every change. Read and written on the program bus; reset under `lock` when a sink
+    /// opens. Unsynchronised like the counters above: the worst a race costs is one log line.
+    private var appReceiving = false
+    private var lastTaken: UInt64 = 0
+    private var lastTakenAt: CFTimeInterval = 0
+    /// Two seconds without the camera taking a frame = nobody is reading it.
+    private static let receivingWindow: CFTimeInterval = 2
+
+    // ── Holding the last picture through a short gap ────────────────────────────
+    // The camera extension puts up its "No Video" picture a quarter-second after frames stop
+    // (AirliveDeviceSource.realFrameGrace) - a Wi-Fi hiccup of a few hundred ms flashed it on air
+    // (field report on 1.4.2). The Bridge itself turns a silent camera into black after one second
+    // (BridgeChannelReceiver.silenceThreshold). In between, this output re-sends the last frame it
+    // gave the camera, so the viewer sees the shot hold and then go black - never the placeholder.
+    // A held frame is the same picture again, not a smoothed or invented one.
+
+    /// The last camera-ready frame and when the last program frame ARRIVED (sent or not).
+    /// Guarded by `lock`.
+    private var _lastFrame: CVPixelBuffer?
+    private var _lastArrival: CFTimeInterval = 0
+    /// A gap longer than three frames is a gap, not jitter; under the extension's 0.25 s grace.
+    private static let holdAfter: CFTimeInterval = 0.1
+    /// Past the Bridge's own switch to black (1.0-1.25 s) the program is flowing again as black;
+    /// if nothing comes even then, the placeholder is the truth and is let through.
+    private static let holdLimit: CFTimeInterval = 1.5
+    /// Checked fifteen times a second while the output is on: keeps the camera's longest wait
+    /// under the extension's grace. Its own queue, never behind a blocking sink open/close.
+    private static let holdCheckInterval: DispatchTimeInterval = .milliseconds(66)
+    private let holdQueue = DispatchQueue(label: "studio.airlive.bridge.vcam.hold", qos: .userInitiated)
+    /// Serialises a program frame and a held frame into the camera, so a held (older) frame can
+    /// never land after the newer one that just ended the gap.
+    private let deliverLock = NSLock()
+    private var holdTimer: DispatchSourceTimer?   // main (start/stop)
 
     init(id: UUID = UUID(), label: String = "Virtual Camera") {
         self.id = id
@@ -183,7 +278,11 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
             guard let self else { return }
             self.lock.lock(); let stillWaiting = self.isStarting; self.lock.unlock()
             guard stillWaiting, !CMIOSinkConnection.deviceExists(uuid: kVCamDeviceUUID) else { return }
-            vcamOutLog.error("camera did not appear after activation — macOS never launched the extension")
+            // Two causes look the same from here, and the card's remedy covers both, cheapest
+            // first: this app's device list never picked up the new camera (a fresh install: the
+            // extension launched, a relaunched Bridge sees it at once - field test 2026-10-20),
+            // or macOS never launched the extension (the replacement race above).
+            vcamOutLog.error("camera not visible to this app 3 s after activation - asking to quit and reopen the Bridge (if the camera's own log shows no \"device ready\", macOS never launched it)")
             self.setStage(.cameraProcessMissing)
         }
     }
@@ -256,8 +355,9 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
         // The operator got no message at all, which is the one outcome this card exists to
         // prevent.  It clears itself the moment the device really is there (below).
         let stuck = !present && isCameraProcessMissing
+        let verdict = installVerdict
         lock.unlock()
-        if !present { setStage(stuck ? .cameraProcessMissing : fallback); return }
+        if !present { setStage(stuck ? .cameraProcessMissing : (verdict ?? fallback)); return }
         if live, open { setStage(.live); return }
         // The camera is there. If the operator has this output switched on but we never
         // managed to open the sink — the usual case right after an approval — open it now.
@@ -268,6 +368,7 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
 
     func start() {
         lock.lock(); _isLive = true; lock.unlock()
+        startHolding()
         // ASK MACOS HERE, on the first switch-on, and never merely because the card exists.
         //
         // Installing a camera extension makes macOS demand an approval in System Settings. Doing
@@ -278,18 +379,24 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
         // a toggle worked back and forth cannot churn the extension.
         installer.activateOnce { [weak self] result in
             guard let self else { return }
+            let verdict: Stage?
             switch result {
-            case .installed:
+            case .installed:         verdict = nil
+            case .needsApproval:     verdict = .awaitingApproval
+            case .notInApplications: verdict = .needsInstall("Move Airlive Bridge to /Applications - macOS only loads a camera extension from there.")
+            case .afterRestart:      verdict = .needsInstall("Restart the Mac to finish installing the virtual camera.")
+            case .failed(let why):   verdict = .needsInstall(why)
+            }
+            self.lock.lock(); self.installVerdict = verdict; self.lock.unlock()
+            if let verdict {
+                self.setStage(verdict)
+            } else {
+                // Installed (on a first install: right after the operator approved it). Now the
+                // camera has to APPEAR; if it does not, the card says so and names the remedy -
+                // only while the output is on (switched off meanwhile, nothing is waiting for it).
                 self.refreshFromDeviceList(fallback: .starting)
-                self.expectDeviceShortly()
-            case .needsApproval:
-                self.setStage(.awaitingApproval)
-            case .notInApplications:
-                self.setStage(.needsInstall("Move Airlive Bridge to /Applications - macOS only loads a camera extension from there."))
-            case .afterRestart:
-                self.setStage(.needsInstall("Restart the Mac to finish installing the virtual camera."))
-            case .failed(let why):
-                self.setStage(.needsInstall(why))
+                self.lock.lock(); let on = self._isLive; self.lock.unlock()
+                if on { self.expectDeviceShortly() }
             }
         }
         openSink()
@@ -312,10 +419,12 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
         // gone.  Ownership, not lifetime, is what closes a stream.
         let connection = sink
         sink = nil
+        _lastFrame = nil
         if let t = transfer { VTPixelTransferSessionInvalidate(t) }
         transfer = nil
         pool = nil
         lock.unlock()
+        stopHolding()
         queue.async { [weak self] in
             // Outside the lock: this talks to the extension's process and its own close()
             // must not be able to park an incoming frame behind it.
@@ -346,13 +455,17 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
                 // either way — a silent stage is fine on the card, never in the log.
                 let present = CMIOSinkConnection.deviceExists(uuid: kVCamDeviceUUID)
                 vcamOutLog.notice("sink NOT opened — \(reason, privacy: .public) (device present: \(present))")
-                self.lock.lock(); let stuck = self.isCameraProcessMissing; self.lock.unlock()
-                self.setStage(present ? .failed(reason) : (stuck ? .cameraProcessMissing : .starting))
+                self.lock.lock()
+                let stuck = self.isCameraProcessMissing
+                let verdict = self.installVerdict
+                self.lock.unlock()
+                self.setStage(present ? .failed(reason) : (stuck ? .cameraProcessMissing : (verdict ?? .starting)))
                 return
             }
             self.lock.lock()
             self.sink = connection
             self.framesSent = 0; self.framesDropped = 0
+            self.appReceiving = false; self.lastTaken = 0; self.lastTakenAt = 0
             self.reportedOnce = false      // a new session may fail in a new way
             self.lock.unlock()
             vcamOutLog.notice("sink opened — pushing program into the camera")
@@ -362,6 +475,19 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
 
     func clearError() { refreshFromDeviceList(fallback: .starting) }
 
+    /// Send frames at `resolution` from the next frame on. The converter is rebuilt for the new
+    /// size; in-flight conversion holds the same lock, so no frame is cut in half.
+    func setResolution(_ resolution: VirtualCameraResolution) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard resolution != _resolution else { return }
+        _resolution = resolution
+        if let t = transfer { VTPixelTransferSessionInvalidate(t) }
+        transfer = nil
+        pool = nil
+        vcamOutLog.notice("resolution → \(resolution.title, privacy: .public)")
+    }
+
     // MARK: - Frames
 
     func send(_ pixelBuffer: CVPixelBuffer, timeNs: UInt64) {
@@ -369,8 +495,14 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
         // timestamp that can be right is the one read at the moment of enqueue, inside the
         // sink.  The parameter stays because the VideoOutput protocol has it and every other
         // output needs it.
-        lock.lock(); let live = _isLive; let sink = self.sink; lock.unlock()
+        lock.lock(); let live = _isLive; let sink = self.sink; _lastArrival = CACurrentMediaTime(); lock.unlock()
         guard live, let sink else { return }
+        // Nobody watching (or the extension has not taken the last frame yet): skip before the
+        // conversion, not after it.
+        // Before the room check: when nobody reads the camera there is never room, and that is
+        // exactly the moment "no app is receiving" has to be noticed.
+        noteReceiving(sink)
+        guard sink.hasRoom else { framesDropped &+= 1; return }
         // Enqueued on the CALLER's thread, deliberately.  The contract forbids holding the
         // buffer past this call, and the enqueue itself is a pointer push into a lock-free
         // queue — hopping to another thread would mean copying a full 1080p frame to avoid
@@ -380,6 +512,8 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
             return
         }
         probe(frame)
+        deliverLock.lock(); defer { deliverLock.unlock() }
+        lock.lock(); if _isLive { _lastFrame = frame }; lock.unlock()   // never outlives a stop()
         switch sink.send(frame) {
         case .sent:      framesSent &+= 1
         // Nobody has the camera open — the extension stops draining and the queue stays full.
@@ -388,6 +522,33 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
         case .queueFull: framesDropped &+= 1
         case .failed:    reportOnce("The virtual camera stopped accepting frames — switch this output off and on.")
         }
+    }
+
+    private func startHolding() {
+        guard holdTimer == nil else { return }
+        let t = DispatchSource.makeTimerSource(flags: .strict, queue: holdQueue)
+        t.schedule(deadline: .now() + Self.holdCheckInterval, repeating: Self.holdCheckInterval)
+        t.setEventHandler { [weak self] in self?.holdIfGap() }
+        t.resume()
+        holdTimer = t
+    }
+
+    private func stopHolding() {
+        holdTimer?.cancel()
+        holdTimer = nil
+    }
+
+    /// On `holdQueue`. Sends nothing unless the program has paused for longer than jitter and
+    /// someone is watching; the counters stay the program's own.
+    private func holdIfGap() {
+        deliverLock.lock(); defer { deliverLock.unlock() }
+        lock.lock()
+        let gap = CACurrentMediaTime() - _lastArrival
+        let frame = _lastFrame
+        let sink = _isLive ? self.sink : nil
+        lock.unlock()
+        guard gap > Self.holdAfter, gap < Self.holdLimit, let frame, let sink, sink.hasRoom else { return }
+        sink.send(frame)
     }
 
     /// The program frame as the camera publishes it.
@@ -405,9 +566,10 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
         // seen here carries one (VideoToolbox and AVFoundation both allocate that way) — this
         // sends the one that does not through the converter, whose pool is IOSurface-backed,
         // instead of silently publishing a black camera.
+        lock.lock(); let target = _resolution; lock.unlock()
         if CVPixelBufferGetPixelFormatType(src) == kVCamPixelFormat,
-           CVPixelBufferGetWidth(src) == Int(kVCamWidth),
-           CVPixelBufferGetHeight(src) == Int(kVCamHeight),
+           CVPixelBufferGetWidth(src) == target.width,
+           CVPixelBufferGetHeight(src) == target.height,
            CVPixelBufferGetIOSurface(src) != nil {
             return src
         }
@@ -439,8 +601,8 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
         }
         let attrs: [String: Any] = [
             kCVPixelBufferPixelFormatTypeKey as String: kVCamPixelFormat,
-            kCVPixelBufferWidthKey as String: Int(kVCamWidth),
-            kCVPixelBufferHeightKey as String: Int(kVCamHeight),
+            kCVPixelBufferWidthKey as String: _resolution.width,
+            kCVPixelBufferHeightKey as String: _resolution.height,
             kCVPixelBufferIOSurfacePropertiesKey as String: [:],
         ]
         let ps = CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, attrs as CFDictionary, &pool)
@@ -467,11 +629,27 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     /// on the extension's side (VCamLog.swift), so "the picture looks wrong" becomes a
     /// comparison of two numbers rather than an argument about tags.
     private var lastProbe = Date.distantPast
+    /// Program-bus thread. See `appReceiving`.
+    private func noteReceiving(_ sink: CMIOSinkConnection) {
+        let taken = sink.framesTakenByCamera
+        let now = CACurrentMediaTime()
+        if taken != lastTaken {
+            lastTaken = taken
+            lastTakenAt = now
+            guard !appReceiving else { return }
+            appReceiving = true
+            vcamOutLog.notice("an app is receiving the virtual camera")
+        } else if appReceiving, now - lastTakenAt > Self.receivingWindow {
+            appReceiving = false
+            vcamOutLog.notice("no app is receiving the virtual camera - frames are not being taken")
+        }
+    }
+
     private func probe(_ buffer: CVPixelBuffer) {
         guard Date().timeIntervalSince(lastProbe) >= 1.0 else { return }
         lastProbe = Date()
         let passthrough = CVPixelBufferGetPixelFormatType(buffer) == kVCamPixelFormat
-        vcamOutLog.notice("sending \(passthrough ? "pass-through" : "CONVERTED", privacy: .public) — taken \(self.framesSent), no room for \(self.framesDropped) — \(LumaProbe.describe(buffer), privacy: .public)")
+        vcamOutLog.notice("sending \(passthrough ? "pass-through" : "CONVERTED", privacy: .public) — enqueued \(self.framesSent), no room for \(self.framesDropped), \(self.appReceiving ? "an app is receiving" : "no app receiving", privacy: .public) — \(LumaProbe.describe(buffer), privacy: .public)")
     }
 
     private var reportedOnce = false

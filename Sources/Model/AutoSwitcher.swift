@@ -90,9 +90,9 @@ final class AutoSwitcher: ObservableObject {
     /// pick rather than captured at start, so a camera that joins mid-rotation is simply in the
     /// next draw, and one that drops is simply not.
     ///
-    /// A channel that is connected but has stopped delivering frames still counts. The model has
-    /// no per-channel "are frames arriving" signal today, and inventing one for this feature was
-    /// explicitly out of scope (operator, 2026-09-26).
+    /// A camera that went silent (`signalLost`: connected, nothing arriving for a second) STAYS in
+    /// this pool: a Wi-Fi hiccup must not shrink a two-camera rig to one and switch auto off for
+    /// good. It is only skipped when picking where to cut - see `pictureChannels`.
     private var liveChannels: [BridgeChannel] {
         // `isConnected && videoActive`, which is the model's own test for "this channel has a
         // picture". `isConnected` ALONE is not it: on a camera channel it goes true at authorise
@@ -102,6 +102,9 @@ final class AutoSwitcher: ObservableObject {
         // on air.
         model?.multiviewChannels.filter { $0.isConnected && $0.videoActive } ?? []
     }
+
+    /// The cameras auto may cut TO: in the pool and actually delivering a picture right now.
+    private var pictureChannels: [BridgeChannel] { liveChannels.filter { !$0.signalLost } }
 
     /// Auto needs somewhere to go: with one camera there is no rotation, only a timer that cuts a
     /// channel to itself.
@@ -190,7 +193,7 @@ final class AutoSwitcher: ObservableObject {
     @discardableResult
     private func rescueProgramIfDark() -> Bool {
         guard let model else { return false }
-        let live = liveChannels
+        let live = pictureChannels
         let pgm = model.programID
         guard !live.contains(where: { $0.id == pgm }),
               let rescue = live.first(where: { $0.id != pgm }) else { return false }
@@ -222,8 +225,10 @@ final class AutoSwitcher: ObservableObject {
         // still 2, so the only candidate is 1 - and camera 2 never reached air at all. Losing a
         // camera from the rotation is far worse than the collision it was avoiding (operator
         // found it in a minute of testing, 2026-09-27).
-        let candidates = live.filter { $0.id != model.programID }
-        guard let next = candidates.randomElement() else { stop(); return }
+        // Only cameras with a picture right now. When the only other one is mid-hiccup, hold the
+        // shot and try again at the next interval rather than cut to black or stop.
+        let candidates = pictureChannels.filter { $0.id != model.programID }
+        guard let next = candidates.randomElement() else { scheduleNext(); return }
 
         // PREVIEW IS NEVER TOUCHED. It is the operator's workspace - the camera control panel is
         // bound to it - so a rotation that moves it retunes the controls under their hands for no

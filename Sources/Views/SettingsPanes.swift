@@ -159,14 +159,14 @@ struct MultiviewPane: View {
 
 // MARK: - Outputs
 
-/// One row per program output with its output resolution. A PLACEHOLDER for now (operator,
-/// 2026-10-07): the picker is drawn but disabled until the resolution choice is built (ROADMAP item 3,
-/// Virtual Camera 1080p / 4K first). When it goes live it needs a dropdown list that opens in THIS
-/// window - the shared `DropdownOverlay` lives in the main window only (see SettingsWindow.swift).
+/// One row per program output with its resolution. The virtual camera's can be a choice (1080p /
+/// 1440p / 4K, VirtualCameraResolution), parked at 1080p for now (`isSelectable`); every other
+/// output sends the 1080p program as it is.
 struct OutputsPane: View {
     @ObservedObject var model: BridgeModel
     @ObservedObject var recorder: ProgramRecorder
     @ObservedObject var draft: SettingsDraft
+    @AppStorage(VirtualCameraResolution.storageKey) private var storedVcam: VirtualCameraResolution = .hd1080
 
     /// The line under an output's name: what it is called or where it goes OUTSIDE the Bridge,
     /// never its own name or kind a second time (operator, 2026-10-07).
@@ -195,9 +195,16 @@ struct OutputsPane: View {
                 ForEach(model.programOutputs, id: \.id) { output in
                     SettingsRow(title: output.label.isEmpty ? output.kind.displayName : output.label,
                                 subtitle: Self.reach(of: output)) {
-                        Dropdown(items: ["1080p"], selection: "1080p", displayText: "1080p",
-                                 isEnabled: false, triggerHeight: ControlMetrics.pillHeight) { _ in }
-                            .frame(width: 140)
+                        if output.kind == .vcam && VirtualCameraResolution.isSelectable {
+                            ChoiceChips(options: VirtualCameraResolution.allCases,
+                                        selection: draft.binding(\.vcamResolution, stored: storedVcam),
+                                        title: \.title)
+                                .frame(width: 210)
+                        } else {
+                            Text("1080p")
+                                .font(.system(size: 13).monospacedDigit())
+                                .foregroundColor(Theme.textSecondary)
+                        }
                     }
                 }
             }
@@ -248,7 +255,7 @@ struct AutoCutPane: View {
 /// Third-party control surfaces and apps, one group each (operator, 2026-10-07: a section per
 /// product would not scale). Stream Deck is the first; Companion, MIDI and the like join here.
 struct IntegrationsPane: View {
-    /// The switch acts at once, like the same switch in the ⌘K window (operator, 2026-10-07).
+    /// The switch acts at once, not on Apply (operator, 2026-10-07).
     @ObservedObject var control: ControlServer
 
     var body: some View {

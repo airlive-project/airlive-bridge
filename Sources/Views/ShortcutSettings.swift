@@ -1,80 +1,34 @@
-// ShortcutSettings.swift — the "Shortcuts" window (menu bar → Shortcuts → Customize…, ⌘K).
+// ShortcutSettings.swift - the Shortcuts section of the Settings window. It is opened from the
+// window's section list and from the menu bar (Shortcuts > Customize Shortcuts…), which lands on
+// this section; there is no separate Shortcuts window (operator, 2026-10-16: one place).
 //
-// TWO columns so the window stays a normal height no matter how many channels exist
-// (a single stacked list overflowed the screen with no way to scroll):
-//   LEFT  — the fixed set: GENERAL switches, STREAM DECK, SWITCHER (Cut, Auto Cut), LENSES (6).
-//   RIGHT — per-channel keys, ONE ROW per channel with BOTH bus chips side by side
-//           (PREVIEW = plain digit, PROGRAM = ⌘digit) — the two-bus switcher model
-//           reads as two columns, exactly like the buses themselves.
+// One column of cards: GENERAL switches, SWITCHER (Cut, Auto Cut), LENSES (6), then CHANNELS -
+// one row per channel with BOTH bus chips side by side (PREVIEW = plain digit, PROGRAM =
+// ⌘digit), so the two-bus switcher model reads as two columns, like the buses themselves.
+// Stream Deck has its own section (Integrations).
 //
 // Click a chip to record (held modifiers build up live as "⌘+…"; Esc cancels);
 // right-click a chip to reset that key.  A refused conflict shows a red ring +
 // tooltip.  Global mode uses the SAME keys — no modifier prefix (the OBS model).
+// Keys act at once, not on Apply: a key is recorded when it is pressed.
 
 import SwiftUI
 import AppKit
 
 struct ShortcutSettings: View {
-    /// The window's scene id: the menu (⌘K) and the Settings window both open it by this.
-    static let windowID = "bridge-shortcuts"
-
     @ObservedObject var shortcuts: ShortcutCenter
     @ObservedObject var bindings: ShortcutBindings
     @ObservedObject var model: BridgeModel
-    @ObservedObject var control: ControlServer
 
-    /// Where it is shown. The same keys, switches and chips either way; only the arrangement differs.
-    enum Layout {
-        /// Its own window (⌘K): two columns, so the window keeps a normal height.
-        case window
-        /// The Shortcuts section of the Settings window: one column of cards inside the pane's
-        /// scroll, and no STREAM DECK block, because Stream Deck has its own section there.
-        case settingsPane
-    }
-    var layout: Layout = .window
-
-    /// One shared chip width — every key chip in the window sits on the same grid.
+    /// One shared chip width — every key chip sits on the same grid.
     private let chipWidth: CGFloat = 88
-    private let columnWidth: CGFloat = 320
 
     var body: some View {
-        switch layout {
-        case .window:
-            HStack(alignment: .top, spacing: Spacing.xl) {
-                leftColumn.frame(width: columnWidth)
-                Rectangle().fill(Theme.stroke).frame(width: 1)
-                rightColumn.frame(width: columnWidth)
-            }
-            .padding(Spacing.xl)
-            .fixedSize(horizontal: false, vertical: true)   // window height = the TALLER column
-            .background(Theme.bgPanel)
-            .background(NonRestorableWindow())   // never auto-reopens on the next launch
-            .opacity(shortcuts.enabled ? 1 : 0.85)
-        case .settingsPane:
-            paneSections
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .opacity(shortcuts.enabled ? 1 : 0.85)
-        }
-    }
-
-    // MARK: - LEFT: the fixed set
-
-    private var leftColumn: some View {
-        VStack(alignment: .leading, spacing: Spacing.sm) {
-            generalSection
-            if layout == .window { streamDeckSection.padding(.top, Spacing.md) }
-            switcherSection.padding(.top, Spacing.md)
-            lensesSection.padding(.top, Spacing.md)
-        }
-    }
-
-    /// The Settings section: the same sections, each in its own card.
-    private var paneSections: some View {
         VStack(alignment: .leading, spacing: Spacing.md) {
             generalSection.settingsCard()
             switcherSection.settingsCard()
             lensesSection.settingsCard()
-            rightColumn.settingsCard()
+            channelsSection.settingsCard()
             // It resets every key on the page (switcher, lenses, channels), so it sits under all
             // of them, not inside one card (operator, 2026-10-07). Left-aligned, away from the
             // window's Apply below on the right, so one is never hit for the other. The switches are
@@ -92,6 +46,8 @@ struct ShortcutSettings: View {
                 Spacer()
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .opacity(shortcuts.enabled ? 1 : 0.85)
     }
 
     /// Asks first: on a live show, a layout of thirty keys gone at once means wrong cuts until it
@@ -120,37 +76,13 @@ struct ShortcutSettings: View {
         }
     }
 
-    /// Independent of the keyboard switches: turning keys off must not take the Stream Deck down
-    /// with them.
-    private var streamDeckSection: some View {
-        VStack(alignment: .leading, spacing: Spacing.sm) {
-            sectionLabel("STREAM DECK")
-            switchRow("Allow Stream Deck control",
-                      subtitle: "Apps on this Mac can switch cameras",
-                      isOn: $control.enabled)
-            controlWarning
-        }
-    }
-
     // Only the KEY-ASSIGNMENT sections grey out when shortcuts are off.  The disable MUST NOT
     // wrap the GENERAL rows: it used to sit on the whole column, which disabled the very "Enable
     // shortcuts" switch that turns them back on — once off, there was no way back from the UI.
 
     private var switcherSection: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
-            HStack {
-                sectionLabel("SWITCHER")
-                Spacer()
-                // In the ⌘K window it stays where it always was; the Settings section puts it under
-                // all the cards instead (see paneSections).
-                if layout == .window {
-                    Button("Reset All Keys") { bindings.resetAll() }
-                        .buttonStyle(.plain)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(Theme.textSecondary)
-                        .help("Reset every key to its default")
-                }
-            }
+            sectionLabel("SWITCHER")
             fixedRow(ShortcutAction(kind: .cut, index: 0), title: "Cut")
             fixedRow(ShortcutAction(kind: .autoCut, index: 0), title: "Auto Cut")
         }
@@ -167,7 +99,7 @@ struct ShortcutSettings: View {
         .disabled(!shortcuts.enabled)
     }
 
-    /// Left-column row: title flush left, chip flush right.
+    /// Title flush left, chip flush right.
     private func fixedRow(_ action: ShortcutAction, title: String) -> some View {
         HStack(spacing: Spacing.sm) {
             Text(title)
@@ -179,9 +111,9 @@ struct ShortcutSettings: View {
         .frame(height: 30)
     }
 
-    // MARK: - RIGHT: per-channel keys (one row = both buses)
+    // MARK: - Per-channel keys (one row = both buses)
 
-    private var rightColumn: some View {
+    private var channelsSection: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
             sectionLabel("CHANNELS")
             if model.channels.isEmpty {
@@ -249,13 +181,6 @@ struct ShortcutSettings: View {
     }
 
     @ViewBuilder
-    private var controlWarning: some View {
-        if control.enabled, let failure = control.failure {
-            ControlFailureLine(text: failure)
-        }
-    }
-
-    @ViewBuilder
     private var permissionWarning: some View {
         if shortcuts.enabled && shortcuts.global && !shortcuts.hasPermission {
             HStack(spacing: Spacing.sm) {
@@ -314,7 +239,7 @@ private struct BindingChip: View {
             Button("Reset to Default") { bindings.reset(action); conflict = nil }
                 .disabled(!bindings.isCustomized(action))
         }
-        // If the window closes mid-recording, the NSEvent monitor and the
+        // If the section closes mid-recording, the NSEvent monitor and the
         // isRecording mute would leak forever — release them when the chip goes away.
         .onDisappear { if recording { finish() } }
     }

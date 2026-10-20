@@ -49,7 +49,7 @@ final class RTSPOutput: VideoOutput {
     var hasPlayingClient: Bool { liveLock.lock(); defer { liveLock.unlock() }; return _hasPlayingClient }
 
     /// Fires on MAIN when a client starts PLAYING — the model forces one IDR so the new viewer
-    /// decodes immediately instead of waiting out the camera's 6–10 s GOP.
+    /// decodes immediately instead of waiting out the camera's keyframe interval (up to 15 s).
     var onPlay: (() -> Void)?
     /// Card-visible failure (see VideoOutput.lastError).  Main-confined.
     private(set) var lastError: String?
@@ -401,7 +401,7 @@ private final class RTSPClient {
             isPlaying = true
             owner?.refreshPlayState()   // a client is now playing → RTSP is a live passthrough consumer
             // Force one IDR for the fresh viewer — a mid-GOP join would otherwise sit on garbage
-            // until the camera's next natural keyframe (LAN GOP is 6–10 s).
+            // until the camera's next natural keyframe (up to 15 s away).
             if let owner { DispatchQueue.main.async { owner.onPlay?() } }
             respond(cseq: cseq, extra: "Session: \(session)\r\nRTP-Info: url=stream")
         case "GET_PARAMETER":

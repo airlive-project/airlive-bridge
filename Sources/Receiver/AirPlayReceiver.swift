@@ -29,6 +29,11 @@ final class AirPlayReceiver: ChannelReceiver {
     private var _isProgramSource = false     // H1: only the program source needs the per-frame main hop
     private var _didFlipGate = false         // one main hop per session to set isConnected/latestFrame
     private var _stopped = false             // gate late decoder callbacks after stop()
+    /// Which run of frames a delayed frame belongs to. Moves when the mirror session drops and
+    /// when the delay changes, so a frame still waiting from before is dropped, not shown: an old
+    /// session's frame would put a dead picture back on a blanked tile, and one scheduled under a
+    /// longer delay would land AFTER newer frames sent under the shorter one.
+    private var _generation = 0
 
     init(channel: BridgeChannel, name: String) {
         self.channel = channel
@@ -39,7 +44,7 @@ final class AirPlayReceiver: ChannelReceiver {
             self.stateLock.lock()
             if self._stopped { self.stateLock.unlock(); return }
             let d = self._extraDelaySec
-            let isPgm = self._isProgramSource
+            let generation = self._generation
             let needGate = !self._didFlipGate
             if needGate { self._didFlipGate = true }
             self.stateLock.unlock()
@@ -47,8 +52,16 @@ final class AirPlayReceiver: ChannelReceiver {
             let deliver = { [weak self] in
                 guard let self, let channel = self.channel else { return }
                 // A frame scheduled before stop() must not resurrect a torn-down channel.
-                self.stateLock.lock(); let stopped = self._stopped; self.stateLock.unlock()
-                if stopped { return }
+                // On air is read NOW, not when the frame arrived: with a delay, a cut to this
+                // channel would otherwise leave the program empty for the whole delay.
+                self.stateLock.lock()
+                let current = !self._stopped && generation == self._generation
+                let isPgm = self._isProgramSource
+                // The frame that was to flip the connected gate is being dropped: hand that job to
+                // the next frame, or a delay change in a session's first moments leaves it unset.
+                if !current && needGate { self._didFlipGate = false }
+                self.stateLock.unlock()
+                guard current else { return }
                 channel.publishFrame(pixelBuffer)        // off-thread mirror (zero-copy) — every tile
                 // Program tap right here: the tap is lock-guarded and the outputs come from the
                 // lock-guarded ProgramBus, so it never needs main.  Routing it through main put
@@ -75,7 +88,7 @@ final class AirPlayReceiver: ChannelReceiver {
         // isConnected/latestFrame.  (For a combined channel the control side stays untouched.)
         engine.onConnectionLost = { [weak self] in
             guard let self else { return }
-            self.stateLock.lock(); self._didFlipGate = false; self.stateLock.unlock()
+            self.stateLock.lock(); self._didFlipGate = false; self._generation += 1; self.stateLock.unlock()
             self.channel?.publishFrame(nil)   // blank mirrors (off-main, thread-safe)
             let clear = { [weak self] in self?.channel?.isConnected = false; self?.channel?.latestFrame = nil }
             if Thread.isMainThread { clear() } else { DispatchQueue.main.async(execute: clear) }
@@ -105,7 +118,9 @@ final class AirPlayReceiver: ChannelReceiver {
     func updateDelay(_ preset: LatencyPreset) {}   // no preset jitter buffer on the AirPlay path
     func updateExtraDelay(_ ms: Int) {
         let v = Swift.max(0, Double(ms) / 1000.0)
-        stateLock.lock(); _extraDelaySec = v; stateLock.unlock()
+        stateLock.lock()
+        if v != _extraDelaySec { _extraDelaySec = v; _generation += 1 }
+        stateLock.unlock()
     }
     /// H1: only the program AirPlay channel needs the per-frame `onProgramFrame` main hop.
     func setProgramSource(_ isProgram: Bool) {

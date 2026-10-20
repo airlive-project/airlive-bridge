@@ -59,6 +59,8 @@ final class ProgramRecorder: ObservableObject {
     /// finalised - armed the moment it is (writerQueue).
     private var currentTake = 0
     private var queuedStart: (folder: URL, take: Int)?
+    /// Signalled when the recorder is back at rest - the quit waits on it (writerQueue).
+    private var idleWaiter: DispatchSemaphore?
     private var writer: AVAssetWriter?
     private var input: AVAssetWriterInput?
     private var adaptor: AVAssetWriterInputPixelBufferAdaptor?
@@ -151,6 +153,21 @@ final class ProgramRecorder: ObservableObject {
         startedAt = nil
         setWantsFrames(false)
         writerQueue.async { [weak self] in self?.finish() }
+    }
+
+    /// The app is quitting: end the take and wait until its file is closed, so it opens in an
+    /// editor. A file left unfinished has no proper end and some editors refuse it. Bounded, so
+    /// a writer that never answers cannot hold the quit forever. Main thread.
+    func finishBeforeQuit(timeout: TimeInterval = 3) {
+        stop()
+        let done = DispatchSemaphore(value: 0)
+        writerQueue.async { [weak self] in
+            guard let self, self.phase != .idle else { done.signal(); return }
+            self.idleWaiter = done   // finish() is already queued ahead of this
+        }
+        if done.wait(timeout: .now() + timeout) == .timedOut {
+            print("[Recorder] ⚠️ quit: the file was not closed within \(Int(timeout)) s")
+        }
     }
 
     private func arm(_ dir: URL, take: Int) {
@@ -291,6 +308,12 @@ final class ProgramRecorder: ObservableObject {
     @discardableResult
     private func append(_ buffer: CVPixelBuffer, slot: Int64) -> Bool {
         guard phase == .recording, let input, let adaptor else { return false }
+        // A writer can die between appends (disk full, recording drive unplugged). Checked on
+        // every frame, so REC goes out at once instead of glowing over a file nothing reaches.
+        if let writer, writer.status == .failed {
+            fail("Recording stopped: \(writer.error?.localizedDescription ?? "the file could not be written")")
+            return false
+        }
         guard input.isReadyForMoreMediaData else {
             stats.skipped += 1
             print("[Recorder] ⚠️ encoder busy - frame \(slot) not written")
@@ -311,6 +334,12 @@ final class ProgramRecorder: ObservableObject {
         if transfer == nil {
             var session: VTPixelTransferSession?
             VTPixelTransferSessionCreate(allocator: nil, pixelTransferSessionOut: &session)
+            // Bars, not a stretch: a portrait mirror or a 4:3 capture cut into a 16:9 take keeps
+            // its shape, as it does on the virtual camera.
+            if let session {
+                VTSessionSetProperty(session, key: kVTPixelTransferPropertyKey_ScalingMode,
+                                     value: kVTScalingMode_Letterbox)
+            }
             transfer = session
             let attrs: [String: Any] = [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
@@ -405,6 +434,9 @@ final class ProgramRecorder: ObservableObject {
         if let queued = queuedStart {          // a Start that came while this file was saving
             queuedStart = nil
             arm(queued.folder, take: queued.take)
+        } else {
+            idleWaiter?.signal()
+            idleWaiter = nil
         }
     }
 

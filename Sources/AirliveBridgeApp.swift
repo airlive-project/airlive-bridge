@@ -13,19 +13,27 @@ import AppKit   // NSSavePanel / NSOpenPanel / NSAlert for profile load / save
 import Sparkle  // real auto-update — the App owns one SPUStandardUpdaterController (see Updater.swift)
 
 /// Quit guard: closing the app mid-take kills every camera stream and the program feed
-/// (OBS/NDI/RTSP/SRT go dark) — too destructive for a stray ⌘Q.  If any channel is live,
-/// ask first; with nothing connected, quit silently as usual.
+/// (OBS/NDI/RTSP/SRT go dark) — too destructive for a stray ⌘Q.  If any channel is live or the
+/// program is being recorded, ask first; otherwise quit silently as usual.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Set by AirliveBridgeApp.init — the adaptor instantiates this delegate itself,
     /// so the model is handed over via a static (single app-lifetime model).
     static weak var model: BridgeModel?
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let model = Self.model,
-              model.channels.contains(where: { $0.anyConnected }) else { return .terminateNow }
+        guard let model = Self.model else { return .terminateNow }
+        let live = model.channels.contains(where: { $0.anyConnected })
+        let recording = model.programRecorder.isRecording
+        guard live || recording else { return .terminateNow }
         let alert = NSAlert()
-        alert.messageText = "A stream is live"
-        alert.informativeText = "One or more cameras are connected — quitting stops the stream and every program output. Quit anyway?"
+        if live {
+            alert.messageText = "A stream is live"
+            alert.informativeText = "One or more cameras are connected - quitting stops the stream and every program output"
+                + (recording ? " and ends the recording (the file is saved first)" : "") + ". Quit anyway?"
+        } else {
+            alert.messageText = "Recording"
+            alert.informativeText = "Quitting ends the recording. The file is saved first. Quit anyway?"
+        }
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Quit")     // first = default (Return)
         alert.addButton(withTitle: "Cancel")   // Esc
@@ -43,6 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         Self.model?.autosaveNow()
         Self.model?.programOutputs.forEach { $0.stop() }
+        Self.model?.programRecorder.finishBeforeQuit()
     }
 }
 
@@ -62,7 +71,7 @@ struct AirliveBridgeApp: App {
     private let updateGate: UpdateGate
     /// The local control channel (Stream Deck). A plain `let`, created in init, because it has to
     /// be listening from launch - a `@StateObject` would only come up once a view first reads it,
-    /// which for the Shortcuts window is never, unless the operator opens it.
+    /// which for the Settings window is never, unless the operator opens it.
     private let control: ControlServer
 
     init() {
@@ -90,7 +99,7 @@ struct AirliveBridgeApp: App {
         // `DropdownOverlay` observing the shared `DropdownPresenter`, so opening a list in one window
         // lit the other window's full-window scrim and swallowed its next click.  One window ⇒ one
         // overlay ⇒ no cross-window input capture.  A single `Window` reopens on Dock-activate after a
-        // close, so nothing is lost.  (The Multiview Wall + Shortcuts are still their own scenes.)
+        // close, so nothing is lost.  (The Multiview Wall is still its own scene.)
         Window("Airlive Bridge", id: "bridge-main") {
             ContentView()
                 .environmentObject(model)
@@ -167,21 +176,14 @@ struct AirliveBridgeApp: App {
                 Button("Open Profile…") { openProfile() }
                     .keyboardShortcut("o", modifiers: [.command])
             }
-            // Shortcuts open their OWN window from the menu bar (⌘K).  Deliberately not a
-            // toolbar button: macOS 26 wraps toolbar items in liquid-glass chrome we can't
+            // The menu bar leads to the Shortcuts section of Settings - one place for the keys,
+            // no separate window and no key of its own (operator, 2026-10-16).  Deliberately not
+            // a toolbar button: macOS 26 wraps toolbar items in liquid-glass chrome we can't
             // disable, and the app must look identical across OS versions.
             CommandMenu("Shortcuts") {
-                OpenShortcutsCommand()
+                Button("Customize Shortcuts…") { SettingsPresenter.shared.open(at: .shortcuts) }
             }
         }
-
-        // The Shortcuts window itself (menu bar → Shortcuts → Customize Shortcuts…, ⌘K).
-        Window("Shortcuts", id: ShortcutSettings.windowID) {
-            ShortcutSettings(shortcuts: shortcuts, bindings: shortcuts.bindings, model: model,
-                             control: control)
-                .preferredColorScheme(.dark)
-        }
-        .windowResizability(.contentSize)
 
         // Clean fullscreen multiview wall (second monitor) — opened from the
         // multiview's "Fullscreen Multicam" button.  Shares the same model.
@@ -281,12 +283,3 @@ struct AirliveBridgeApp: App {
     }
 }
 
-/// Menu-bar command that opens the Shortcuts window — a tiny View so it can read
-/// `openWindow` from the environment (commands content can't take @Environment directly).
-private struct OpenShortcutsCommand: View {
-    @Environment(\.openWindow) private var openWindow
-    var body: some View {
-        Button("Customize Shortcuts…") { openWindow(id: ShortcutSettings.windowID) }
-            .keyboardShortcut("k", modifiers: [.command])
-    }
-}

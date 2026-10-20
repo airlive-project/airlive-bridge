@@ -131,7 +131,8 @@ protocol VideoOutput: AnyObject {
     /// Raw-H.264 passthrough hooks — used ONLY by the OBS relay (it forwards the
     /// program camera's existing encode, no transcode).  Buffer outputs (NDI)
     /// ignore them via the default no-op below.  `relayFormat` carries the
-    /// length-prefixed SPS/PPS the camera resends each keyframe.
+    /// length-prefixed SPS/PPS the camera sends once per connection and again with each keyframe
+    /// a receiver asks for.
     func relayFormat(_ payload: Data)
     func relaySample(_ payload: Data, timestampMicros: Int64)
 

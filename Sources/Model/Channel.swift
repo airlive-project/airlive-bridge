@@ -54,6 +54,30 @@ final class BridgeChannel: ObservableObject, Identifiable {
     /// change.  Set by `BridgeModel` at channel creation.
     var onVideoActiveChanged: (() -> Void)?
 
+    /// The camera has sent nothing for `BridgeChannelReceiver.silenceThreshold` while still
+    /// connected: it lost its route and will resume on the same connection, or the connection
+    /// will close on its own. Set by the receiver (main); the picture side reads `signalLost`.
+    @Published var linkSilent = false {
+        didSet { if linkSilent != oldValue { onSignalLostChanged?() } }
+    }
+
+    /// Connected, meant to send video, and silent: no picture is coming. Shown as "No signal",
+    /// kept off the program (black instead) and out of Auto Cut's draw. A Control-only camera is
+    /// quiet by nature, so silence there is not a lost picture.
+    var signalLost: Bool { linkSilent && isConnected && videoActive }
+
+    /// Fired on main when `linkSilent` flips. Set by `BridgeModel` at channel creation.
+    var onSignalLostChanged: (() -> Void)?
+
+    /// Fired on main when a silent camera speaks again on the same connection. Its lamp went dark
+    /// while it was cut off, so the model sends it the current tally. Set by `BridgeModel`.
+    var onLinkResumed: (() -> Void)?
+
+    /// Fired on main when the camera's own Tally switch flips (`tallyAllowed`). Tally is sent only
+    /// when a bus changes, so a camera that turns tally back ON would otherwise stay dark until the
+    /// next cut; the model sends it its current cue. Set by `BridgeModel` at channel creation.
+    var onTallyAllowedChanged: (() -> Void)?
+
     /// "Has a live picture" gate for the no-signal overlay — a LOW-FREQUENCY
     /// published flag, NOT the per-frame buffer.  Set once when video starts,
     /// nil on disconnect/clear; views read `latestFrame == nil` only to decide
@@ -141,6 +165,12 @@ final class BridgeChannel: ObservableObject, Identifiable {
             if kind != .screenMirroringPlusControl,
                (oldValue?.videoActive ?? true) != (remote?.videoActive ?? true) {
                 onVideoActiveChanged?()
+            }
+            // The camera's own Tally switch. Fires on the flip only, never per snapshot: the camera
+            // reports its state often, and a cue answered to every report is a stream of packets
+            // the phone has to handle for nothing.
+            if (oldValue?.tallyEnabled ?? true) != tallyAllowed {
+                onTallyAllowedChanged?()
             }
 
             // STICKY optimistic-lens reconcile.  Keep showing the operator's pick until EITHER the
@@ -284,7 +314,7 @@ final class BridgeChannel: ObservableObject, Identifiable {
     /// `onProgramSample` / `onProgramFormat` — the RAW H.264 ARLV payloads, for
     /// the passthrough relay to OBS (forward the camera's existing encode, no
     /// transcode).  `onProgramFormat` carries the length-prefixed SPS/PPS the
-    /// camera resends each keyframe.
+    /// camera sends once per connection and again with each keyframe a receiver asks for.
     // ALL THREE taps are written on MAIN (BridgeModel, on a program switch) and read on the
     // receiver's network queue, once per encoded frame.  They are lock-guarded so the receiver can
     // call them DIRECTLY from that queue.  Previously the receiver hopped every packet through

@@ -255,22 +255,115 @@ struct MirrorVideoView: NSViewRepresentable {
             return CGPoint(x: min(1, max(0, u)), y: min(1, max(0, 1 - v)))  // clamp edge FP, flip to top-left
         }
 
-        /// A brief focus reticle (ring) at the tapped VIEW point — fades + shrinks over ~0.7 s.
+        /// The tap-to-focus reticle, drawn exactly like the Airlive Camera's own (`FocusReticle` /
+        /// `FocusBrackets` in the camera app, 1.1.3): four rounded corner brackets of a 60 pt
+        /// square, and over it a label saying what the tap moves - "AE/AF" while the camera's
+        /// exposure is automatic (focus and exposure follow the point), "AF" while it is manual
+        /// (only focus does). The same look on the phone and in the Bridge.
+        ///
+        /// On this view's own layer, not the video layer: the video is rotated for portrait
+        /// sources, the reticle must not be. The view is y-UP, so "above" is the larger y.
         private func flashReticle(at point: CGPoint) {
-            let side: CGFloat = 44
-            let ring = CAShapeLayer()
-            ring.path = CGPath(ellipseIn: CGRect(x: -side / 2, y: -side / 2, width: side, height: side), transform: nil)
-            ring.position = point
-            ring.fillColor = NSColor.clear.cgColor
-            ring.strokeColor = NSColor(calibratedRed: 1, green: 0.84, blue: 0.04, alpha: 1).cgColor   // accentYellow
-            ring.lineWidth = 2
-            layer?.addSublayer(ring)
-            let fade = CABasicAnimation(keyPath: "opacity"); fade.fromValue = 1; fade.toValue = 0
-            let shrink = CABasicAnimation(keyPath: "transform.scale"); shrink.fromValue = 1.35; shrink.toValue = 1.0
-            let grp = CAAnimationGroup(); grp.animations = [fade, shrink]; grp.duration = 0.7
-            grp.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            ring.add(grp, forKey: nil)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak ring] in ring?.removeFromSuperlayer() }
+            currentReticle?.removeFromSuperlayer()   // a new tap replaces the last one at once
+
+            let side = reticleSide()
+            let reticle = CALayer()
+            reticle.position = point
+            reticle.addSublayer(Self.focusBrackets(side: side))
+            reticle.addSublayer(focusLabel(channel?.remote?.exposureAuto ?? true ? "AE/AF" : "AF", side: side))
+            layer?.addSublayer(reticle)
+            currentReticle = reticle
+
+            // The camera's timing: in with a 1.4 → 1.0 scale over 0.22 s (ease-out), held, gone
+            // after about 1.2 s. Transform and opacity only.
+            let scale = CABasicAnimation(keyPath: "transform.scale")
+            scale.fromValue = 1.4; scale.toValue = 1.0
+            scale.duration = Self.reticleIn
+            scale.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            let fade = CAKeyframeAnimation(keyPath: "opacity")
+            fade.values = [1, 1, 0]
+            fade.keyTimes = [0, NSNumber(value: Self.reticleHold / Self.reticleLife), 1]
+            fade.duration = Self.reticleLife
+            let group = CAAnimationGroup()
+            group.animations = [scale, fade]
+            group.duration = Self.reticleLife
+            reticle.opacity = 0   // the end state; the group shows it until then
+            reticle.add(group, forKey: nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.reticleLife) { [weak self, weak reticle] in
+                reticle?.removeFromSuperlayer()
+                if let self, self.currentReticle === reticle { self.currentReticle = nil }
+            }
+        }
+
+        /// The camera's 60 pt square is about 6.4 % of its ~930 pt landscape preview. Taken as a
+        /// share of the picture shown here, so the reticle covers the same part of the frame as on
+        /// the phone at any window size; bounded so a small tile still shows it and a big pane does
+        /// not blow it up (operator, 2026-10-20: 60 pt read too large in the Bridge).
+        private func reticleSide() -> CGFloat {
+            var picW = bounds.width
+            if let buf = channel?.latestPixelBuffer {
+                var bw = CGFloat(CVPixelBufferGetWidth(buf)), bh = CGFloat(CVPixelBufferGetHeight(buf))
+                if currentRotation % 180 != 0 { swap(&bw, &bh) }
+                if bw > 0, bh > 0 { picW = bw * min(bounds.width / bw, bounds.height / bh) }
+            }
+            return min(max(picW * Self.reticleShare, 32), 52)
+        }
+        private static let reticleShare: CGFloat = 60.0 / 932.0
+
+        private var currentReticle: CALayer?
+        private static let reticleIn: CFTimeInterval = 0.22    // camera: scale-in, ease-out
+        private static let reticleHold: CFTimeInterval = 1.2   // camera: how long it stays
+        private static let reticleLife: CFTimeInterval = 1.45  // hold + a 0.25 s fade
+
+        /// The camera's square (camera FocusBrackets, drawn at 60 pt there): four corners with a
+        /// 12/60 radius, each arm 21/60 of the side from the edge, the middle of every side open,
+        /// a 1 pt stroke kept inside.
+        private static func focusBrackets(side: CGFloat) -> CAShapeLayer {
+            let corner = side * 12 / 60, arm = side * 21 / 60   // the camera's proportions
+            let r = CGRect(x: -side / 2, y: -side / 2, width: side, height: side).insetBy(dx: 0.5, dy: 0.5)
+            let path = CGMutablePath()
+            for (c, dx, dy) in [(CGPoint(x: r.minX, y: r.minY), 1.0, 1.0), (CGPoint(x: r.maxX, y: r.minY), -1.0, 1.0),
+                                (CGPoint(x: r.maxX, y: r.maxY), -1.0, -1.0), (CGPoint(x: r.minX, y: r.maxY), 1.0, -1.0)] {
+                path.move(to: CGPoint(x: c.x, y: c.y + dy * arm))
+                path.addArc(tangent1End: c, tangent2End: CGPoint(x: c.x + dx * arm, y: c.y), radius: corner)
+                path.addLine(to: CGPoint(x: c.x + dx * arm, y: c.y))
+            }
+            let brackets = CAShapeLayer()
+            brackets.path = path
+            brackets.fillColor = nil
+            brackets.strokeColor = NSColor(Theme.accentYellow).cgColor
+            brackets.lineWidth = 1
+            return brackets
+        }
+
+        /// The camera's HUD pill (black 50%, radius 10, white SF 14 regular, 10 pt sides and 5 pt top
+        /// and bottom, 4 pt above the square), scaled with the square; text never under 10 pt.
+        private func focusLabel(_ text: String, side: CGFloat) -> CALayer {
+            let k = side / 60
+            let fontSize = max(10, (14 * k).rounded())
+            let font = NSFont.systemFont(ofSize: fontSize, weight: .regular)
+            let textSize = (text as NSString).size(withAttributes: [.font: font])
+            let padX = (10 * k).rounded(), padY = (5 * k).rounded()
+            let size = CGSize(width: ceil(textSize.width) + padX * 2, height: ceil(textSize.height) + padY * 2)
+            let scale = window?.backingScaleFactor ?? 2
+
+            let pill = CALayer()
+            pill.bounds = CGRect(origin: .zero, size: size)
+            pill.position = CGPoint(x: 0, y: side / 2 + 4 + size.height / 2)   // above the square (y-up)
+            pill.backgroundColor = NSColor.black.withAlphaComponent(0.5).cgColor
+            pill.cornerRadius = min(10 * k, size.height / 2)
+
+            let label = CATextLayer()
+            label.string = text
+            label.font = font
+            label.fontSize = fontSize
+            label.foregroundColor = NSColor.white.cgColor
+            label.alignmentMode = .center
+            label.contentsScale = scale
+            label.frame = CGRect(x: 0, y: (size.height - ceil(textSize.height)) / 2,
+                                 width: size.width, height: ceil(textSize.height))
+            pill.addSublayer(label)
+            return pill
         }
     }
 }

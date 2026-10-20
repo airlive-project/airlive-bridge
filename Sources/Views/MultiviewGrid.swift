@@ -348,6 +348,7 @@ private struct LivePane: View {
                     } else if channel.previewEnabled {
                         MirrorVideoView(channel: channel, onTapPoint: onTapPoint)
                         if channel.latestFrame == nil { offline }
+                        else if channel.signalLost { noSignal }
                     } else {
                         offline
                     }
@@ -375,6 +376,20 @@ private struct LivePane: View {
                 .font(.system(size: 10)).foregroundColor(Theme.textFaint)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Connected but silent past the threshold: the last picture stays under a dark veil, so the
+    /// operator sees WHICH shot froze and that it is not live. Clears itself when frames return.
+    private var noSignal: some View {
+        ZStack {
+            Color.black.opacity(0.65)
+            VStack(spacing: Spacing.xs) {
+                Image(systemName: "wifi.exclamationmark")
+                    .font(.system(size: 18)).foregroundColor(Theme.accentYellow)
+                Text("No signal")
+                    .font(.system(size: 10, weight: .semibold)).foregroundColor(Theme.accentYellow)
+            }
+        }
     }
 
     /// Camera confirmed Control-only (encoder off): no Airlive video on this link.
@@ -411,9 +426,10 @@ private struct ThumbCell: View {
             // 2026-10-07) - the state decides, no timing. A double-click used to be the cut, and
             // waiting to tell it from a single click made every click half a second late. A quick
             // double-click still cuts (its second click lands on Preview). Off in Settings, every
-            // click only stages.
+            // click only stages. Not on the camera already on air: Auto Cut often leaves it in
+            // Preview too, and that "cut" would change nothing on screen but stop Auto Cut.
             .onTapGesture {
-                if isPreview && previewClickCuts { onTake() } else { onStage() }
+                if isPreview && !isProgram && previewClickCuts { onTake() } else { onStage() }
             }
             .help(isProgram ? "On air"
                   : previewClickCuts ? "Click to stage in Preview · click again to cut to Program"
@@ -451,7 +467,7 @@ struct MultiviewWall: View {
             .background(Color.black)
             .background(WallWindowConfigurator(aspect: gridAspect, model: model) { w in
                 if win !== w { win = w }
-                w.isRestorable = false   // don't auto-reopen the wall next launch (see NonRestorableWindow)
+                w.isRestorable = false   // the operator opens the wall deliberately; never on the next launch
             })
             // OBS-style projector menu on right-click.
             .contextMenu { wallMenu }

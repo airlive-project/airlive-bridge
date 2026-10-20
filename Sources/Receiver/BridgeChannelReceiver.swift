@@ -94,6 +94,38 @@ final class BridgeChannelReceiver: ChannelReceiver {
     /// first frame; after that a non-program channel never hops on the frame path.
     private var didFlipSignalGate = false
 
+    // ── Link silence (signal lost / resumed) ──────────────────────────────
+    /// How long the camera may say nothing before the link counts as silent (operator,
+    /// 2026-10-16). A camera that loses its route sends nothing until it is back (camera 52d2c7b:
+    /// encoder paused, state blocked); a Wi-Fi stall that keeps the route, or a camera pausing its
+    /// encoder (a 4K record bump, a lens change), can be quiet that long too. Either way no
+    /// picture is arriving, which is exactly what "No signal" says.
+    static let silenceThreshold: CFTimeInterval = 1.0
+    /// How often the silence is checked while a camera is connected: a quarter of the threshold,
+    /// so a lost signal shows within 1.0-1.25 s. Runs only while a connection is authorised.
+    private static let silenceCheckInterval: DispatchTimeInterval = .milliseconds(250)
+    /// A gap after which the current tally is re-sent even though "No signal" never showed
+    /// (operator, 2026-10-20). Ten frames at 30 fps: ordinary jitter stays under it.
+    private static let tallyGap: CFTimeInterval = 0.3
+    /// When the committed connection last delivered bytes. On `queue`.
+    private var lastInboundAt: CFTimeInterval = 0
+    /// The link has been silent past the threshold and no byte has come since. On `queue`.
+    private var linkSilent = false
+    private var silenceTimer: DispatchSourceTimer?
+    /// The camera's last word on whether it sends video (its state snapshot). A Control-only
+    /// camera is quiet by nature, so its silence is neither logged nor shown. On `queue`.
+    private var peerSendsVideo = true
+    /// Just back from silence: what the phone's socket held when the route went is delivered
+    /// first (old frames, up to ~140 KB), then a keyframe. The old frames are dropped until that
+    /// keyframe, so neither the preview nor any output replays a moment that already passed.
+    /// The keyframe is recognised by its own IDR slice: the camera sends its FORMAT only once per
+    /// connection and again only when a receiver asks for a keyframe (camera CaptureEngine,
+    /// `lastFormatDescSentAt`), so on a plain return no format packet comes at all. On `queue`.
+    private var awaitingResumeKeyframe = false
+    /// When the camera spoke again after a silence - for the "picture back after N ms" log line,
+    /// which shows how long the wait for its keyframe took. On `queue`.
+    private var resumedAt: CFTimeInterval = 0
+
     // ── Remote-snapshot coalescer (H2) ────────────────────────────────────
     /// Coalesce the camera's `state` snapshots to ~1 Hz before touching the main-isolated
     /// @Published `remote` (don't trust the phone's own throttle; protect main if it ever
@@ -267,6 +299,8 @@ final class BridgeChannelReceiver: ChannelReceiver {
             self.connection?.stateUpdateHandler = nil
             self.connection?.cancel()
             self.connection = nil
+            self.silenceTimer?.cancel()
+            self.silenceTimer = nil
             self.pendingConnections.forEach { $0.cancel() }
             self.pendingConnections.removeAll()
             self.teardownDecodeSession()
@@ -282,9 +316,44 @@ final class BridgeChannelReceiver: ChannelReceiver {
     /// when no ready connection exists.  Thread-safe — `NWConnection.send` is.
     func send(_ msg: ControlMessage) {
         queue.async { [weak self] in
-            guard let self, let conn = self.connection, conn.state == .ready else { return }
-            let data = msg.encodeAsPacket().encode()
-            conn.send(content: data, completion: .idempotent)
+            guard let self else { return }
+            if msg.type == "forceKeyframe" { return self.requestKeyframe() }
+            self.sendNow(msg)
+        }
+    }
+
+    /// On `queue`.
+    private func sendNow(_ msg: ControlMessage) {
+        guard let conn = connection, conn.state == .ready else { return }
+        conn.send(content: msg.encodeAsPacket().encode(), completion: .idempotent)
+    }
+
+    // ── Keyframe requests, spaced the way the camera accepts them ─────────────────
+    /// The camera honours a `forceKeyframe` at most once per 0.25 s and silently IGNORES one that
+    /// comes sooner (camera CaptureEngine `minForceKeyframeInterval`). Two parts of the Bridge can
+    /// ask within that window - this receiver when a silent camera speaks again, and the program
+    /// routing when the passthrough outputs switch back to that camera - and the ignored one was
+    /// the one SRT / RTSP were waiting for (up to the camera's 15 s keyframe interval). So a
+    /// request that would land inside the window is not sent and lost: it is sent once, at the
+    /// first moment the camera will take it. A margin above 0.25 s covers network jitter.
+    private static let keyframeRequestSpacing: CFTimeInterval = 0.35
+    private var lastKeyframeRequestAt: CFTimeInterval = 0   // on `queue`
+    private var keyframeRequestPending = false               // on `queue`
+
+    /// On `queue`.
+    private func requestKeyframe() {
+        let wait = lastKeyframeRequestAt + Self.keyframeRequestSpacing - CACurrentMediaTime()
+        guard wait > 0 else {
+            lastKeyframeRequestAt = CACurrentMediaTime()
+            return sendNow(.forceKeyframe())
+        }
+        guard !keyframeRequestPending else { return }   // one already waiting covers this one
+        keyframeRequestPending = true
+        queue.asyncAfter(deadline: .now() + wait) { [weak self] in
+            guard let self else { return }
+            self.keyframeRequestPending = false
+            self.lastKeyframeRequestAt = CACurrentMediaTime()
+            self.sendNow(.forceKeyframe())
         }
     }
 
@@ -416,12 +485,15 @@ final class BridgeChannelReceiver: ChannelReceiver {
         }
         l.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
+            LocalNetworkAccess.shared.note(state)   // a refusal is said in the title bar
             switch state {
             case .ready:
                 let port = self.listener?.port?.rawValue ?? 0
                 print("[BridgeReceiver \(self.src)] ✅ listening on ephemeral port \(port)")
             case .failed(let err):
                 print("[BridgeReceiver \(self.src)] ❌ listener failed: \(err)")
+            case .waiting(let err):
+                print("[BridgeReceiver \(self.src)] ⏳ listener waiting: \(err)")
             case .cancelled:
                 print("[BridgeReceiver \(self.src)] listener cancelled")
             default:
@@ -634,6 +706,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
         }
         print("[BridgeReceiver \(src)] 🔌 disconnect \(conn.endpoint) (\(reason)) — clearing frame, busy=0")
         connection = nil
+        stopSilenceWatch()
         resetAuthState()                          // drop any pending challenge/buffer
         reconcileOccupancy()
         teardownDecodeSession()
@@ -661,7 +734,8 @@ final class BridgeChannelReceiver: ChannelReceiver {
             // corrupt the new stream's framing.  (The identity check used to live only
             // in handle() — too late: parser.append had already eaten the bytes.)
             guard conn === self.connection else { return }
-            if let data {
+            if let data, !data.isEmpty {
+                self.noteInbound()
                 for packet in self.parser.append(data) { self.handle(packet, from: conn) }
             }
             if !isDone && error == nil {
@@ -699,6 +773,12 @@ final class BridgeChannelReceiver: ChannelReceiver {
             }
 
         case .sample:
+            if awaitingResumeKeyframe {
+                guard H264NAL.containsIDR(avcc: packet.payload) else { return }   // the pre-silence tail
+                awaitingResumeKeyframe = false   // its keyframe: live video again
+                publishSignalLost(false)
+                print("[BridgeReceiver \(src)] 🎬 picture back \(Int((CACurrentMediaTime() - resumedAt) * 1000)) ms after the camera came back")
+            }
             if authorized {
                 decodeFrame(payload: packet.payload, packetTimestamp: packet.timestampMicros)
                 forwardProgramSample(packet.payload, packet.timestampMicros)   // raw H.264 → relay passthrough
@@ -761,6 +841,13 @@ final class BridgeChannelReceiver: ChannelReceiver {
         authorized = true
         challengeNonce = nil
         cancelAuthStallTimer()
+        startSilenceWatch()
+        // With a password the camera's connect keyframe arrived DURING the challenge and was
+        // dropped (samples are refused until authorised; the camera forces that keyframe at
+        // connect, before its own auth completes). Without asking again the picture would wait
+        // for the next natural keyframe, up to 15 s. Not needed without a password: nothing was
+        // dropped. Not on a control-only side: it sends no video.
+        if effectiveAuthRequired && !controlSide { requestKeyframe() }
         reconcileOccupancy()
         publishConnected(true)
         // One-shot hello — FIRST control message of the connection (PROTOCOL-COMPAT-SPEC
@@ -968,8 +1055,9 @@ final class BridgeChannelReceiver: ChannelReceiver {
 
     /// Extract SPS/PPS from the format-description payload and build a
     /// `CMVideoFormatDescription`.  Rebuild the decode session only on a REAL
-    /// format change — the iPhone re-sends the format on every keyframe as a
-    /// mid-stream-join safety net, and wiping on every GOP strobes the picture.
+    /// format change — the iPhone re-sends the same format on each new connection and whenever a
+    /// receiver asks for a keyframe (it no longer does so on every keyframe: that woke its radio
+    /// every 2 s for nothing), and wiping the session on a repeat strobes the picture.
     private func buildFormatDescription(from data: Data) {
         let params = parseParameterSets(from: data)
         guard params.count >= 2,
@@ -1346,6 +1434,96 @@ final class BridgeChannelReceiver: ChannelReceiver {
 
     // MARK: - Publish to the owning channel (main queue)
 
+    // MARK: - Link silence
+
+    /// A camera that loses its route goes completely quiet and, when the route returns, resumes
+    /// on the SAME connection (camera 52d2c7b) - TCP never notices. So the only way to know is to
+    /// listen: no bytes for `silenceThreshold` = the link is silent; the first bytes after it = the
+    /// link is back. On a video connection silence is a lost picture, shown as "No signal" and
+    /// taken off the program; on any connection the return gets the camera's current tally,
+    /// because the camera darkened its lamp while it was cut off and waits for one.
+    /// On `queue`.
+    private func startSilenceWatch() {
+        lastInboundAt = CACurrentMediaTime()
+        linkSilent = false
+        awaitingResumeKeyframe = false
+        peerSendsVideo = true   // until this connection's first snapshot says otherwise
+        guard silenceTimer == nil else { return }
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now() + Self.silenceCheckInterval, repeating: Self.silenceCheckInterval)
+        t.setEventHandler { [weak self] in self?.checkSilence() }
+        t.resume()
+        silenceTimer = t
+    }
+
+    /// On `queue`.
+    /// The channel's "No signal" is cleared by `publishConnected(false)`, in the SAME main-thread
+    /// step that marks it disconnected: cleared first on its own, the channel would read
+    /// "connected and live" for an instant and the program would be routed back to a camera that
+    /// is already gone.
+    private func stopSilenceWatch() {
+        silenceTimer?.cancel()
+        silenceTimer = nil
+        linkSilent = false
+        awaitingResumeKeyframe = false
+    }
+
+    /// On `queue`.
+    private func checkSilence() {
+        guard !linkSilent, CACurrentMediaTime() - lastInboundAt > Self.silenceThreshold else { return }
+        linkSilent = true
+        guard carriesPicture else { return }
+        print("[BridgeReceiver \(src)] 📵 nothing from the camera for \(Self.silenceThreshold) s")
+        publishSignalLost(true)
+    }
+
+    /// Bytes arrived on the committed connection. On `queue`.
+    private func noteInbound() {
+        let gap = CACurrentMediaTime() - lastInboundAt
+        lastInboundAt = CACurrentMediaTime()
+        guard linkSilent else {
+            // A gap too short for "No signal" can still be a route flap: the camera darkens its
+            // lamp the instant its route goes, however briefly, and waits for a cue (camera
+            // CaptureEngine handleLinkViability). One current cue after any gap this long; the
+            // camera ignores an unchanged cue, so a gap that was not a flap costs one tiny packet.
+            if authorized, gap >= Self.tallyGap {   // not the handshake's own first bytes
+                DispatchQueue.main.async { [weak self] in self?.channel?.onLinkResumed?() }
+            }
+            return
+        }
+        linkSilent = false
+        // Tally at once: the lamp needs nothing but the link. The PICTURE is not back until the
+        // camera's keyframe, so "No signal" stays up until it arrives (`.sample` below) - never a
+        // frozen frame passed off as live.
+        DispatchQueue.main.async { [weak self] in self?.channel?.onLinkResumed?() }
+        if carriesPicture {
+            awaitingResumeKeyframe = true
+            resumedAt = CACurrentMediaTime()
+            // ASK for the keyframe. The camera makes one by itself only when iOS reported its route
+            // gone and back (camera `handleLinkViability`); a Wi-Fi stall that never lost the route
+            // leaves it encoding P-frames, and the next natural keyframe is up to 15 s away (its
+            // standard keyframe interval). The same request every cut makes; the camera answers
+            // with an IDR and its format, rate-limited on its side.
+            send(.forceKeyframe())
+            print("[BridgeReceiver \(src)] 📶 camera back on the same connection - asked for a keyframe")
+        } else {
+            publishSignalLost(false)
+        }
+    }
+
+    /// Whether silence on this connection means a lost picture: not on the control side of a
+    /// combined channel (its video is the AirPlay side) and not from a Control-only camera.
+    /// Either way the return still re-sends tally.
+    private var carriesPicture: Bool { !controlSide && peerSendsVideo }
+
+    private func publishSignalLost(_ lost: Bool) {
+        guard !controlSide else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let channel = self?.channel, channel.linkSilent != lost else { return }
+            channel.linkSilent = lost
+        }
+    }
+
     private func publishConnected(_ connected: Bool) {
         // Control-side of a combined channel drives `controlConnected` (the ARLV side); the
         // video/`isConnected` flag belongs to the AirPlay receiver.  Everything else uses
@@ -1353,7 +1531,12 @@ final class BridgeChannelReceiver: ChannelReceiver {
         DispatchQueue.main.async { [weak self] in
             guard let self, let channel = self.channel else { return }
             if self.controlSide { channel.controlConnected = connected }
-            else { channel.isConnected = connected }
+            else {
+                channel.isConnected = connected
+                // Disconnected: no longer "silent" either (see stopSilenceWatch) - after
+                // isConnected, so the program is already routed away when this lands.
+                if !connected, channel.linkSilent { channel.linkSilent = false }
+            }
         }
     }
 
@@ -1382,6 +1565,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
     /// only keep the latest and push it when the window closes — at most one main hop per
     /// `remoteCoalesceSeconds`, no matter how fast the phone sends.
     private func publishRemote(_ snapshot: StateSnapshot) {
+        peerSendsVideo = snapshot.videoActive
         if remoteFlushScheduled {
             pendingRemote = snapshot               // within window — defer the latest
             return

@@ -8,20 +8,17 @@
 //
 // Like OBS's settings: most changes are held in `SettingsDraft` until Apply, and Cancel drops them
 // (SettingsDraft lists the few that act at once). The values themselves are the SAME state the
-// rails, the AUTO panel and the Shortcuts window use, so once applied a change shows everywhere,
+// rails and the AUTO panel use, so once applied a change shows everywhere,
 // and every existing way in keeps working as before.
 //
-// No working `Dropdown` / `MenuButton` in this window. Their list is drawn by the one
-// `DropdownOverlay` in the main window, and a second overlay on the shared presenter swallows clicks
-// across windows (see AirliveBridgeApp). A choice here is a row of chips, which also shows every
-// option at once. (Outputs shows a disabled Dropdown as a placeholder; making it live needs a list
-// that opens in this window.)
+// No `Dropdown` / `MenuButton` in this window. Their list is drawn by the one `DropdownOverlay` in
+// the main window, and a second overlay on the shared presenter swallows clicks across windows (see
+// AirliveBridgeApp). A choice here is a row of chips, which also shows every option at once.
 
 import SwiftUI
 import Sparkle
 
-/// The sections, in sidebar order. Virtual Camera resolution joins Outputs when it is built
-/// (ROADMAP "Next - planned 2026-10-05", item 3).
+/// The sections, in sidebar order.
 enum SettingsSection: String, CaseIterable, Identifiable {
     case general, cameras, multiview, outputs, autoCut, integrations, shortcuts
 
@@ -153,8 +150,7 @@ struct SettingsWindow: View {
         case .shortcuts:
             VStack(alignment: .leading, spacing: 0) {
                 PaneHeader(title: "Shortcuts")
-                ShortcutSettings(shortcuts: shortcuts, bindings: shortcuts.bindings, model: model,
-                                 control: control, layout: .settingsPane)
+                ShortcutSettings(shortcuts: shortcuts, bindings: shortcuts.bindings, model: model)
             }
         }
     }
@@ -208,7 +204,7 @@ extension View {
     }
 
     /// A group of settings as the main window's card. Only for a pane with many groups: the
-    /// Shortcuts section (ShortcutSettings, settings-pane layout).
+    /// Shortcuts section (ShortcutSettings).
     func settingsCard() -> some View {
         padding(Spacing.md)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -279,7 +275,7 @@ struct SettingsRow<Control: View>: View {
     }
 }
 
-/// The on/off switch every settings row uses (here and in the Shortcuts window).
+/// The on/off switch every settings row uses.
 struct SettingsSwitch: View {
     @Binding var isOn: Bool
 
@@ -290,8 +286,7 @@ struct SettingsSwitch: View {
     }
 }
 
-/// Why the Stream Deck control channel is not listening, under its switch - in Integrations and
-/// in the Shortcuts window alike.
+/// Why the Stream Deck control channel is not listening, under its switch in Integrations.
 struct ControlFailureLine: View {
     let text: String
 

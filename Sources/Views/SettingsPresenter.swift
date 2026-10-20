@@ -145,6 +145,9 @@ final class SettingsPresenter: NSObject, NSWindowDelegate {
     /// anywhere, which is what Apple documents it for.
     func windowWillClose(_ notification: Notification) {
         if NSApp.modalWindow === window { NSApp.abortModal() }
+        // A key chip still listening must not outlive the window: it would keep every shortcut
+        // muted and swallow the next key pressed anywhere (a Space cut included).
+        dependencies?.shortcuts.endActiveRecording?()
         draft?.discard()   // nothing pending outlives the window (also clears a guide preview)
         draft = nil
         window = nil

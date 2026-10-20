@@ -49,6 +49,11 @@ enum H264NAL {
     /// The NAL type (low 5 bits of the header byte): 5 = IDR, 7 = SPS, 8 = PPS.
     static func type(of nal: [UInt8]) -> UInt8 { (nal.first ?? 0) & 0x1F }
 
+    /// Whether an AVCC sample holds an IDR slice - a keyframe a decoder can start from.
+    static func containsIDR(avcc data: Data) -> Bool {
+        nalUnits(fromAVCC: data).contains { type(of: $0) == 5 }
+    }
+
     /// Convert microseconds to a 90 kHz RTP/PCR timestamp (90000/1e6 = 9/100).
     static func ts90kHz(microseconds: Int64) -> UInt32 {
         UInt32(truncatingIfNeeded: microseconds * 9 / 100)

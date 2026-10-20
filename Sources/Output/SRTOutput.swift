@@ -116,7 +116,7 @@ final class SRTOutput: VideoOutput {
     private let liveLock = NSLock()
 
     /// Fires on MAIN when the caller actually connects — the model forces one IDR so the
-    /// receiver decodes immediately instead of waiting out the camera's 6–10 s GOP.
+    /// receiver decodes immediately instead of waiting out the camera's keyframe interval (up to 15 s).
     var onReady: (() -> Void)?
 
     /// True while the SRT socket is ACTUALLY connected (isLive is true already during the
