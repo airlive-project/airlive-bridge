@@ -35,6 +35,18 @@
     <description>Most recent updates to Airlive Bridge</description>
     <language>en</language>
     <item>
+      <title>Airlive Bridge 1.5.0</title>
+      <pubDate>Tue, 20 Oct 2026 19:22:41 +0000</pubDate>
+      <sparkle:version>21</sparkle:version>
+      <sparkle:shortVersionString>1.5.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[A Settings window, frame guides on the multiview, a clear "No signal" when a camera drops out (the program goes to black and the picture returns by itself), tally that stays right after a dropout, a virtual camera that holds through short network gaps, and a Mac that stays awake through the show.]]></description>
+      <enclosure
+        url="https://github.com/airlive-project/airlive-bridge/releases/download/v1.5.0/Airlive-Bridge-1.5.0.dmg"
+        length="11512682"  type="application/octet-stream"
+        sparkle:edSignature="lezTuzOvmkr1R1pU7RNTzqNuJt/Rn5fWNjZ9yjWX1nzikqZfLavjHWBRTw/XrR5vt830CIsvclocHmE7POn5AA==" />
+    </item>
+    <item>
       <title>Airlive Bridge 1.4.2</title>
       <pubDate>Tue, 06 Oct 2026 09:00:00 +0000</pubDate>
       <sparkle:version>20</sparkle:version>
