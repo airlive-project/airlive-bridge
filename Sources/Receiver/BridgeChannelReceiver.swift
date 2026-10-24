@@ -743,6 +743,11 @@ final class BridgeChannelReceiver: ChannelReceiver {
             } else {
                 let reason = error.map { "receive error \($0)" } ?? "peer closed (FIN)"
                 self.handleDisconnect(conn, reason: reason)
+                // Close our side too. Freeing the slot alone left the socket in CLOSE_WAIT, and its
+                // keepalive kept probing the phone until the phone answered with a reset. Detached
+                // first, as in the takeover: the cancel must not re-enter dropConnection.
+                conn.stateUpdateHandler = nil
+                conn.cancel()
             }
         }
     }
