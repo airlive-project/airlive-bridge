@@ -40,7 +40,6 @@ Download [`Airlive-Bridge.dmg`](https://github.com/airlive-project/airlive-bridg
 from [Releases](https://github.com/airlive-project/airlive-bridge/releases/latest)
 and drag **Airlive Bridge** to Applications.  The app is **signed with a Developer ID
 and notarized by Apple**, so it opens normally — no right-click → Open dance.
-An **Uninstall Airlive Bridge** helper is included in the DMG.
 
 From then on it **updates itself**: Airlive Bridge checks for new versions in the
 background and offers the standard *Install and Relaunch*, verifying Apple's

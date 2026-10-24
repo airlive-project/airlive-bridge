@@ -173,11 +173,45 @@ fi
 echo "▶︎ Building DMG…"
 cp -R "$APP" "$STAGING/"
 ln -s /Applications "$STAGING/Applications"
-# Ship the uninstaller in the DMG so a user can cleanly remove the app + all its data
-# (App Support, prefs, Keychain) without hunting through ~/Library. See docs/APPLE-DEVELOPER-RELEASE.md.
-cp "$ROOT/scripts/uninstall-bridge.command" "$STAGING/Uninstall Airlive Bridge.command"
-chmod +x "$STAGING/Uninstall Airlive Bridge.command"
-hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING" -ov -format UDZO "$DMG" >/dev/null
+# The window people see when they open the DMG: our background ("Install - Drag into the
+# Applications folder" with an arrow), the app left of the arrow, Applications right of it, and
+# nothing else (operator, 2026-10-24). Finder keeps that layout in the volume's .DS_Store, and the
+# documented way to write it is to ask Finder itself, so the image is built read-write, laid out
+# by Finder, then compressed. The background is one multi-resolution TIFF (1x + 2x), which Finder
+# draws sharp on Retina. Positions are in points, matching the 660x410 artwork; the window is
+# 28 pt taller, which is the title bar, so the content area is the artwork exactly.
+mkdir -p "$STAGING/.background"
+cp "$ROOT/scripts/dmg/background.tiff" "$STAGING/.background/background.tiff"
+RW_DMG="$BUILD_DIR/rw.dmg"
+hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING" -ov -format UDRW "$RW_DMG" >/dev/null
+MOUNT_DIR="$(hdiutil attach -readwrite -noverify -noautoopen "$RW_DMG" | awk -F'\t' '/\/Volumes\// {print $NF}')"
+osascript <<APPLESCRIPT
+tell application "Finder"
+  tell disk "$APP_NAME"
+    open
+    set current view of container window to icon view
+    set toolbar visible of container window to false
+    set statusbar visible of container window to false
+    set the bounds of container window to {200, 120, 860, 558}
+    set opts to the icon view options of container window
+    set arrangement of opts to not arranged
+    set icon size of opts to 96
+    set text size of opts to 12
+    set background picture of opts to file ".background:background.tiff"
+    set position of item "$APP_NAME.app" of container window to {170, 205}
+    set position of item "Applications" of container window to {490, 205}
+    close
+    open
+    update without registering applications
+    delay 1
+    close
+  end tell
+end tell
+APPLESCRIPT
+sync
+hdiutil detach "$MOUNT_DIR" >/dev/null
+hdiutil convert "$RW_DMG" -format UDZO -o "$DMG" -ov >/dev/null
+rm -f "$RW_DMG"
 echo "  ✓ $DMG"
 
 if [ -n "${DEVELOPER_ID_APP:-}" ] && [ -n "${NOTARY_PROFILE:-}" ]; then
