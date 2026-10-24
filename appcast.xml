@@ -35,6 +35,18 @@
     <description>Most recent updates to Airlive Bridge</description>
     <language>en</language>
     <item>
+      <title>Airlive Bridge 1.5.1</title>
+      <pubDate>Sat, 24 Oct 2026 14:05:47 +0000</pubDate>
+      <sparkle:version>22</sparkle:version>
+      <sparkle:shortVersionString>1.5.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[Cameras reconnect cleanly: when a camera disconnects, the Bridge closes its side of the connection at once, so switching a phone between channels is instant.]]></description>
+      <enclosure
+        url="https://github.com/airlive-project/airlive-bridge/releases/download/v1.5.1/Airlive-Bridge-1.5.1.dmg"
+        length="11512662"  type="application/octet-stream"
+        sparkle:edSignature="XkG2OPSRH3Y6XoQS7KiqKC5zPYoR0bCbdP685bXJQlVvIeOOkghs/pq6icBHUvoUb36mLhiIR42tWPt28hcQAg==" />
+    </item>
+    <item>
       <title>Airlive Bridge 1.5.0</title>
       <pubDate>Tue, 20 Oct 2026 19:22:41 +0000</pubDate>
       <sparkle:version>21</sparkle:version>
