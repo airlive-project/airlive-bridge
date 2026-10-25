@@ -185,9 +185,15 @@ cp "$ROOT/scripts/dmg/background.tiff" "$STAGING/.background/background.tiff"
 RW_DMG="$BUILD_DIR/rw.dmg"
 hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING" -ov -format UDRW "$RW_DMG" >/dev/null
 MOUNT_DIR="$(hdiutil attach -readwrite -noverify -noautoopen "$RW_DMG" | awk -F'\t' '/\/Volumes\// {print $NF}')"
+# Finder must be told about THIS image by the name Finder gave it, which is the mount point's
+# last component: the volume is called "Airlive Bridge", and with a copy of the shipped DMG open
+# (an operator's Downloads, say) ours mounts as "Airlive Bridge 1". Addressed by the volume name -
+# or by a path alias, which Finder resolves through that same name - the layout went to the
+# other, read-only volume and this image shipped without one (first 1.5.3 build).
+DISK_NAME="$(basename "$MOUNT_DIR")"
 osascript <<APPLESCRIPT
 tell application "Finder"
-  tell disk "$APP_NAME"
+  tell disk "$DISK_NAME"
     open
     set current view of container window to icon view
     set toolbar visible of container window to false
@@ -208,6 +214,15 @@ tell application "Finder"
   end tell
 end tell
 APPLESCRIPT
+# Finder writes the layout to .DS_Store on its own schedule; detaching before it lands ships a
+# plain window with no background (it happened on the first 1.5.3 build). Wait for it, and stop
+# the release if it never comes rather than shipping the wrong window.
+for _ in $(seq 1 30); do [ -f "$MOUNT_DIR/.DS_Store" ] && break; sleep 0.5; done
+if [ ! -f "$MOUNT_DIR/.DS_Store" ]; then
+  hdiutil detach "$MOUNT_DIR" >/dev/null
+  echo "✗ Finder never wrote the DMG window layout (.DS_Store) - not shipping this image." >&2
+  exit 1
+fi
 sync
 hdiutil detach "$MOUNT_DIR" >/dev/null
 hdiutil convert "$RW_DMG" -format UDZO -o "$DMG" -ov >/dev/null
