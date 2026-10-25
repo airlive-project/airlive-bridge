@@ -1352,7 +1352,11 @@ final class BridgeChannelReceiver: ChannelReceiver {
         pixelBufferLock.unlock()
 
         let delay = playout - CACurrentMediaTime()
-        if delay <= 0.001 {
+        // Only a frame that is ALREADY due takes the immediate hop. One still a fraction of a
+        // millisecond early used to take it too, and `promoteDue` - which releases only what is
+        // due - left it in the ring with nothing scheduled to come back for it: it went out with
+        // the NEXT frame and one of the two was lost.
+        if delay <= 0 {
             // Lowest (0 ms): promote AS SOON AS POSSIBLE — but still hop onto `queue`
             // (a zero-delay `async`, not the `asyncAfter` timer) instead of promoting
             // INLINE on this VT decode thread.  That keeps `promoteDue`/`present`

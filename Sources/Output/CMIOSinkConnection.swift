@@ -24,7 +24,7 @@ private let sinkLog = Logger(subsystem: "studio.airlive.vcam", category: "bridge
 
 /// What happened to one frame.  `queueFull` is NOT a failure: it is what "nobody has the
 /// camera open" looks like from this side, and reporting it as an error told the operator the
-/// camera was broken whenever Zoom simply wasn't running.
+/// camera was broken whenever no app happened to have it open.
 enum SinkSendResult {
     case sent
     case queueFull
@@ -143,22 +143,23 @@ final class CMIOSinkConnection {
     /// reached the queue — the caller counts these, so a camera that is "on" but never
     /// delivering can say so instead of showing black.
     ///
-    /// It takes NO timestamp, deliberately.  It used to accept the program's and discard it on
-    /// the next line, which reads like an oversight and hid the real rule below: this stream's
-    /// clock is the host clock, so the only timestamp that can be correct here is read here.
+    /// `presentationTime` is the frame's tick on the output's 30 fps grid, on the HOST clock - the
+    /// clock this stream runs on. Never the program's own timeline (it starts when the phone
+    /// connects and reads as wildly out of date downstream), and never "now": a time read at
+    /// enqueue carries every bit of delivery jitter into the frame (VirtualCameraOutput, "Pacing").
     @discardableResult
-    func send(_ pixelBuffer: CVPixelBuffer) -> SinkSendResult {
+    func send(_ pixelBuffer: CVPixelBuffer, presentationTime: CMTime) -> SinkSendResult {
         lock.lock(); defer { lock.unlock() }
         guard started, let queue else { return .failed }
         // What the camera took since our last enqueue: the queue is shallower now than we left it.
         let depthBefore = Int(CMSimpleQueueGetCount(queue))
         if depthBefore < depthAfterLastSend { taken &+= UInt64(depthAfterLastSend - depthBefore) }
         depthAfterLastSend = depthBefore
-        // One buffer deep by design: if the extension hasn't drained the previous frame, the
-        // newest one is worth more than queueing both, so skip rather than pile up.  A queue
-        // that STAYS full means the extension stopped draining because no app has the camera
-        // open — checked before anything is built, so an unwatched camera costs one comparison
-        // per frame and nothing else.
+        // No room: this frame is skipped rather than piling up.  The feed is paced at the frame
+        // rate and the extension drains three times faster, so in practice a full queue means
+        // the extension stopped draining because no app has the camera open — checked before
+        // anything is built, so an unwatched camera costs one comparison per frame and nothing
+        // else.
         guard CMSimpleQueueGetCount(queue) < CMSimpleQueueGetCapacity(queue) else { return .queueFull }
 
         // The description is derived FROM THE BUFFER, never built by hand: a hand-built one
@@ -183,12 +184,9 @@ final class CMIOSinkConnection {
         }
         guard let desc else { return .failed }
 
-        // Host clock, not the program's timeline.  The sink's clock is the host clock; a
-        // timestamp from the program's own timeline (which starts when the phone connects)
-        // reads as wildly out of date and the frame is discarded downstream.
         var timing = CMSampleTimingInfo(
             duration: CMTime(value: 1, timescale: kVCamFrameRate),
-            presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
+            presentationTimeStamp: presentationTime,
             decodeTimeStamp: .invalid)
         var sbuf: CMSampleBuffer?
         guard CMSampleBufferCreateForImageBuffer(allocator: kCFAllocatorDefault,

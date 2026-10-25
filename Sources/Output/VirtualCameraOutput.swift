@@ -1,13 +1,18 @@
 // VirtualCameraOutput.swift — PROGRAM → macOS Virtual Camera.
 //
-// Publishes the program feed as a system camera, so Zoom / Meet / Teams / QuickTime
-// can pick "Airlive Bridge Virtual Camera" from their normal camera list.  Unlike every
+// Publishes the program feed as a system camera, so OBS and any other app that takes a camera
+// can pick "Airlive Bridge Virtual Camera" from its normal camera list.  Unlike every
 // other output there is no socket, no encode and — for a 1080p program — no conversion
 // either: the decoder's own frame is pushed straight into the extension's SINK stream (see
 // CMIOSinkConnection), which the extension, a separate process macOS launches on demand,
 // pulls from.  Anything that is not already the camera's format and size is letterboxed
 // into it once, by VideoToolbox - including the program itself when the operator picked a size
 // above 1080p (VirtualCameraResolution).
+//
+// Frames go into the camera on the Bridge's OWN 30 fps clock, never at the moment they arrive
+// (see "Pacing" below). That is the half of OBS's own virtual camera this file was missing: OBS
+// feeds its camera from its renderer, which ticks at exactly the frame rate on the Mac's clock,
+// and its extension simply relays. Ours relays the same way; the even feed is done here.
 //
 // Two things make this output unlike the others, and both are macOS rules, not ours:
 //   • The extension can ONLY load when the Bridge runs from /Applications.
@@ -32,6 +37,7 @@ import CoreVideo
 import CoreMediaIO
 import VideoToolbox
 import QuartzCore   // CACurrentMediaTime - the gap clock for holding the last frame
+import CoreMedia    // CMTime - the frame times on the pacing grid
 import SystemExtensions
 import os
 
@@ -121,7 +127,7 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
                 return "Approve “\(kVCamDeviceName)” in System Settings → General → Login Items & Extensions."
             case .cameraProcessMissing:
                 // Cheapest remedy FIRST.  Measured 2026-08-30: the camera was published and
-                // being served to Zoom while this app could not enumerate it at all — a fresh
+                // being served to another app while this one could not enumerate it at all — a fresh
                 // process found it instantly with the identical lookup.  So the usual cause is
                 // not that macOS failed to launch the extension; it is that THIS process built
                 // its device list while the extension was being replaced and never refreshed.
@@ -140,7 +146,7 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     /// stayed on with no message at all (a fresh install run from Downloads, for one).
     private var installVerdict: Stage?
     private var _isLive = false
-    /// The size frames go to the camera at. Guarded by `lock`: read per frame on the program bus,
+    /// The size frames go to the camera at. Guarded by `lock`: read per frame on `paceQueue`,
     /// changed from Settings on main.
     private var _resolution = VirtualCameraResolution.stored
 
@@ -175,7 +181,7 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     }
 
     /// Opening and closing the sink talks to CoreMediaIO and can block; frames do NOT
-    /// come through here — see `send`.
+    /// come through here — see `send` and `deliverTick`.
     private let queue = DispatchQueue(label: "studio.airlive.bridge.vcam", qos: .userInitiated)
     /// Marks `queue` so a re-entrant call can tell "already there" from "arrived on main".
     private static let queueKey = DispatchSpecificKey<Void>()
@@ -187,7 +193,7 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     /// 1080p the normal path never touches it: the program decoder's buffers go across untouched.  VTPixelTransferSession rather than
     /// CoreImage — a fixed-function block instead of a filter graph.
     ///
-    /// GUARDED BY `lock`: `send` runs on the program bus and `stop` on this output's own
+    /// GUARDED BY `lock`: frames are converted on `paceQueue` and `stop` runs on this output's own
     /// queue, so an unguarded pair could invalidate the session while a frame was mid-transfer.
     private var transfer: VTPixelTransferSession?
     private var pool: CVPixelBufferPool?
@@ -195,8 +201,7 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     private let installer = SystemExtensionInstaller.shared
 
     /// Frames taken by the camera, and frames the camera had no room for since this output
-    /// was switched on.  Touched only from the program bus, which delivers frames one at a
-    /// time.  A large, steadily growing `dropped` with `sent` frozen is not a fault — it is
+    /// was switched on.  Touched only on `paceQueue`, one tick at a time.  A large, steadily growing `dropped` with `sent` frozen is not a fault — it is
     /// exactly what "the camera is on and no app has it open" looks like — and printing both
     /// once a second is what lets the log say which of the two is happening.
     private var framesSent: UInt64 = 0
@@ -206,7 +211,7 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     /// out of the queue within `receivingWindow` (CMIOSinkConnection.framesTakenByCamera).
     /// "On" on the card only means the camera was found and its input opened; this is what
     /// tells "OBS shows black because it never opened the camera" from "OBS is getting frames".
-    /// Logged on every change. Read and written on the program bus; reset under `lock` when a sink
+    /// Logged on every change. Read and written on `paceQueue`; reset under `lock` when a sink
     /// opens. Unsynchronised like the counters above: the worst a race costs is one log line.
     private var appReceiving = false
     private var lastTaken: UInt64 = 0
@@ -214,31 +219,61 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     /// Two seconds without the camera taking a frame = nobody is reading it.
     private static let receivingWindow: CFTimeInterval = 2
 
-    // ── Holding the last picture through a short gap ────────────────────────────
-    // The camera extension puts up its "No Video" picture a quarter-second after frames stop
-    // (AirliveDeviceSource.realFrameGrace) - a Wi-Fi hiccup of a few hundred ms flashed it on air
-    // (field report on 1.4.2). The Bridge itself turns a silent camera into black after one second
-    // (BridgeChannelReceiver.silenceThreshold). In between, this output re-sends the last frame it
-    // gave the camera, so the viewer sees the shot hold and then go black - never the placeholder.
-    // A held frame is the same picture again, not a smoothed or invented one.
+    // ── Pacing: the camera gets exactly 30.000 frames a second on the Mac's clock ─────────────
+    // A camera's frames arrive at ITS phone's 30 fps - its own crystal, a few parts per million
+    // off the Mac's. Pushed into the camera the moment they arrived (as this output used to), that
+    // cadence reached OBS, which renders at exactly 30.000 on the Mac's clock: the two slowly
+    // slide past each other, and while a camera's frames sit near OBS's tick, the smallest jitter
+    // lands them on one tick or the next, so OBS repeats and drops frames for minutes at a time.
+    // Which camera stutters depended only on where its phase happened to be (field, 2026-10-25:
+    // Bridge's own window perfect, OBS stuttering on one camera, then the other).
+    //
+    // So arrivals go into a small first-in-first-out queue, and a strict timer on the host clock
+    // takes ONE frame out per tick, stamped with the tick's own time. The queue is the hysteresis
+    // every frame synchroniser needs: once a frame waits a tick, jitter around the tick no longer
+    // decides anything. The phone's drift comes out as one repeated frame (a tick with nothing new
+    // - the queue then holds one frame more, so the same jitter cannot do it again) or one dropped
+    // frame (a surplus that PERSISTS, see `surplusPersistence` - one early frame is jitter, not
+    // drift) every several minutes, instead of bursts. The cost is about one frame of extra delay
+    // on THIS output only; the Bridge's own window and every other output keep their timing.
+    //
+    // The same tick holds the shot through a short gap: the extension puts up its "No Video"
+    // picture a quarter-second after frames stop (AirliveDeviceSource.realFrameGrace), and the
+    // Bridge only turns a silent camera into black after one second
+    // (BridgeChannelReceiver.silenceThreshold) - in between, the last frame is simply repeated.
 
-    /// The last camera-ready frame and when the last program frame ARRIVED (sent or not).
-    /// Guarded by `lock`.
+    /// Frames waiting for their tick (camera-ready or not yet converted), oldest first, and the
+    /// last frame the camera was given (already camera-ready), for repeats. Guarded by `lock`.
+    private var _waiting: [CVPixelBuffer] = []
     private var _lastFrame: CVPixelBuffer?
+    /// When the last program frame ARRIVED. Guarded by `lock`.
     private var _lastArrival: CFTimeInterval = 0
-    /// A gap longer than three frames is a gap, not jitter; under the extension's 0.25 s grace.
-    private static let holdAfter: CFTimeInterval = 0.1
+    /// Beyond this many waiting frames the oldest is dropped on arrival. Only reached when the
+    /// ticks stall; in steady state at most two wait (see `deliverTick`).
+    private static let maxWaiting = 3
+    /// Ticks in a row with a frame to spare before one is dropped: half a second. A frame that
+    /// arrives early is gone from the surplus at the next tick; the phone gaining on the Mac
+    /// keeps it there.
+    private static let surplusPersistence = 15
     /// Past the Bridge's own switch to black (1.0-1.25 s) the program is flowing again as black;
     /// if nothing comes even then, the placeholder is the truth and is let through.
     private static let holdLimit: CFTimeInterval = 1.5
-    /// Checked fifteen times a second while the output is on: keeps the camera's longest wait
-    /// under the extension's grace. Its own queue, never behind a blocking sink open/close.
-    private static let holdCheckInterval: DispatchTimeInterval = .milliseconds(66)
-    private let holdQueue = DispatchQueue(label: "studio.airlive.bridge.vcam.hold", qos: .userInitiated)
-    /// Serialises a program frame and a held frame into the camera, so a held (older) frame can
-    /// never land after the newer one that just ended the gap.
-    private let deliverLock = NSLock()
-    private var holdTimer: DispatchSourceTimer?   // main (start/stop)
+    /// The camera's declared rate (VirtualCameraContract), as an exact integer tick count.
+    private static let ticksPerSecond = Int64(kVCamFrameRate)
+    private static let nsPerSecond: Int64 = 1_000_000_000
+    /// Its own queue, never behind a blocking sink open/close on `queue`.
+    private let paceQueue = DispatchQueue(label: "studio.airlive.bridge.vcam.pace", qos: .userInteractive)
+    private var paceTimer: DispatchSourceTimer?   // main (start/stop)
+    /// The grid's origin and the last tick delivered, in host-clock nanoseconds / tick numbers.
+    /// Touched only on `paceQueue`.
+    private var gridOriginNs: UInt64 = 0
+    private var lastTick: Int64 = -1
+    /// What the pacing did since the output went on - logged once a second with the rest, so a
+    /// long recording can be checked against it. Touched only on `paceQueue`.
+    private var framesRepeated: UInt64 = 0
+    private var framesSkipped: UInt64 = 0
+    /// Consecutive ticks that left a frame to spare. Touched only on `paceQueue`.
+    private var surplusTicks = 0
 
     init(id: UUID = UUID(), label: String = "Virtual Camera") {
         self.id = id
@@ -368,7 +403,7 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
 
     func start() {
         lock.lock(); _isLive = true; lock.unlock()
-        startHolding()
+        startPacing()
         // ASK MACOS HERE, on the first switch-on, and never merely because the card exists.
         //
         // Installing a camera extension makes macOS demand an approval in System Settings. Doing
@@ -420,11 +455,12 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
         let connection = sink
         sink = nil
         _lastFrame = nil
+        _waiting.removeAll()
         if let t = transfer { VTPixelTransferSessionInvalidate(t) }
         transfer = nil
         pool = nil
         lock.unlock()
-        stopHolding()
+        stopPacing()
         queue.async { [weak self] in
             // Outside the lock: this talks to the extension's process and its own close()
             // must not be able to park an incoming frame behind it.
@@ -432,8 +468,8 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
             else { self?.refreshFromDeviceList(fallback: .starting) }
         }
         // The extension is deliberately LEFT INSTALLED: uninstalling on every toggle would
-        // re-prompt the operator for approval each time, and a camera that vanishes from
-        // Zoom's list mid-call is worse than one that shows a "no program" placeholder.
+        // re-prompt the operator for approval each time, and a camera that vanishes from an
+        // app's list mid-show is worse than one that shows a "no program" placeholder.
     }
 
     /// Open the sink and start pushing. Safe to call repeatedly — the device appearing, the
@@ -490,65 +526,109 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
 
     // MARK: - Frames
 
+    /// A program frame arrived: it waits for the next tick (see "Pacing"). Nothing else happens on
+    /// the caller's thread - the receiver's queue, which also serves its network and every tile.
     func send(_ pixelBuffer: CVPixelBuffer, timeNs: UInt64) {
-        // `timeNs` is unused on purpose: the camera stream runs on the HOST clock, so the only
-        // timestamp that can be right is the one read at the moment of enqueue, inside the
-        // sink.  The parameter stays because the VideoOutput protocol has it and every other
+        // `timeNs` is unused on purpose: what reaches the camera is stamped with the tick it goes
+        // out on. The parameter stays because the VideoOutput protocol has it and every other
         // output needs it.
-        lock.lock(); let live = _isLive; let sink = self.sink; _lastArrival = CACurrentMediaTime(); lock.unlock()
-        guard live, let sink else { return }
-        // Nobody watching (or the extension has not taken the last frame yet): skip before the
-        // conversion, not after it.
+        lock.lock(); defer { lock.unlock() }
+        guard _isLive else { return }
+        _lastArrival = CACurrentMediaTime()
+        _waiting.append(pixelBuffer)
+        if _waiting.count > Self.maxWaiting { _waiting.removeFirst(_waiting.count - Self.maxWaiting) }
+    }
+
+    private func startPacing() {
+        guard paceTimer == nil else { return }
+        let t = DispatchSource.makeTimerSource(flags: .strict, queue: paceQueue)
+        let period = Self.nsPerSecond / Self.ticksPerSecond
+        // A repeating dispatch timer keeps its own deadlines on the start + k x interval grid, so
+        // it does not drift; `deliverTick` still numbers each tick from the clock, not by counting.
+        t.schedule(deadline: .now(), repeating: .nanoseconds(Int(period)), leeway: .nanoseconds(0))
+        t.setEventHandler { [weak self] in self?.deliverTick() }
+        paceQueue.async { [weak self] in
+            self?.gridOriginNs = DispatchTime.now().uptimeNanoseconds
+            self?.lastTick = -1
+            self?.framesRepeated = 0
+            self?.framesSkipped = 0
+            self?.surplusTicks = 0
+        }
+        t.resume()
+        paceTimer = t
+    }
+
+    private func stopPacing() {
+        paceTimer?.cancel()
+        paceTimer = nil
+    }
+
+    /// One tick: hand the camera exactly one frame - the oldest waiting one, or the last one again.
+    /// On `paceQueue`.
+    private func deliverTick() {
+        // The tick this wake-up belongs to, from the clock: a late wake-up still stamps its own
+        // grid time, and two wake-ups can never claim the same tick. The camera's clock is the
+        // host clock, which is what `uptimeNanoseconds` reads (mach absolute time).
+        let nowNs = DispatchTime.now().uptimeNanoseconds
+        let elapsed = Int64(nowNs &- gridOriginNs)
+        let nearest = (elapsed * Self.ticksPerSecond + Self.nsPerSecond / 2) / Self.nsPerSecond
+        let tick = max(nearest, lastTick + 1)
+        lastTick = tick
+        let tickNs = Int64(gridOriginNs) + tick * Self.nsPerSecond / Self.ticksPerSecond
+        let tickTime = CMTime(value: tickNs, timescale: CMTimeScale(Self.nsPerSecond))
+
+        lock.lock()
+        guard _isLive, let sink = self.sink else { lock.unlock(); return }
+        var next: CVPixelBuffer?
+        if !_waiting.isEmpty {
+            next = _waiting.removeFirst()
+            // Still two waiting after this one, tick after tick: the phone has gained a whole
+            // frame on the Mac. Drop the older of them - the delay goes back to one frame.
+            if _waiting.count >= 2 {
+                surplusTicks += 1
+                if surplusTicks >= Self.surplusPersistence {
+                    framesSkipped &+= UInt64(_waiting.count - 1)
+                    _waiting.removeFirst(_waiting.count - 1)
+                    surplusTicks = 0
+                }
+            } else {
+                surplusTicks = 0
+            }
+        }
+        let repeatFrame = next == nil && CACurrentMediaTime() - _lastArrival < Self.holdLimit ? _lastFrame : nil
+        lock.unlock()
+
         // Before the room check: when nobody reads the camera there is never room, and that is
         // exactly the moment "no app is receiving" has to be noticed.
         noteReceiving(sink)
+        guard next != nil || repeatFrame != nil else { return }
+        // Nobody watching (or the extension has not taken the last frame yet): skip before the
+        // conversion, not after it.
         guard sink.hasRoom else { framesDropped &+= 1; return }
-        // Enqueued on the CALLER's thread, deliberately.  The contract forbids holding the
-        // buffer past this call, and the enqueue itself is a pointer push into a lock-free
-        // queue — hopping to another thread would mean copying a full 1080p frame to avoid
-        // a few microseconds of work.
-        guard let frame = cameraReady(pixelBuffer) else {
-            reportOnce("The program couldn't be converted for the virtual camera.")
+
+        let frame: CVPixelBuffer
+        if let next {
+            guard let ready = cameraReady(next) else {
+                reportOnce("The program couldn't be converted for the virtual camera.")
+                return
+            }
+            frame = ready
+            lock.lock(); if _isLive { _lastFrame = ready }; lock.unlock()   // never outlives a stop()
+            probe(ready)
+        } else if let repeatFrame {
+            frame = repeatFrame
+            framesRepeated &+= 1
+        } else {
             return
         }
-        probe(frame)
-        deliverLock.lock(); defer { deliverLock.unlock() }
-        lock.lock(); if _isLive { _lastFrame = frame }; lock.unlock()   // never outlives a stop()
-        switch sink.send(frame) {
+        switch sink.send(frame, presentationTime: tickTime) {
         case .sent:      framesSent &+= 1
         // Nobody has the camera open — the extension stops draining and the queue stays full.
         // That is the normal resting state of a virtual camera, not a fault, and calling it
-        // one told operators the camera was broken whenever Zoom simply wasn't running.
+        // one told operators the camera was broken whenever no app happened to have it open.
         case .queueFull: framesDropped &+= 1
         case .failed:    reportOnce("The virtual camera stopped accepting frames — switch this output off and on.")
         }
-    }
-
-    private func startHolding() {
-        guard holdTimer == nil else { return }
-        let t = DispatchSource.makeTimerSource(flags: .strict, queue: holdQueue)
-        t.schedule(deadline: .now() + Self.holdCheckInterval, repeating: Self.holdCheckInterval)
-        t.setEventHandler { [weak self] in self?.holdIfGap() }
-        t.resume()
-        holdTimer = t
-    }
-
-    private func stopHolding() {
-        holdTimer?.cancel()
-        holdTimer = nil
-    }
-
-    /// On `holdQueue`. Sends nothing unless the program has paused for longer than jitter and
-    /// someone is watching; the counters stay the program's own.
-    private func holdIfGap() {
-        deliverLock.lock(); defer { deliverLock.unlock() }
-        lock.lock()
-        let gap = CACurrentMediaTime() - _lastArrival
-        let frame = _lastFrame
-        let sink = _isLive ? self.sink : nil
-        lock.unlock()
-        guard gap > Self.holdAfter, gap < Self.holdLimit, let frame, let sink, sink.hasRoom else { return }
-        sink.send(frame)
     }
 
     /// The program frame as the camera publishes it.
@@ -629,7 +709,7 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     /// on the extension's side (VCamLog.swift), so "the picture looks wrong" becomes a
     /// comparison of two numbers rather than an argument about tags.
     private var lastProbe = Date.distantPast
-    /// Program-bus thread. See `appReceiving`.
+    /// On `paceQueue`. See `appReceiving`.
     private func noteReceiving(_ sink: CMIOSinkConnection) {
         let taken = sink.framesTakenByCamera
         let now = CACurrentMediaTime()
@@ -649,7 +729,7 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
         guard Date().timeIntervalSince(lastProbe) >= 1.0 else { return }
         lastProbe = Date()
         let passthrough = CVPixelBufferGetPixelFormatType(buffer) == kVCamPixelFormat
-        vcamOutLog.notice("sending \(passthrough ? "pass-through" : "CONVERTED", privacy: .public) — enqueued \(self.framesSent), no room for \(self.framesDropped), \(self.appReceiving ? "an app is receiving" : "no app receiving", privacy: .public) — \(LumaProbe.describe(buffer), privacy: .public)")
+        vcamOutLog.notice("sending \(passthrough ? "pass-through" : "CONVERTED", privacy: .public) at 30 fps — enqueued \(self.framesSent), repeated \(self.framesRepeated), skipped \(self.framesSkipped), no room for \(self.framesDropped), \(self.appReceiving ? "an app is receiving" : "no app receiving", privacy: .public) — \(LumaProbe.describe(buffer), privacy: .public)")
     }
 
     private var reportedOnce = false
