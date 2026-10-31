@@ -35,6 +35,25 @@
     <description>Most recent updates to Airlive Bridge</description>
     <language>en</language>
     <item>
+      <title>Airlive Bridge 1.6.0</title>
+      <pubDate>Sat, 31 Oct 2026 11:59:54 +0000</pubDate>
+      <sparkle:version>25</sparkle:version>
+      <sparkle:shortVersionString>1.6.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[<ul>
+<li>New camera panel controls: step arrows on every value, ISO compensation in the Look header, None in the LUT list turns the LUT off.</li>
+<li>Redesigned settings, with a new frame guide picker.</li>
+<li>The Mac's network connection now shows at the bottom of the channel list. Collapsed side panels keep every status in view.</li>
+<li>New installs start with three Airlive Camera channels.</li>
+<li>The relay output is removed. Use the Virtual Camera instead.</li>
+<li>Bug fixes.</li>
+</ul>]]></description>
+      <enclosure
+        url="https://github.com/airlive-project/airlive-bridge/releases/download/v1.6.0/Airlive-Bridge-1.6.0.dmg"
+        length="11755635"  type="application/octet-stream"
+        sparkle:edSignature="VrEvLUXkyqQxYf0SlfKeQBBj8ll3RQUt5SpPSqemxg+vGcfvgKJRF13wwF/hbDnpZp+BjEqL2rCZJoRRj1FzBw==" />
+    </item>
+    <item>
       <title>Airlive Bridge 1.5.3</title>
       <pubDate>Sun, 25 Oct 2026 13:25:47 +0000</pubDate>
       <sparkle:version>24</sparkle:version>
