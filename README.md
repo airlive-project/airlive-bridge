@@ -84,7 +84,7 @@ https://github.com/user-attachments/assets/d4cbecb8-fb2c-4378-ba60-5c92ccdf0e75
 *(A wired **HDMI / USB capture device** can also be a channel.)*
 
 Either way the source becomes a channel in the switcher, and the program feeds every
-output — **NDI / OBS / SRT / RTSP / HDMI**.
+output - **Virtual Camera / NDI / SRT / RTSP / HDMI**.
 
 ## Model
 
@@ -111,26 +111,21 @@ output — **NDI / OBS / SRT / RTSP / HDMI**.
    on the left also stages it to Preview.
 4. **Fullscreen Multicam** (button above the grid) opens a clean multiview wall in
    its own window — drag it to a second monitor.
-5. **Publish** (Outputs rail `+`): add an **NDI** sender or an **OBS Airlive
-   Bridge** relay (see Outputs).  The program publishes continuously.
+5. **Publish** (Outputs rail `+`): add the **Virtual Camera**, an **NDI** sender,
+   SRT, RTSP or HDMI (see Outputs).  The program publishes continuously.
 
 ## Outputs
 
 - **NDI** — decodes the program and sends it as an NDI source; pick it up in OBS
   (via DistroAV), vMix, Resolume, TouchDesigner, etc.
-- **OBS relay** — a **passthrough relay**: forwards the program's raw H.264
-  straight to the [Airlive for OBS](https://github.com/airlive-project/airlive-for-obs)
-  plugin (zero re-encode, no extra load on the phone).  In OBS, add the
-  **"Airlive Bridge"** source (distinct from the direct-iPhone **"Airlive
-  Camera"** source).  On a CUT the Bridge asks the on-air camera for an instant
-  keyframe so OBS resyncs immediately — but only when OBS is actually connected
-  (the phone never emits a keyframe for nothing).
+- **Virtual Camera** - the program as a Mac camera named "Airlive Bridge Virtual Camera", paced at
+  a steady 30 fps. In OBS add it as a Video Capture Device; any app that takes a
+  camera can use it.
 - **SRT** — H.264 passthrough over SRT (caller / listener, configurable latency).
 - **RTSP** — built-in RTSP server; point vMix / VLC / any decoder at the URL.
 - **HDMI** — clean full-screen program out on a second display.
-- ⏭ **Virtual Camera** — planned.
 
-**Airlive Bridge program → OBS** (via the OBS relay):
+**Airlive Bridge program → OBS:**
 
 https://github.com/user-attachments/assets/e855d1e5-ffff-4490-a67b-6f993a7c8647
 

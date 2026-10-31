@@ -72,7 +72,7 @@ struct OutputsRail: View {
     /// badge so the strip reads at a glance.
     private var collapsedStrip: some View {
         VStack(spacing: 0) {
-            collapseChevron("chevron.left")   // expand this column back
+            collapseChevron("sidebar.right")   // expand this column back
                 .frame(maxWidth: .infinity)
                 .padding(.top, Spacing.md)
             ScrollView {
@@ -80,18 +80,28 @@ struct OutputsRail: View {
                     ForEach(Array(model.programOutputs.enumerated()), id: \.element.id) { pair in
                         CollapsedOutputTag(output: pair.element)
                     }
+                    AddStripButton(help: "Add output", width: ControlMetrics.stripTileWidth,
+                                   height: ControlMetrics.tileHeight, rows: addOutputRows)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, Spacing.md)
             }
+            // The footers as icons, so a rail collapsed for the show still records and still
+            // reaches Settings (operator, 2026-10-25).
+            if Self.showsRecordFooter {
+                CollapsedRecord(recorder: model.programRecorder)
+                    .railFooterCell()
+            }
+            CollapsedSettings()
+                .railFooterCell()
         }
     }
 
-    /// Bare chevron that toggles this rail's collapsed state (no label — pure control).
+    /// The sidebar toggle that collapses / expands this rail (no label — pure control).
     private func collapseChevron(_ system: String) -> some View {
         Button(action: onToggleCollapse) {
             Image(systemName: system)
-                .font(.system(size: 11, weight: .bold))
+                .font(.system(size: 13, weight: .regular))
                 .foregroundColor(Theme.textSecondary)
                 .frame(width: 22, height: 22)
                 .contentShape(Rectangle())
@@ -99,7 +109,20 @@ struct OutputsRail: View {
         .buttonStyle(.plain)
     }
 
-    // "Outputs" + inline "+".  These are the PROGRAM's outputs — whatever is on
+    /// The output TYPES the "Add output" row offers. A singleton kind is offered only while absent
+    /// (OutputKind.isSingleton); a kind not built yet shows as "soon", disabled.
+    private func addOutputRows() -> [DropdownRow] {
+        let present = Set(model.programOutputs.map(\.kind))
+        return OutputKind.allCases.filter { !$0.isSingleton || !present.contains($0) }.map { kind in
+            DropdownRow(id: kind.displayName,
+                        label: kind.isImplemented ? kind.displayName : "\(kind.displayName) - soon",
+                        icon: kind.symbolName,
+                        isDisabled: !kind.isImplemented,
+                        action: { if kind.isImplemented { addProgramOutput(kind, to: model) } })
+        }
+    }
+
+    // "Program Outputs" title.  These are the PROGRAM's outputs — whatever is on
     // program (the on-air camera) is what they publish; they aren't tied to one
     // channel.
     private var header: some View {
@@ -110,36 +133,8 @@ struct OutputsRail: View {
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
             Spacer()
-            // "+" (semi-transparent box, right edge — replaces the old count) opens a
-            // menu of output TYPES: NDI adds a real output; SRT / RTSP / Virtual
-            // Camera show as "soon" (disabled).
-            MenuButton(rows: {
-                // A singleton kind is offered only while absent — see OutputKind.isSingleton.
-                let present = Set(model.programOutputs.map(\.kind))
-                return OutputKind.allCases.filter { !$0.isSingleton || !present.contains($0) }.map { kind in
-                    DropdownRow(id: kind.displayName,
-                                label: kind.isImplemented ? kind.displayName : "\(kind.displayName) — soon",
-                                icon: kind.symbolName,
-                                isDisabled: !kind.isImplemented,
-                                action: { if kind.isImplemented { addProgramOutput(kind, to: model) } })
-                }
-            }) {
-                // Match the Channels "+" exactly (boxed: fill + 1pt stroke).
-                Image(systemName: "plus")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundColor(Theme.textPrimary)
-                    .frame(width: 22, height: 22)
-                    .background(
-                        RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                            .fill(Theme.bgSelected.opacity(0.6))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                            .stroke(Theme.stroke, lineWidth: 1)
-                    )
-            }
-            .help("Add a program output")
-            collapseChevron("chevron.right")   // collapse this column
+            // The sidebar toggle at the rail's OUTER edge, mirroring the Channels rail.
+            collapseChevron("sidebar.right")   // collapse this column
         }
         .padding(.horizontal, Spacing.lg)
         .padding(.top, Spacing.md)
@@ -166,6 +161,7 @@ struct OutputsRail: View {
                                    onMoveUp:   { model.moveProgramOutput(from: IndexSet(integer: idx), to: idx - 1) },
                                    onMoveDown: { model.moveProgramOutput(from: IndexSet(integer: idx), to: idx + 2) })
                     }
+                    AddListRow(title: "Add output", rows: addOutputRows)
                 }
                 .padding(.horizontal, Spacing.lg)
                 .padding(.bottom, Spacing.lg)
@@ -200,7 +196,6 @@ private func addProgramOutput(_ kind: OutputKind, to model: BridgeModel) {
     let name = defaultName(kind, model)
     switch kind {
     case .ndi:  model.addProgramOutput(NDIOutput(label: name))
-    case .obs:  model.addProgramOutput(AirliveRelayOutput(label: name))
     case .hdmi: model.addProgramOutput(HDMIOutput(label: name))
     case .rtsp: model.addProgramOutput(RTSPOutput(label: name, port: nextRTSPPort(model)))
     case .srt:  model.addProgramOutput(SRTOutput(label: name))
@@ -235,26 +230,24 @@ private func defaultName(_ kind: OutputKind, _ model: BridgeModel) -> String {
 private struct CollapsedOutputTag: View {
     let output: VideoOutput
     var body: some View {
-        // The always-on OBS relay reads "live" only while actually CONNECTED to OBS —
-        // its isLive is permanently true by design (no toggle).
-        let live = (output as? AirliveRelayOutput).map(\.isConnected) ?? output.isLive
-        return VStack(spacing: 2) {
-            Image(systemName: output.kind.symbolName)
-                .font(.system(size: 11, weight: .semibold))
-            Text(output.kind.badgeLabel)                   // short code (NDI / RTSP / OBS…)
-                .font(.system(size: 9, weight: .bold))
-                .tracking(0.5)
-        }
+        let live = output.isLive
+        // The name alone, one element per tile like the numbers in the Channels strip: icon and
+        // name stacked in 40 pt crowded each other, and the icons only imitate a transport rather
+        // than name it - "SRT" does (operator, 2026-10-25).
+        return Text(output.kind.stripLabel)                // short code (NDI / RTSP / VC…)
+            .font(.system(size: 11, weight: .bold))
+            .tracking(0.4)
+            .lineLimit(1)
         // Same tally treatment as the channels strip's OrdinalBadge: bright text on a
         // SOLID DARK fill (deep green when live), never a bright filled chip.
         .foregroundColor(live ? Theme.previewGreen : Theme.textSecondary)
-        .frame(width: 48, height: 40)
+        .frame(width: ControlMetrics.stripTileWidth, height: ControlMetrics.tileHeight)
         .background(
             RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
                 .fill(live ? Theme.tallyPreviewBg : Theme.bgSelected.opacity(0.6))
         )
         .opacity(live ? 1.0 : 0.55)
-        .help(output.label + (live ? " — live" : " — idle"))
+        .help(output.label + (live ? " - live" : " - idle"))
     }
 }
 
@@ -278,7 +271,7 @@ private struct ChooserCard: View {
                         .foregroundColor(kind.isImplemented ? Theme.accentBlue : Theme.textFaint)
                         .frame(width: 24)
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(kind.isRetiring ? "\(kind.displayName) (retiring)" : kind.displayName)
+                        Text(kind.displayName)
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundColor(Theme.textPrimary)
                         Text(kind.configFieldExample)
@@ -341,22 +334,12 @@ private struct OutputCard: View {
     /// Same template as the channel cards: TOP = On/Off chip · protocol tag ··· trash;
     /// BOTTOM = ▲/▼ chip · editable name.  The On/Off chip and the ▲/▼ chip share one
     /// width (`ControlMetrics.chipWidth`) so the left column stacks exactly.
-    /// OBS is a SINGLE row (▲/▼ · tag · status ··· trash) — no power (always on),
-    /// no name (it lives in OBS), so there is nothing to put on a second row.
     var body: some View {
         _ = refresh // re-evaluate after a start/stop/rename bump
         let live = isLiveNow
         return Card(padding: Spacing.sm) {
             VStack(alignment: .leading, spacing: Spacing.sm) {
-                if output.kind == .obs {
-                    obsRow(live: live)
-                    // ALWAYS shown, and NOT dismissable. It replaced a "Get Plugin for OBS ↗"
-                    // link, which now points at something we are retiring. And the operator who
-                    // most needs to read this is the one for whom the plugin is working fine:
-                    // they have no other reason to learn the path is going away.
-                    Divider().overlay(Theme.stroke)
-                    retirementNotice
-                } else if output.kind == .hdmi {
+                if output.kind == .hdmi {
                     // HDMI Out: toggle · tag ··· trash on top; ▲/▼ · display picker below
                     // (no editable name — the "name" is which screen it fills).
                     topRow(live: live)
@@ -384,15 +367,12 @@ private struct OutputCard: View {
             Button("Remove output", role: .destructive) { model.removeProgramOutput(output) }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("\(output.kind.displayName) is publishing right now — removing it stops the stream.")
+            Text("\(output.kind.displayName) is publishing right now - removing it stops the stream.")
         }
     }
 
-    /// "Live" for the dot/outline: the OBS relay is live only while ACTUALLY connected
-    /// (its isLive is just the toggle); the others publish the moment they're on.
-    private var isLiveNow: Bool {
-        (output as? AirliveRelayOutput).map(\.isConnected) ?? output.isLive
-    }
+    /// "Live" for the dot/outline: an output publishes the moment it is on.
+    private var isLiveNow: Bool { output.isLive }
 
     // TOP: On/Off chip (same size as the ▲/▼ chip below — the two stack in one
     // column) · protocol tag ··· trash.
@@ -429,25 +409,6 @@ private struct OutputCard: View {
             } else {
                 nameField
             }
-        }
-    }
-
-    /// The whole OBS card in ONE row: ▲/▼ · tag · connection status ··· trash.
-    private func obsRow(live: Bool) -> some View {
-        HStack(spacing: Spacing.sm) {
-            reorderArrows
-            Text(output.kind.badgeLabel)
-                .font(.system(size: 11, weight: .semibold))
-                .tracking(0.6)
-                .foregroundColor(Theme.textSecondary)
-            Text(live ? "Connected" : "Add Plugin in OBS")
-                .font(.system(size: 10, weight: live ? .semibold : .regular))
-                .foregroundColor(live ? Theme.previewGreen : Theme.textFaint)
-                .lineLimit(1)
-                .help(live ? "Program is feeding the OBS \"Airlive Bridge\" source"
-                           : "Launch OBS and add the \"OBS Airlive Bridge\" source — connects automatically")
-            Spacer(minLength: Spacing.xs)
-            trashButton
         }
     }
 
@@ -510,20 +471,6 @@ private struct OutputCard: View {
         if screen == NSScreen.main { return "Main display" }
         let w = Int(screen.frame.width), h = Int(screen.frame.height)
         return "Display \(index + 1) (\(w)×\(h))"
-    }
-
-    /// The OBS relay is on its way out; this is where the operator finds out, and what to do.
-    private var retirementNotice: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("Retiring soon - switch to Virtual Camera.")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(Theme.textPrimary)
-            Text("In OBS: add a Video Capture Device source and pick “\(kVCamDeviceName)”.")
-                .font(.system(size: 10))
-                .foregroundColor(Theme.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// A card-visible transport error with a ✕ to dismiss it — so a message doesn't hang forever (e.g.
@@ -602,12 +549,9 @@ private struct OutputCard: View {
     }
 
     /// The card's power state: off / connecting (on, no peer yet) / on.  Only the two
-    /// CALLER-style outputs have a real connecting phase (OBS relay, SRT); NDI/RTSP are
+    /// CALLER-style output has a real connecting phase (SRT); NDI/RTSP are
     /// servers — flipping them on IS being live.
     private var powerState: PowerToggle.PowerState {
-        if let relay = output as? AirliveRelayOutput {
-            return !relay.isLive ? .off : (relay.isConnected ? .on : .connecting)
-        }
         if let srt = output as? SRTOutput {
             return !srt.isLive ? .off : (srt.isConnected ? .on : .connecting)
         }
@@ -685,9 +629,9 @@ private struct OutputCard: View {
     }
 
     /// Live outputs confirm before removal; idle ones delete immediately.
-    /// `isLiveNow`, NOT `isLive`: the OBS relay's isLive is permanently true (it's
-    /// always listening for the plugin) — only an ACTUAL connection means removing
-    /// it cuts a stream.  Nothing connected → nothing to warn about.
+    /// `isLiveNow`, NOT `isLive`: a listening output (RTSP, SRT listener) is "live" while it
+    /// waits; only an ACTUAL connection means removing it cuts a stream.  Nothing connected →
+    /// nothing to warn about.
     private func requestDelete() {
         if isLiveNow { confirmingDelete = true }
         else { model.removeProgramOutput(output) }
@@ -738,7 +682,7 @@ struct PowerToggle: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(state == .connecting ? "Connecting…" : (state == .on ? "On — click to stop" : "Off — click to start"))
+        .help(state == .connecting ? "Connecting…" : (state == .on ? "On - click to stop" : "Off - click to start"))
     }
 }
 
@@ -750,7 +694,6 @@ private extension OutputKind {
     var configFieldExample: String {
         switch self {
         case .ndi:  return "public"
-        case .obs:  return "Replaced by Virtual Camera"
         case .hdmi: return "Second screen"
         case .srt:  return "srt://host:port"
         case .rtsp: return "rtsp://0.0.0.0:8554/live/cam"
@@ -784,6 +727,39 @@ private struct SettingsFooter: View {
         .buttonStyle(.plain)
         .background(Theme.bgPanel)
         .overlay(Rectangle().frame(height: 1).foregroundColor(Theme.stroke), alignment: .top)
+        .help("Open Settings")
+    }
+}
+
+/// The record control in the collapsed strip: a plain record mark, solid red while a take runs -
+/// no timer, the strip has no room for one and the full row shows it. Same action as the row.
+private struct CollapsedRecord: View {
+    @ObservedObject var recorder: ProgramRecorder
+
+    var body: some View {
+        Button { recorder.toggle() } label: {
+            Image(systemName: recorder.isRecording ? "record.circle.fill" : "record.circle")
+                .font(.system(size: 15))
+                .foregroundColor(recorder.isRecording ? Theme.accentRed : Theme.textSecondary)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(recorder.isRecording ? "Recording - click to stop" : "Record the program to a file")
+    }
+}
+
+/// Settings, as its gear.
+private struct CollapsedSettings: View {
+    var body: some View {
+        Button { SettingsPresenter.shared.open() } label: {
+            Image(systemName: "gearshape")
+                .font(.system(size: 13))
+                .foregroundColor(Theme.textSecondary)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
         .help("Open Settings")
     }
 }

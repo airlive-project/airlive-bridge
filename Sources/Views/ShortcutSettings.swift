@@ -2,8 +2,8 @@
 // window's section list and from the menu bar (Shortcuts > Customize Shortcuts…), which lands on
 // this section; there is no separate Shortcuts window (operator, 2026-10-16: one place).
 //
-// One column of cards: GENERAL switches, SWITCHER (Cut, Auto Cut), LENSES (6), then CHANNELS -
-// one row per channel with BOTH bus chips side by side (PREVIEW = plain digit, PROGRAM =
+// One column of the window's groups: General switches, Switcher (Cut, Auto Cut), Lenses (6), then
+// Channels - one row per channel with BOTH bus chips side by side (Preview = plain digit, Program =
 // ⌘digit), so the two-bus switcher model reads as two columns, like the buses themselves.
 // Stream Deck has its own section (Integrations).
 //
@@ -24,11 +24,11 @@ struct ShortcutSettings: View {
     private let chipWidth: CGFloat = 88
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Spacing.md) {
-            generalSection.settingsCard()
-            switcherSection.settingsCard()
-            lensesSection.settingsCard()
-            channelsSection.settingsCard()
+        VStack(alignment: .leading, spacing: 0) {
+            generalSection
+            switcherSection
+            lensesSection
+            channelsSection
             // It resets every key on the page (switcher, lenses, channels), so it sits under all
             // of them, not inside one card (operator, 2026-10-07). Left-aligned, away from the
             // window's Apply below on the right, so one is never hit for the other. The switches are
@@ -63,15 +63,17 @@ struct ShortcutSettings: View {
     }
 
     private var generalSection: some View {
-        VStack(alignment: .leading, spacing: Spacing.sm) {
-            sectionLabel("GENERAL")
-            switchRow("Enable shortcuts", isOn: $shortcuts.enabled)
-            switchRow("Show key hints on buttons", isOn: $shortcuts.showHints)
+        SettingsGroup(title: "General") {
+            SettingsRow(title: "Enable shortcuts") { SettingsSwitch(isOn: $shortcuts.enabled) }
+            SettingsDivider()
+            SettingsRow(title: "Show key hints on buttons") { SettingsSwitch(isOn: $shortcuts.showHints) }
                 .disabled(!shortcuts.enabled)
-            switchRow("Work in other apps",
-                      subtitle: "Same keys fire while another app is focused",
-                      isOn: $shortcuts.global)
-                .disabled(!shortcuts.enabled)
+            SettingsDivider()
+            SettingsRow(title: "Work in other apps",
+                        note: "The same keys work while another app is in front.") {
+                SettingsSwitch(isOn: $shortcuts.global)
+            }
+            .disabled(!shortcuts.enabled)
             permissionWarning
         }
     }
@@ -81,18 +83,18 @@ struct ShortcutSettings: View {
     // shortcuts" switch that turns them back on — once off, there was no way back from the UI.
 
     private var switcherSection: some View {
-        VStack(alignment: .leading, spacing: Spacing.sm) {
-            sectionLabel("SWITCHER")
+        SettingsGroup(title: "Switcher") {
             fixedRow(ShortcutAction(kind: .cut, index: 0), title: "Cut")
+            SettingsDivider()
             fixedRow(ShortcutAction(kind: .autoCut, index: 0), title: "Auto Cut")
         }
         .disabled(!shortcuts.enabled)
     }
 
     private var lensesSection: some View {
-        VStack(alignment: .leading, spacing: Spacing.sm) {
-            sectionLabel("LENSES")
+        SettingsGroup(title: "Lenses") {
             ForEach(0 ..< 6, id: \.self) { i in
+                if i > 0 { SettingsDivider() }
                 fixedRow(ShortcutAction(kind: .lens, index: i), title: "Lens \(i + 1)")
             }
         }
@@ -101,39 +103,29 @@ struct ShortcutSettings: View {
 
     /// Title flush left, chip flush right.
     private func fixedRow(_ action: ShortcutAction, title: String) -> some View {
-        HStack(spacing: Spacing.sm) {
-            Text(title)
-                .font(.system(size: 13)).foregroundColor(Theme.textSecondary)
-                .lineLimit(1).truncationMode(.tail)
-            Spacer(minLength: Spacing.sm)
+        SettingsRow(title: title) {
             BindingChip(shortcuts: shortcuts, bindings: bindings, action: action, width: chipWidth)
         }
-        .frame(height: 30)
     }
 
     // MARK: - Per-channel keys (one row = both buses)
 
     private var channelsSection: some View {
-        VStack(alignment: .leading, spacing: Spacing.sm) {
-            sectionLabel("CHANNELS")
+        SettingsGroup(title: "Channels") {
             if model.channels.isEmpty {
                 Text("Add a channel to assign its keys.")
-                    .font(.system(size: 12)).foregroundColor(Theme.textFaint)
-                    .padding(.top, Spacing.xxs)
+                    .font(.system(size: 13)).foregroundColor(Theme.textFaint)
+                    .settingsCell()
             } else {
-                // Bus mini-headers, aligned over their chip columns.
+                // Bus headers, aligned over their chip columns.
                 HStack(spacing: Spacing.sm) {
                     Spacer(minLength: Spacing.sm)
-                    Text("PREVIEW")
-                        .font(.system(size: 9, weight: .semibold)).tracking(0.6)
-                        .foregroundColor(Theme.textFaint)
-                        .frame(width: chipWidth)
-                    Text("PROGRAM")
-                        .font(.system(size: 9, weight: .semibold)).tracking(0.6)
-                        .foregroundColor(Theme.textFaint)
-                        .frame(width: chipWidth)
+                    busHeader("Preview")
+                    busHeader("Program")
                 }
+                .padding(.top, Spacing.sm)
                 ForEach(Array(model.channels.prefix(9).enumerated()), id: \.element.id) { pair in
+                    if pair.offset > 0 { SettingsDivider() }
                     channelRow(index: pair.offset, name: pair.element.name)
                 }
             }
@@ -141,11 +133,17 @@ struct ShortcutSettings: View {
         .disabled(!shortcuts.enabled)
     }
 
+    private func busHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 11)).foregroundColor(Theme.textFaint)
+            .frame(width: chipWidth)
+    }
+
     /// One channel's row: name · [→ Preview chip] · [→ Program chip].
     private func channelRow(index: Int, name: String) -> some View {
         HStack(spacing: Spacing.sm) {
             Text(name)
-                .font(.system(size: 13)).foregroundColor(Theme.textSecondary)
+                .font(.system(size: 13)).foregroundColor(Theme.textPrimary)
                 .lineLimit(1).truncationMode(.tail)
             Spacer(minLength: Spacing.sm)
             BindingChip(shortcuts: shortcuts, bindings: bindings,
@@ -153,36 +151,15 @@ struct ShortcutSettings: View {
             BindingChip(shortcuts: shortcuts, bindings: bindings,
                         action: ShortcutAction(kind: .programCut, index: index), width: chipWidth)
         }
-        .frame(height: 30)
+        .settingsCell()
     }
 
     // MARK: - Shared bits
 
-    private func sectionLabel(_ title: String) -> some View {
-        Text(title)
-            .font(.system(size: 10, weight: .semibold)).tracking(0.8)
-            .foregroundColor(Theme.textFaint)
-    }
-
-    private func switchRow(_ title: String, subtitle: String? = nil,
-                           isOn: Binding<Bool>) -> some View {
-        HStack(alignment: .center, spacing: Spacing.sm) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.system(size: 13)).foregroundColor(Theme.textPrimary)
-                if let subtitle {
-                    Text(subtitle)
-                        .font(.system(size: 11)).foregroundColor(Theme.textFaint)
-                }
-            }
-            Spacer(minLength: Spacing.sm)
-            SettingsSwitch(isOn: isOn)
-        }
-    }
-
     @ViewBuilder
     private var permissionWarning: some View {
         if shortcuts.enabled && shortcuts.global && !shortcuts.hasPermission {
+            SettingsDivider()
             HStack(spacing: Spacing.sm) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 11)).foregroundColor(Theme.accentYellow)
@@ -199,6 +176,7 @@ struct ShortcutSettings: View {
                 }
                 .bridgeButton(selected: true, corner: Radius.control)
             }
+            .settingsCell()
         }
     }
 }

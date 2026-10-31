@@ -14,6 +14,8 @@ import AVFoundation   // capture-device enumeration for the "+ → HDMI / USB Ca
 
 struct ChannelsRail: View {
     @ObservedObject var model: BridgeModel
+    /// This Mac's network link, for the Network row at the foot of the rail.
+    @ObservedObject var network: NetworkStatus
     /// Focus mode: collapse to a minimal strip (just the ordinal badges) so the
     /// centre gets maximum room for the multiview.
     var collapsed: Bool = false
@@ -44,6 +46,7 @@ struct ChannelsRail: View {
             header
             list
                 .frame(maxHeight: .infinity)
+            NetworkFooter(status: network)      // how THIS Mac is on the network
             LatencyBufferFooter(model: model)   // ONE jitter buffer for every channel, behind a lock
             SecurityFooter(model: model)        // ONE global password for the Bridge
         }
@@ -53,7 +56,7 @@ struct ChannelsRail: View {
     /// rail (red on air / green staged / neutral).  Tap one to select it.
     private var collapsedStrip: some View {
         VStack(spacing: 0) {
-            collapseChevron("chevron.right")   // expand this column back
+            collapseChevron("sidebar.left")    // expand this column back
                 .frame(maxWidth: .infinity)
                 .padding(.top, Spacing.md)
             ScrollView {
@@ -64,42 +67,54 @@ struct ChannelsRail: View {
                         Button { model.select(channel.id) } label: {
                             OrdinalBadge(index: idx + 1,
                                          isProgram: channel.id == model.effectiveProgramID,
-                                         isPreview: channel.id == model.previewID)
+                                         isPreview: channel.id == model.previewID,
+                                         stripTile: true)
                         }
                         .buttonStyle(.plain)
                         .help(channel.name)
                     }
+                    AddStripButton(help: "Add channel", width: ControlMetrics.stripTileWidth,
+                                   height: ControlMetrics.tileHeight, rows: addSourceRows)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, Spacing.md)
             }
+            // The footers as icons: a rail collapsed for the show must still say how the Mac is
+            // on the network, what the buffer is and whether a password is set (operator,
+            // 2026-10-25: people collapse the rails on air and lost all three).
+            NetworkIcon(status: network)   // draws its own cell, none at all when there is nothing to say
+            CollapsedLatency(model: model)
+                .railFooterCell()
+            CollapsedPassword(model: model)
+                .railFooterCell()
         }
     }
 
     // MARK: - Header
     //
-    // Title left, "+" in its semi-transparent box on the right (mirrors the Outputs
-    // rail).  No total count — the per-card ordinal carries the numbering now.
+    // Sidebar toggle at the outer edge, then the title. Adding a channel is the "Add channel"
+    // row at the end of the list. No total count — the per-card ordinal carries the numbering.
 
     private var header: some View {
         HStack(spacing: Spacing.sm) {
+            // The sidebar toggle at the rail's OUTER edge, as in Finder and Xcode: the Mac's own
+            // sign for "show / hide this panel", where a bare chevron read as back / forward.
+            collapseChevron("sidebar.left")    // collapse this column
             Text("Channels")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
             Spacer()
-            addButton
-            collapseChevron("chevron.left")   // collapse this column
         }
         .padding(.horizontal, Spacing.lg)
         .padding(.top, Spacing.md)
         .padding(.bottom, Spacing.sm)
     }
 
-    /// Bare chevron that toggles this rail's collapsed state (no label — pure control).
+    /// The sidebar toggle that collapses / expands this rail (no label — pure control).
     private func collapseChevron(_ system: String) -> some View {
         Button(action: onToggleCollapse) {
             Image(systemName: system)
-                .font(.system(size: 11, weight: .bold))
+                .font(.system(size: 13, weight: .regular))
                 .foregroundColor(Theme.textSecondary)
                 .frame(width: 22, height: 22)
                 .contentShape(Rectangle())
@@ -110,24 +125,6 @@ struct ChannelsRail: View {
     /// "+" (semi-transparent box, right edge — matches the Outputs "+") opens the
     /// add-source menu.  `addChannel` builds the model object, brings the receiver
     /// slot + Bonjour advert online, and applies the global auth so the phone connects.
-    private var addButton: some View {
-        MenuButton(rows: addSourceRows) {
-            Image(systemName: "plus")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundColor(Theme.textPrimary)
-                .frame(width: 22, height: 22)
-                .background(
-                    RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                        .fill(Theme.bgSelected.opacity(0.6))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                        .stroke(Theme.stroke, lineWidth: 1)
-                )
-        }
-        .help("Add source")
-    }
-
     /// Add-source rows for our own `MenuButton` — icons + a separator + discovered HDMI/USB devices.
     /// A flat list (no nested submenu, which dismissed on hover); primary sources first, capture
     /// devices below.  Built lazily on open so `CaptureDevices.discover()` runs only on click.
@@ -187,6 +184,7 @@ struct ChannelsRail: View {
                             onMoveDown: { model.moveChannel(from: IndexSet(integer: idx), to: idx + 2) }
                         )
                     }
+                    AddListRow(title: "Add channel", rows: addSourceRows)
                 }
                 .padding(.horizontal, Spacing.lg)
                 .padding(.bottom, Spacing.lg)
@@ -210,6 +208,8 @@ struct ChannelsRail: View {
                 .font(.system(size: 11))
                 .multilineTextAlignment(.center)
                 .foregroundColor(Theme.textFaint)
+            AddListRow(title: "Add channel", rows: addSourceRows)
+                .padding(.top, Spacing.sm)
             Spacer()
         }
         .frame(maxWidth: .infinity)
@@ -263,8 +263,8 @@ private struct ChannelRow: View {
             Button("Remove channel", role: .destructive) { onRemove() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(isProgram ? "This channel is ON AIR — removing it cuts the program feed."
-                           : "This channel is receiving video — removing it drops the connection.")
+            Text(isProgram ? "This channel is ON AIR - removing it cuts the program feed."
+                           : "This channel is receiving video - removing it drops the connection.")
         }
     }
 
@@ -407,6 +407,8 @@ struct OrdinalBadge: View {
     let index: Int
     let isProgram: Bool
     let isPreview: Bool
+    /// The collapsed strip shows it at the strip's tile size; the card keeps the 28 pt chip.
+    var stripTile = false
 
     var body: some View {
         let digit: Color = isProgram ? Theme.accentRed
@@ -415,10 +417,11 @@ struct OrdinalBadge: View {
                         : (isPreview ? Theme.tallyPreviewBg
                         : Theme.bgSelected.opacity(0.6))                      // neutral chip
         return Text("\(index)")
-            .font(.system(size: 12, weight: .bold).monospacedDigit())
+            .font(.system(size: stripTile ? 14 : 12, weight: .bold).monospacedDigit())
             .foregroundColor(digit)
-            .frame(minWidth: ControlMetrics.pillHeight, alignment: .center)   // ≥ square, fits "00"
-            .frame(height: ControlMetrics.pillHeight)                         // same height as every chip
+            .frame(minWidth: stripTile ? ControlMetrics.stripTileWidth : ControlMetrics.pillHeight,
+                   alignment: .center)                                        // ≥ square, fits "00"
+            .frame(height: stripTile ? ControlMetrics.tileHeight : ControlMetrics.pillHeight)
             .background(
                 RoundedRectangle(cornerRadius: Radius.control, style: .continuous).fill(fill)
             )
@@ -620,6 +623,41 @@ private struct LatencyBufferFooter: View {
                         .stroke(Theme.strokeDivider, lineWidth: 1))
             .contentShape(Rectangle())
         }
+    }
+}
+
+/// The latency buffer in the collapsed strip: the figure alone. Changing it means opening the rail
+/// - it is a setting picked once for a room, behind a lock in the full row.
+private struct CollapsedLatency: View {
+    @ObservedObject var model: BridgeModel
+
+    var body: some View {
+        VStack(spacing: 1) {
+            Text(model.latencyBuffer.ms)
+                .font(.system(size: 12, weight: .medium).monospacedDigit())
+                .foregroundColor(Theme.textSecondary)
+            Text("ms")
+                .font(.system(size: 9))
+                .foregroundColor(Theme.textFaint)
+        }
+        .help("Latency buffer: \(model.latencyBuffer.ms) ms")
+    }
+}
+
+/// The password row as its key, opening the same place (Settings → Cameras).
+private struct CollapsedPassword: View {
+    @ObservedObject var model: BridgeModel
+
+    var body: some View {
+        Button { SettingsPresenter.shared.open(at: .cameras) } label: {
+            Image(systemName: model.hasPassword ? "key.fill" : "key")
+                .font(.system(size: 12))
+                .foregroundColor(model.hasPassword ? Theme.accentBlue : Theme.textFaint)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(model.hasPassword ? "Airlive receiver password set" : "Set Airlive receiver password")
     }
 }
 

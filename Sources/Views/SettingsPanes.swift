@@ -31,6 +31,7 @@ struct GeneralPane: View {
                         .font(.system(size: 13).monospacedDigit())
                         .foregroundColor(Theme.textSecondary)
                 }
+                SettingsDivider()
                 SettingsRow(title: "Updates") {
                     RowButton(title: "Check for Updates…") { checkForUpdates() }
                         .disabled(!updates.canCheckForUpdates)
@@ -62,11 +63,12 @@ struct CamerasPane: View {
             PaneHeader(title: "Cameras")
             SettingsGroup(title: "Latency buffer") {
                 latencyHeader
+                SettingsDivider()
                 latencyChips
             }
             SettingsGroup(title: "Security") {
                 SettingsRow(title: "Airlive receiver password",
-                            subtitle: model.hasPassword
+                            note: model.hasPassword
                                 ? "Set. An Airlive Camera enters it to connect."
                                 : "Not set. Any Airlive Camera on this network can connect.") {
                     RowButton(title: model.hasPassword ? "Change…" : "Set…") { showPasswordSheet = true }
@@ -79,12 +81,7 @@ struct CamerasPane: View {
     }
 
     private var latencyHeader: some View {
-        HStack(spacing: Spacing.sm) {
-            Text("Every camera channel")
-                .font(.system(size: 13))
-                .foregroundColor(Theme.textPrimary)
-            InfoDot(text: LatencyPreset.explainer)
-            Spacer(minLength: Spacing.sm)
+        SettingsRow(title: "Every camera channel", note: LatencyPreset.explainer) {
             Button { locked.toggle() } label: {
                 Image(systemName: locked ? "lock.fill" : "lock.open")
                     .font(.system(size: 12))
@@ -95,7 +92,6 @@ struct CamerasPane: View {
             .buttonStyle(.plain)
             .help(locked ? "Unlock to change" : "Lock so it can't be changed by accident")
         }
-        .frame(minHeight: ControlMetrics.segmentHeight)
     }
 
     /// All five rungs at once, name over figure, the way the rail's list shows them.
@@ -119,6 +115,7 @@ struct CamerasPane: View {
         }
         .opacity(locked ? 0.4 : 1)
         .disabled(locked)
+        .settingsCell()
     }
 }
 
@@ -142,18 +139,72 @@ struct MultiviewPane: View {
                     SettingsSwitch(isOn: draft.binding(\.previewClickCuts, stored: storedPreviewClickCuts))
                 }
             }
-            SettingsGroup(title: "Frame guide") {
-                Text("On Preview and Program only. Outputs and recordings stay 16:9.")
-                    .font(.system(size: 11))
-                    .foregroundColor(Theme.textFaint)
-                ChoiceChips(options: FrameGuide.allCases, selection: guide, title: \.title)
-                ChoiceChips(options: FrameGuideStyle.allCases,
-                            selection: draft.binding(\.frameGuideStyle, stored: storedStyle),
-                            title: \.title)
-                    .opacity(guide.wrappedValue == .off ? 0.4 : 1)
-                    .disabled(guide.wrappedValue == .off)
+            frameGuidePicker(guide: guide)
+        }
+    }
+
+    /// The operator's layout (Figma, 2026-10-31): ratios down the left, the sample in the middle,
+    /// styles down the right - both columns exactly as tall as the sample. No box.
+    private func frameGuidePicker(guide: Binding<FrameGuide>) -> some View {
+        let style = draft.binding(\.frameGuideStyle, stored: storedStyle)
+        return VStack(alignment: .leading, spacing: Spacing.sm) {
+            Text("Monitoring frame guide")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(Theme.textPrimary)
+            // Above the choices: read BEFORE clicking on air, not found below the fold.
+            SettingsNote(text: "Outputs and recordings stay clean.")
+            HStack(alignment: .top, spacing: Spacing.md) {
+                labelled("Frames") {
+                    pickColumn(FrameGuide.allCases, selection: guide, label: \.label)
+                }
+                .frame(width: Self.pickColumnWidth)
+                labelled("Preview & Program view", centered: true) {
+                    FrameGuideSample(guide: guide.wrappedValue, style: style.wrappedValue)
+                }
+                labelled("Display mode") {
+                    pickColumn(FrameGuideStyle.allCases, selection: style, label: \.title)
+                }
+                .frame(width: Self.pickColumnWidth)
+                .opacity(guide.wrappedValue == .off ? 0.4 : 1)
+                .disabled(guide.wrappedValue == .off)
+            }
+            // The sample's height sets the row; the columns' buttons then stretch to fill it.
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.top, Spacing.xxs)
+        }
+        .padding(.bottom, Spacing.xl)
+    }
+
+    /// Width of each side column: room for "2.35:1" and "Display mode" with air.
+    private static let pickColumnWidth: CGFloat = 80
+
+    /// A column's small caption over it, then the column filling the rest of the row's height.
+    private func labelled<Content: View>(_ title: String, centered: Bool = false,
+                                         @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: centered ? .center : .leading, spacing: 6) {
+            Text(title)
+                .font(.system(size: 11))
+                .foregroundColor(Theme.textFaint)
+                .lineLimit(1)
+            content()
+        }
+    }
+
+    /// A column of equal buttons sharing the row's height, the selected one filled.
+    private func pickColumn<Option: Hashable>(_ options: [Option], selection: Binding<Option>,
+                                              label: KeyPath<Option, String>) -> some View {
+        VStack(spacing: Spacing.xs) {
+            ForEach(options, id: \.self) { option in
+                Button { selection.wrappedValue = option } label: {
+                    Text(option[keyPath: label])
+                        .font(.system(size: 12, weight: .medium).monospacedDigit())
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .contentShape(Rectangle())
+                }
+                .bridgeButton(selected: option == selection.wrappedValue, corner: Radius.control)
             }
         }
+        .frame(maxHeight: .infinity)
     }
 }
 
@@ -176,7 +227,7 @@ struct OutputsPane: View {
         case .hdmi: return HDMIOutput.resolveScreen(output.config)?.localizedName ?? "No display"
         case .srt:  return output.config.isEmpty ? nil : output.config
         case .rtsp: return "Port \((output as? RTSPOutput)?.port ?? RTSPOutput.defaultPort)"
-        case .ndi, .obs:
+        case .ndi:
             // The label IS the name receivers see; only the kind is new information.
             return output.label == output.kind.displayName ? nil : output.kind.displayName
         }
@@ -191,8 +242,10 @@ struct OutputsPane: View {
                     Text("No outputs yet.")
                         .font(.system(size: 13))
                         .foregroundColor(Theme.textFaint)
+                        .settingsCell()
                 }
                 ForEach(model.programOutputs, id: \.id) { output in
+                    if output.id != model.programOutputs.first?.id { SettingsDivider() }
                     SettingsRow(title: output.label.isEmpty ? output.kind.displayName : output.label,
                                 subtitle: Self.reach(of: output)) {
                         if output.kind == .vcam && VirtualCameraResolution.isSelectable {
@@ -235,16 +288,20 @@ struct AutoCutPane: View {
                                   stored: .init(lo: auto.minSeconds, hi: auto.maxSeconds))
         VStack(alignment: .leading, spacing: 0) {
             PaneHeader(title: "Auto Cut", subtitle: "Needs 2+ connected cameras.")
+            // No box here (operator, 2026-10-31): the timers are already framed, a box around them
+            // is a box in a box.
             VStack(alignment: .leading, spacing: Spacing.md) {
                 Text("Hold each camera between")
                     .font(.system(size: 13))
                     .foregroundColor(Theme.textPrimary)
                 AutoCutRangeEditor(lo: range.lo, hi: range.hi)
-                if !range.wrappedValue.isValid {
-                    Text("The second value cannot be smaller than the first.")
-                        .font(.system(size: 11))
-                        .foregroundColor(Theme.accentRed)
-                }
+                // The same line as the top-bar popover: the hint, replaced by the error while wrong.
+                let wrong = !range.wrappedValue.isValid
+                Text(wrong ? "The second value cannot be smaller than the first."
+                           : "A fresh random value inside the range before every cut.")
+                    .font(.system(size: 11))
+                    .foregroundColor(wrong ? Theme.accentRed : Theme.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -263,11 +320,12 @@ struct IntegrationsPane: View {
             PaneHeader(title: "Integrations")
             SettingsGroup(title: "Stream Deck") {
                 SettingsRow(title: "Allow Stream Deck control",
-                            subtitle: "Apps on this Mac can switch cameras") {
+                            note: "Apps on this Mac can switch cameras.") {
                     SettingsSwitch(isOn: $control.enabled)
                 }
                 if control.enabled, let failure = control.failure {
-                    ControlFailureLine(text: failure)
+                    SettingsDivider()
+                    ControlFailureLine(text: failure).settingsCell()
                 }
             }
         }

@@ -20,7 +20,7 @@
 //
 //   Card { … }                         rounded panel container
 //   SectionLabel(text:)                small uppercase muted caption (no rule)
-//   ParamStrip(…)                      one control row: label · value · chips · slim scrub tape
+//   ParamStrip(…)                      one control row: label · value · chips · ‹ scrub tape ›
 //   ControlSection(title:auto:…) { … } titled card grouping rows, one section-level AUTO
 //   QuickTile(title:subtitle:selected:action:)  card-style quick-select tile
 //   TileRow(items:) { … }              evenly-spaced row of tiles
@@ -28,7 +28,7 @@
 // Retained helpers (used across the rails — kept stable, internals upgraded):
 //   .cardSurface() / .panelSurface()   card surface modifier (alias kept)
 //   .bridgeButton(selected:accent:)    standard inline button look
-//   StatusPill / ConnectionDot         LIVE/OFF pill + connection dot
+//   StatusPill                         LIVE/OFF pill
 // ─────────────────────────────────────────────────────────────────────────────
 
 import SwiftUI
@@ -131,6 +131,70 @@ struct Card<Content: View>: View {
             .padding(padding)
             .frame(maxWidth: .infinity, alignment: .leading)
             .cardSurface(corner: corner)
+    }
+}
+
+/// "Add channel" / "Add output": the last row of a rail's list, in place of a "+" in the header -
+/// where it sat next to the collapse control, one mis-click from hiding the rail on air (operator,
+/// 2026-10-25). A dashed outline the width of the cards, so it reads as the place the next card
+/// goes and never as a card itself; it opens the same menu the "+" did.
+struct AddListRow: View {
+    let title: String
+    let rows: () -> [DropdownRow]
+    @State private var hovering = false
+
+    var body: some View {
+        MenuButton(rows: rows) {
+            HStack(spacing: 6) {
+                Image(systemName: "plus")
+                    .font(.system(size: 11, weight: .semibold))
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .foregroundColor(hovering ? Theme.textPrimary : Theme.textSecondary)
+            .frame(maxWidth: .infinity, minHeight: 40)
+            .background(
+                RoundedRectangle(cornerRadius: Radius.panel, style: .continuous)
+                    .fill(hovering ? Theme.bgHover.opacity(0.5) : Color.clear)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Radius.panel, style: .continuous)
+                    .strokeBorder(Theme.strokeDivider, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+            )
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
+        }
+    }
+}
+
+/// The same "add" in a collapsed rail's strip: a dashed "+" the size of the strip's own tiles, at the
+/// end of them, so a channel or an output can be added without opening the rail (operator,
+/// 2026-10-25). Same menu as the full row.
+struct AddStripButton: View {
+    let help: String
+    var width: CGFloat = ControlMetrics.pillHeight
+    var height: CGFloat = ControlMetrics.pillHeight
+    let rows: () -> [DropdownRow]
+    @State private var hovering = false
+
+    var body: some View {
+        MenuButton(rows: rows) {
+            Image(systemName: "plus")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(hovering ? Theme.textPrimary : Theme.textSecondary)
+                .frame(width: width, height: height)
+                .background(
+                    RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+                        .fill(hovering ? Theme.bgHover.opacity(0.5) : Color.clear)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+                        .strokeBorder(Theme.strokeDivider, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                )
+                .contentShape(Rectangle())
+                .onHover { hovering = $0 }
+        }
+        .help(help)
     }
 }
 
@@ -304,6 +368,27 @@ struct BridgeButtonStyle: ButtonStyle {
 }
 
 extension View {
+    /// The look of every choice that drives the PHONE - the camera panel's quick-pick stops, and
+    /// the lens tiles over Preview: a dark chip, the active one in the camera app's yellow. One
+    /// look for one kind of action; the lenses used to be blue, as if they were something else
+    /// (operator, 2026-10-25).
+    func cameraChip(active: Bool, corner: CGFloat = 7) -> some View {
+        foregroundColor(active ? Theme.accentYellow : Theme.textSecondary)
+            .background(RoundedRectangle(cornerRadius: corner).fill(Theme.bgHover))
+            .overlay(RoundedRectangle(cornerRadius: corner)
+                .stroke(active ? Theme.accentYellow.opacity(0.6) : Theme.strokeDivider, lineWidth: 1))
+    }
+
+    /// A rail footer cell: 44 pt, panel fill, hairline on top - the shape of every footer row, so a
+    /// collapsed strip's icons end on the same lines as the full rails' rows.
+    func railFooterCell() -> some View {
+        frame(maxWidth: .infinity, minHeight: 44)
+            .background(Theme.bgPanel)
+            .overlay(Rectangle().frame(height: 1).foregroundColor(Theme.stroke), alignment: .top)
+    }
+}
+
+extension View {
     /// Convenience: wrap any tappable label in the standard Bridge button look.
     func bridgeButton(selected: Bool = false,
                       accent: Color = Theme.accentBlue,
@@ -341,21 +426,6 @@ struct StatusPill: View {
     }
 }
 
-// MARK: - Connection dot
-
-/// Small filled circle: accent-blue when connected, faint grey when not.  A
-/// faint ring keeps it visible against any surface.
-struct ConnectionDot: View {
-    let connected: Bool
-
-    var body: some View {
-        Circle()
-            .fill(connected ? Theme.accentBlue : Theme.textFaint)
-            .frame(width: 8, height: 8)
-            .overlay(Circle().stroke(Theme.bgApp, lineWidth: 1))
-    }
-}
-
 // MARK: - Parameter strip (one control row: label · value · chips · slim scrub tape)
 
 /// One parameter ROW inside a `ControlSection`: the label, the big current VALUE (the hero — yellow
@@ -385,6 +455,8 @@ struct ParamStrip: View {
     @State private var dragging = false
 
     static let rowHeight: CGFloat = 46
+    private static let tapeHeight: CGFloat = 15
+    private static let arrowWidth: CGFloat = 20
 
     /// Nearest ladder index to the current value (value can be off-ladder while AUTO reads live).
     private var selIdx: Int {
@@ -405,7 +477,11 @@ struct ParamStrip: View {
                 Spacer(minLength: 8)
                 if !presets.isEmpty { presetChips }
             }
-            slimTape
+            HStack(spacing: 6) {
+                stepArrow(down: true)
+                slimTape
+                stepArrow(down: false)
+            }
         }
         .frame(height: Self.rowHeight)
     }
@@ -418,12 +494,9 @@ struct ParamStrip: View {
                 Button { if let onPresetTap { onPresetTap(p); tick() } else { jump(to: p) } } label: {
                     Text(display(p))
                         .font(.system(size: 11, weight: .medium).monospacedDigit())
-                        .foregroundColor(active ? Theme.accentYellow : Theme.textSecondary)
                         .padding(.horizontal, 9)
                         .frame(height: 24)
-                        .background(RoundedRectangle(cornerRadius: 7).fill(Theme.bgHover))
-                        .overlay(RoundedRectangle(cornerRadius: 7)
-                            .stroke(active ? Theme.accentYellow.opacity(0.6) : Theme.strokeDivider, lineWidth: 1))
+                        .cameraChip(active: active)
                 }
                 .buttonStyle(.plain)
             }
@@ -448,15 +521,40 @@ struct ParamStrip: View {
                 }
                 Capsule()
                     .fill(Theme.accentYellow)
-                    .frame(width: 3, height: 15)
+                    .frame(width: 3, height: Self.tapeHeight)
                     .offset(x: Swift.max(0, Swift.min(w - 3, frac * w)))
             }
-            .frame(height: 15)
+            .frame(height: Self.tapeHeight)
             .contentShape(Rectangle())
             .onHover { inside in if inside { NSCursor.openHand.push() } else { NSCursor.pop() } }
             .gesture(scrub(width: w))
         }
-        .frame(height: 15)
+        .frame(height: Self.tapeHeight)
+    }
+
+    /// One stop down / up the ladder, at the tape's height: the arrow points where the marker will
+    /// move (operator, 2026-10-30).  One click = one command, like a chip; the end of the range
+    /// greys the arrow out.
+    private func stepArrow(down: Bool) -> some View {
+        let target = neighbour(below: down)
+        return Button { if let target { jump(to: target) } } label: {
+            Image(systemName: down ? "chevron.left" : "chevron.right")
+                .font(.system(size: 9, weight: .semibold))
+                .frame(width: Self.arrowWidth, height: Self.tapeHeight)
+                .cameraChip(active: false, corner: 4)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(target == nil)
+        .opacity(target == nil ? 0.35 : 1)
+    }
+
+    /// The next ladder stop strictly below / above the current value.  Strict, not "nearest ± 1":
+    /// while AUTO reads live the value sits between stops, and a step must still land on the
+    /// adjacent stop in the arrow's direction.
+    private func neighbour(below: Bool) -> Double? {
+        let eps = 0.0001
+        return below ? values.last { $0 < value - eps } : values.first { $0 > value + eps }
     }
 
     /// Ladder value at finger x.  Used by BOTH onChanged and onEnded so the COMMITTED value comes from
@@ -582,13 +680,25 @@ struct ControlSection<Content: View>: View {
     }
 
     private func autoToggle(_ action: @escaping (Bool) -> Void) -> some View {
-        Button { action(!auto) } label: {
-            Text("AUTO")
+        HeaderToggleChip(title: "AUTO", isOn: auto) { action(!auto) }
+    }
+}
+
+/// The on/off chip in a control section's header - AUTO, and any other switch that governs the
+/// whole section (ISO compensation on Look). Yellow while on, quiet while off.
+struct HeaderToggleChip: View {
+    let title: String
+    let isOn: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundColor(auto ? Theme.accentYellow : Theme.textSecondary)
+                .foregroundColor(isOn ? Theme.accentYellow : Theme.textSecondary)
                 .padding(.horizontal, 11).frame(height: 24)
-                .background(RoundedRectangle(cornerRadius: 7).fill(auto ? Theme.accentYellow.opacity(0.16) : Theme.bgHover))
-                .overlay(RoundedRectangle(cornerRadius: 7).stroke(auto ? Theme.accentYellow.opacity(0.55) : .clear, lineWidth: 1))
+                .background(RoundedRectangle(cornerRadius: 7).fill(isOn ? Theme.accentYellow.opacity(0.16) : Theme.bgHover))
+                .overlay(RoundedRectangle(cornerRadius: 7).stroke(isOn ? Theme.accentYellow.opacity(0.55) : .clear, lineWidth: 1))
         }
         .buttonStyle(.plain)
     }

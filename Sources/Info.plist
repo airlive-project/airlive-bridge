@@ -38,7 +38,7 @@
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 Airlive. All rights reserved.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Airlive Bridge uses the local network to find and receive video from Airlive Camera, and to republish it to receivers such as OBS and NDI.</string>
+	<string>Airlive Bridge uses the local network to find and receive video from Airlive Camera, and to send the program to other apps and devices on your network.</string>
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
 	<key>SUFeedURL</key>

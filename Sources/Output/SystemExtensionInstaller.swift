@@ -196,11 +196,11 @@ final class SystemExtensionInstaller: NSObject, OSSystemExtensionRequestDelegate
             // notably a build signed for development rather than Developer ID.
             message = "macOS wouldn't load the virtual camera extension. Use a Developer ID-signed build of Airlive Bridge, installed in /Applications."
         case .validationFailed, .codeSignatureInvalid:
-            message = "macOS rejected the extension's signature — reinstall Airlive Bridge from the official download."
+            message = "macOS rejected the extension's signature - reinstall Airlive Bridge from the official download."
         case .unsupportedParentBundleLocation:
-            message = "Move Airlive Bridge to /Applications — macOS only loads a camera extension from there."
+            message = "Move Airlive Bridge to /Applications - macOS only loads a camera extension from there."
         case .missingEntitlement:
-            message = "This build isn't signed with the system-extension entitlement — reinstall Airlive Bridge."
+            message = "This build isn't signed with the system-extension entitlement - reinstall Airlive Bridge."
         default:
             message = "Couldn't install the virtual camera: \(ns.localizedDescription)"
         }

@@ -1,4 +1,5 @@
 // AutoSwitchButton.swift - the AUTO control in the multiview top bar, and its settings panel.
+// A 40 pt tile like the rest of the bar; no shortcut hint (the bar shows those on lenses and CUT only).
 //
 // One split capsule, two jobs: the left half runs the rotation and shows the countdown, the right
 // half opens the settings. The gear stays live even when the rotation cannot - an operator with
@@ -16,18 +17,18 @@ struct AutoSwitchButton: View {
     var body: some View {
         HStack(spacing: 0) {
             Button { auto.toggle() } label: {
-                HStack(spacing: 6) {
+                // The countdown UNDER the word, as the shortcut sits under CUT: a compact tile that
+                // matches its neighbour (operator, 2026-10-25). Fixed width + tabular digits:
+                // `0:07` and `12:40` occupy the same room, so nothing beside it ever shifts.
+                VStack(spacing: 1) {
                     Text("AUTO")
-                        .font(.system(size: 11, weight: .medium))
-                    // Fixed slot + tabular digits: `0:07` and `12:40` occupy the same width, so the
-                    // capsule never breathes and CUT beside it never shifts.
+                        .font(.system(size: 12, weight: .medium))
                     Text(auto.display)
-                        .font(.system(size: 11, weight: .medium).monospacedDigit())
-                        .frame(width: 34, alignment: .trailing)
-                        .foregroundColor(auto.isOn ? .white : Theme.textFaint)
+                        .font(.system(size: 10, weight: .medium).monospacedDigit())
+                        .foregroundColor(auto.isOn ? .white.opacity(0.85) : Theme.textFaint)
                 }
-                .padding(.horizontal, Spacing.sm)
-                .frame(height: 22)
+                .frame(width: 56)
+                .frame(height: ControlMetrics.tileHeight)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -40,23 +41,23 @@ struct AutoSwitchButton: View {
 
             Rectangle()
                 .fill(auto.isOn ? Color.white.opacity(0.2) : Theme.strokeDivider)
-                .frame(width: 1, height: 22)
+                .frame(width: 1, height: ControlMetrics.tileHeight)
 
             Button { openSettings() } label: {
                 Image(systemName: "gearshape")
                     .font(.system(size: 11))
                     .foregroundColor(auto.isOn ? Color.white.opacity(0.8) : Theme.textSecondary)
                     .padding(.horizontal, 6)
-                    .frame(height: 22)
+                    .frame(height: ControlMetrics.tileHeight)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help("Auto cut settings")
         }
         .background(RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
-                        .fill(auto.isOn ? Theme.accentBlue : Theme.bgSelected.opacity(0.6)))
+                        .fill(auto.isOn ? Theme.accentBlue : Theme.bgHover))   // off: the bar's chip
         .overlay(RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
-                    .stroke(auto.isOn ? Color.clear : Theme.stroke, lineWidth: 1))
+                    .stroke(auto.isOn ? Color.clear : Theme.strokeDivider, lineWidth: 1))
         .animation(.easeOut(duration: 0.12), value: auto.isOn)
         // The shared reader, like every other trigger: it keeps an open panel pinned to the button
         // across a window resize, and ignores the sub-pixel jitter that would rewrite state per frame.

@@ -47,13 +47,12 @@ final class ProgramBus {
         set { lock.lock(); _lastFormatPayload = newValue; lock.unlock() }
     }
 
-    /// True while some passthrough consumer actually needs the ENCODED program: a connected OBS
-    /// relay, an RTSP client that is PLAYING, or a live SRT peer.  NDI, HDMI and the virtual
+    /// True while some passthrough consumer actually needs the ENCODED program: an RTSP client
+    /// that is PLAYING, or a live SRT peer.  NDI, HDMI and the virtual
     /// camera all take decoded frames and need none of it — so with only those on air the
     /// transcoder must not run at all.
     var hasLivePassthroughConsumer: Bool {
         outputs.contains { out in
-            if let relay = out as? AirliveRelayOutput { return relay.isConnected }   // real TCP peer
             if let rtsp = out as? RTSPOutput { return rtsp.hasPlayingClient }         // a client is PLAYING
             if let srt = out as? SRTOutput { return srt.isLive }                      // caller-mode: connected peer
             return false

@@ -132,7 +132,7 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
                 // not that macOS failed to launch the extension; it is that THIS process built
                 // its device list while the extension was being replaced and never refreshed.
                 // Reopening the app costs seconds; logging out costs the operator their session.
-                return "Quit and reopen Airlive Bridge — this copy can’t see the virtual camera. If it’s still missing, log out and back in."
+                return "Quit and reopen Airlive Bridge - this copy can’t see the virtual camera. If it’s still missing, log out and back in."
             case .notSetUp, .installing, .starting, .ready, .live: return nil
             }
         }
@@ -166,7 +166,7 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     var lastError: String? {
         lock.lock(); defer { lock.unlock() }
         if pendingRestart {
-            return "Restart the Mac to finish updating the virtual camera — until then apps still get the previous version."
+            return "Restart the Mac to finish updating the virtual camera - until then apps still get the previous version."
         }
         return _stage.message
     }
@@ -627,7 +627,7 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
         // That is the normal resting state of a virtual camera, not a fault, and calling it
         // one told operators the camera was broken whenever no app happened to have it open.
         case .queueFull: framesDropped &+= 1
-        case .failed:    reportOnce("The virtual camera stopped accepting frames — switch this output off and on.")
+        case .failed:    reportOnce("The virtual camera stopped accepting frames - switch this output off and on.")
         }
     }
 

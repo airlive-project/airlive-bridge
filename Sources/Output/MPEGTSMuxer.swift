@@ -2,7 +2,7 @@
 //
 // SRT carries an MPEG-TS payload by convention, so a generic SRT receiver
 // (ffmpeg, OBS media source, vMix, a cloud ingest) can demux it.  We take the
-// camera's ORIGINAL H.264 access units (the same raw taps the OBS relay / RTSP use)
+// camera's ORIGINAL H.264 access units (the same raw taps RTSP uses)
 // and packetize them into 188-byte TS packets — PAT + PMT + PES with PCR.  Zero
 // decode, zero encode.
 //

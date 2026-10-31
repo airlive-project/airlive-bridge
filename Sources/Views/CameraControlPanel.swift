@@ -140,18 +140,9 @@ struct CameraControlPanel: View {
                 lookSection.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .fixedSize(horizontal: false, vertical: true)
-            // Both cards `fillHeight` + `maxHeight: .infinity` + the row `.fixedSize(vertical:)` — the
-            // same recipe as the Focus/Look row above, so the two bottoms line up exactly.
-            // Stabilization shows only when the camera supports it (it affects the pictured video).
-            // fps / resolution were removed — they only change the phone's LOCAL recording master,
-            // never the fixed 1080p/30 monitoring wire.  Output delay used to share this row; it is
-            // now the Bridge-wide latency buffer in the channel rail's footer (LatencyBufferFooter).
-            if hasStabilization {
-                HStack(alignment: .top, spacing: Spacing.md) {
-                    stabilizationSection.frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-                .fixedSize(horizontal: false, vertical: true)
-            }
+            // Stabilization is a row of Look now (operator, 2026-10-30). fps / resolution were removed —
+            // they only change the phone's LOCAL recording master, never the fixed 1080p/30 monitoring
+            // wire. Output delay is the Bridge-wide latency buffer in the channel rail's footer.
         }
     }
 
@@ -242,24 +233,28 @@ struct CameraControlPanel: View {
     }
 
     private var lookSection: some View {
-        ControlSection(title: "Look", fillHeight: true) {
+        // ISO compensation is a switch in the header, like AUTO on the other sections, so every row
+        // below is a dropdown of one fixed width (operator, 2026-10-30).
+        ControlSection(title: "Look", accessory: AnyView(
+            HeaderToggleChip(title: "ISO COMP", isOn: isoCompensation) {
+                isoCompensation.toggle()
+                channel.send(.setIsoCompensation(isoCompensation))
+            }
+            .help("ISO compensation")
+        ), fillHeight: true) {
             VStack(alignment: .leading, spacing: Spacing.sm) {
-                // Colour space — SELECTABLE, above the LUT, SAME full-width boxed dropdown.  Data-driven,
+                // Colour space — SELECTABLE, above the LUT, SAME boxed dropdown.  Data-driven,
                 // NOT gated on a "colorSpace" cap (this camera advertises its spaces via `capabilities`,
                 // not a separate flag).  Readback-driven: a camera that refuses just re-broadcasts the
                 // unchanged value.  No toggle → an equal-width spacer keeps its box aligned with the LUT.
                 lookBoxRow(label: "Color space",
                            value: channel.remote?.colorSpace ?? "—", isPlaceholder: false,
-                           options: colorSpaceOptions, enabled: !colorSpaceOptions.isEmpty, toggle: nil) { v in
+                           options: colorSpaceOptions, enabled: !colorSpaceOptions.isEmpty) { v in
                     channel.send(.setColorSpace(v))   // EXACT raws (a wrong spelling silently no-ops)
                 }
                 lutRow
-                // ISO compensation — LAST (operator order: pick the space, pick the look, then the
-                // exposure tweak).  Label left, on/off toggle far right (aligns with the LUT toggle).
-                lookToggleRow("ISO compensation", isOn: isoCompensation) {
-                    isoCompensation.toggle()
-                    channel.send(.setIsoCompensation(isoCompensation))
-                }
+                // Shown only when the camera supports it (it affects the pictured video).
+                if hasStabilization { stabilizationRow }
             }
             .frame(maxWidth: .infinity, minHeight: Self.sectionBodyHeight, alignment: .topLeading)
         }
@@ -272,52 +267,40 @@ struct CameraControlPanel: View {
         caps.colorSpaces.isEmpty ? ["Rec.709", "P3 D65", "Rec.2020 HLG", "Apple Log"] : caps.colorSpaces
     }
 
-    /// ONE label column for every Look row — the controls beside it all start at the same x, and no
-    /// label may cross that line.  Sized for the LONGEST label ("ISO compensation" ≈ 112 pt at 13 pt
-    /// medium); at the old 92 pt that row alone ran its natural width and overhung the dropdowns'
-    /// left edge, which is exactly the ragged look this fixes.
-    private static let lookLabelWidth: CGFloat = 128
-    private static let lookRowHeight: CGFloat = 34
+    /// The narrowest the label column gets — no label may run under its dropdown.  Sized for the longest label ("Stabilization", ≈ 80 pt at 12 pt
+    /// medium) plus air.
+    private static let lookLabelWidth: CGFloat = 96
+    /// One width for every Look dropdown, pinned to the card's right edge under the header chip
+    /// (the free space goes between label and box, never after the box).  Fits a typical LUT name (~30 characters) with room to
+    /// spare, so the boxes are not sized to whichever item happens to be picked; a longer name
+    /// keeps its start and end and loses the middle.  A narrower card shrinks them together.
+    private static let lookFieldWidth: CGFloat = 240
 
-    /// Look row: label left, on/off toggle far right (ISO compensation).  Same fixed label column as
-    /// `lookBoxRow` so its text stops on the shared line instead of running past it.
-    private func lookToggleRow(_ title: String, isOn: Bool, onToggle: @escaping () -> Void) -> some View {
-        HStack(spacing: Spacing.sm) {
-            Text(title).font(.system(size: 13, weight: .medium)).foregroundColor(Theme.textPrimary)
-                .frame(width: Self.lookLabelWidth, alignment: .leading)
-            Spacer(minLength: Spacing.sm)
-            PowerToggle(state: isOn ? .on : .off, action: onToggle)
-        }
-        .frame(height: Self.lookRowHeight)
-    }
-
-    /// Look row = fixed label + our shared `Dropdown` (full-width boxed trigger + styled popover list,
-    /// NOT the native NSMenu) + a trailing on/off toggle (or an equal-width spacer so the boxes line up).
+    /// Look row = fixed label + our shared `Dropdown` (boxed trigger + styled popover list, NOT the
+    /// native NSMenu), at the camera panel's own type size and the app's 28 pt control height.
     private func lookBoxRow(label: String, value: String, isPlaceholder: Bool, options: [String],
-                            enabled: Bool, toggle: AnyView?, onPick: @escaping (String) -> Void) -> some View {
+                            enabled: Bool, onPick: @escaping (String) -> Void) -> some View {
         HStack(spacing: Spacing.sm) {
-            Text(label).font(.system(size: 13, weight: .medium)).foregroundColor(Theme.textPrimary)
-                .frame(width: Self.lookLabelWidth, alignment: .leading)
+            Text(label).font(.system(size: 12, weight: .medium)).foregroundColor(Theme.textSecondary)
+                .frame(minWidth: Self.lookLabelWidth, maxWidth: .infinity, alignment: .leading)
                 .opacity(enabled ? 1 : 0.5)         // match the Dropdown's own disabled dim (below)
             Dropdown(items: options,
                      selection: options.contains(value) ? value : nil,
                      displayText: value,
                      isPlaceholder: isPlaceholder,
                      isEnabled: enabled,
+                     triggerHeight: ControlMetrics.pillHeight,
                      onSelect: onPick)
-            // Toggle slot (= PowerToggle width): the LUT's on/off, or an empty spacer for Colour space,
-            // so both boxes end at the same x.  Dim it with the label so a disabled row reads uniformly
-            // greyed (the Dropdown self-dims; without this the label + knob stayed full-bright).
-            ZStack { if let toggle { toggle } }.frame(width: ControlMetrics.chipWidth)
-                .opacity(enabled ? 1 : 0.5)
+                .frame(maxWidth: Self.lookFieldWidth)
         }
     }
 
     /// The camera's REAL LUT — burns into the operator's preview + the wire + the Rec-to-Clip bake, NOT a
     /// receiver-side "preview LUT".  Hence the label "Camera LUT".  A new camera (cap "lut") lists its
     /// QUICK-ACCESS LUTs (`caps.availableLuts`); a legacy camera just carries its current `lutName`.
-    /// CONTRACT: "None" = nothing.  A LUT turns on ONLY by an explicit pick from the list — the toggle
-    /// merely re-applies / clears the ALREADY-selected one and must NEVER invent a LUT.
+    /// CONTRACT: "None" = nothing.  A LUT turns on ONLY by an explicit pick from the list, and off by
+    /// picking None - the list is the whole control (the on/off toggle beside it was removed,
+    /// operator 2026-10-30: None already says "off").
     private var lutRow: some View {
         let name = channel.remote?.lutName                       // the camera's ACTUAL loaded LUT (nil = None)
         let quickList = channel.hasCap("lut") ? caps.availableLuts : []
@@ -328,20 +311,8 @@ struct CameraControlPanel: View {
         let usable = options.count > 1 || name != nil
         let active = lutEnabled && name != nil                   // "on" only when a LUT is really selected
         let shown = active ? (name ?? "None") : "None"           // SINGLE source → drives display AND ✓
-        let toggle = AnyView(
-            PowerToggle(state: active ? .on : .off) {
-                // NEVER invent a LUT.  The old `base.first` fallback applied a quick-LUT nobody chose, and
-                // on a non-Apple-Log phone a Log-LUT over an already tone-mapped frame double-tone-maps
-                // ("overcooked", real TestFlight report).  Enable only RE-applies the selected `name`;
-                // with None on the camera there's nothing to enable → no-op (pick from the list instead).
-                guard usable, let current = name else { return }
-                lutEnabled.toggle()
-                channel.send(.setLUT(name: lutEnabled ? current : "", enabled: lutEnabled))
-            }
-            .disabled(!usable)
-        )
         return lookBoxRow(label: "Camera LUT", value: shown, isPlaceholder: shown == "None",
-                          options: options, enabled: usable, toggle: toggle) { picked in
+                          options: options, enabled: usable) { picked in
             if picked == "None" {
                 lutEnabled = false; channel.send(.setLUT(name: "", enabled: false))
             } else {
@@ -355,18 +326,15 @@ struct CameraControlPanel: View {
     /// True when this phone advertises a stabilization capability with modes to pick.
     private var hasStabilization: Bool { channel.hasCap("stabilization") && !caps.stabilizations.isEmpty }
 
-    /// Video stabilization mode.  Unlike fps/resolution (local-recording only, removed), this is a
-    /// runtime connection-property change the camera applies mid-take, and it DOES affect the
-    /// stabilized picture the wire carries.  EXACT raws "Standard"/"High" from `caps.stabilizations`.
-    private var stabilizationSection: some View {
+    /// Video stabilization mode, as a Look row.  Unlike fps/resolution (local-recording only,
+    /// removed), this is a runtime connection-property change the camera applies mid-take, and it
+    /// DOES affect the stabilized picture the wire carries.  EXACT raws from `caps.stabilizations`.
+    private var stabilizationRow: some View {
         let cur = stabSel.isEmpty ? (channel.remote?.stabilization ?? "—") : stabSel
-        return ControlSection(title: "Stabilization", fillHeight: true) {
-            Dropdown(items: caps.stabilizations,
-                     selection: caps.stabilizations.contains(cur) ? cur : nil,
-                     displayText: cur, isPlaceholder: cur == "—") { v in
-                stabSel = v
-                channel.send(.setStabilization(v))     // EXACT raws "Standard"/"High" from caps
-            }
+        return lookBoxRow(label: "Stabilization", value: cur, isPlaceholder: cur == "—",
+                          options: caps.stabilizations, enabled: true) { v in
+            stabSel = v
+            channel.send(.setStabilization(v))     // EXACT raws from caps
         }
     }
 
@@ -459,7 +427,7 @@ struct CameraControlSection: View {
                      text: "Video: iPhone → Control Center → Screen Mirroring → “\(channel.name)”.")
             stepLine(done: channel.controlConnected,
                      text: "Control: Airlive Camera → Live → “\(channel.name)”.")
-            Text("Video rides the native AirPlay mirror — no second encode, the phone stays cool. The Airlive link carries control only.")
+            Text("Video rides the native AirPlay mirror - no second encode, the phone stays cool. The Airlive link carries control only.")
                 .font(.system(size: 11))
                 .foregroundColor(Theme.textFaint)
                 .fixedSize(horizontal: false, vertical: true)
@@ -486,7 +454,7 @@ struct CameraControlSection: View {
         VStack(alignment: .leading, spacing: Spacing.xs) {
             SectionLabel(text: "Connect")
             Text(channel.kind == .capture
-                 ? "Plug the HDMI / USB capture device in — the picture appears automatically."
+                 ? "Plug the HDMI / USB capture device in - the picture appears automatically."
                  : "iPhone → Control Center → Screen Mirroring → “\(channel.name)”.")
                 .font(.system(size: 12))
                 .foregroundColor(Theme.textFaint)

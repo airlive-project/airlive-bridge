@@ -35,7 +35,7 @@
 import Foundation
 
 enum ControlProtocol {
-    /// Fixed so the plugin can find the Bridge without discovery. Next to the relay's 47788; a
+    /// Fixed so the Stream Deck plugin can find the Bridge without discovery; a
     /// loopback-only bind never reaches the firewall or the LAN.
     static let port: UInt16 = 47790
     static let generation = 1

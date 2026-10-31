@@ -161,7 +161,7 @@ struct Dropdown: View {
     var isEnabled: Bool = true
     /// Items shown greyed + non-selectable (e.g. an HDMI screen already claimed by another output).
     var disabledItems: Set<String> = []
-    /// Trigger height — 34 fits the Look rows; pass 28 to sit flush with the Outputs-rail pills.
+    /// Trigger height — 34 by default; pass `ControlMetrics.pillHeight` (28) to sit with the app's pills.
     var triggerHeight: CGFloat = 34
     let onSelect: (String) -> Void
 
@@ -190,6 +190,7 @@ struct Dropdown: View {
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(isPlaceholder ? Theme.textFaint : Theme.textPrimary)
                     .lineLimit(1)
+                    .truncationMode(.middle)   // a long LUT / screen name keeps its start AND its end
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
@@ -380,6 +381,7 @@ struct DropdownOverlay: View {
                     .font(.system(size: 12, weight: r.isSelected ? .medium : .regular))
                     .foregroundColor(r.isDisabled ? Theme.textFaint : Theme.textPrimary)
                     .lineLimit(1)
+                    .truncationMode(.middle)
                 Spacer(minLength: 8)
                 if let value = r.value {
                     HStack(alignment: .firstTextBaseline, spacing: 3) {

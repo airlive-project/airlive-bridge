@@ -203,13 +203,21 @@ extension View {
                         .stroke(Theme.stroke, lineWidth: 1))
     }
 
-    /// A group of settings as the main window's card. Only for a pane with many groups: the
-    /// Shortcuts section (ShortcutSettings).
-    func settingsCard() -> some View {
-        padding(Spacing.md)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .cardSurface(corner: Radius.tile)
+    /// Anything in a group's box that is not a `SettingsRow` (a row of chips, the Auto Cut timers):
+    /// the same height and padding as a row, so the hairlines between them fall evenly.
+    func settingsCell() -> some View {
+        padding(.vertical, SettingsMetric.rowPadding)
+            .frame(maxWidth: .infinity, minHeight: SettingsMetric.rowHeight, alignment: .leading)
     }
+}
+
+/// The grouped-form measures, as in the system's own settings window: a group title in the body
+/// font above a rounded box that hugs its rows and fills the width, rows split by inset hairlines
+/// (operator, 2026-10-31: the caps micro-labels on a bare panel read as messy).
+enum SettingsMetric {
+    static let rowHeight: CGFloat = 40      // a row with a switch or a button, like the system's
+    static let rowPadding: CGFloat = 8
+    static let boxInset: CGFloat = 12       // row content and hairlines start here
 }
 
 /// A pane's title, and an optional line under it.
@@ -232,46 +240,96 @@ struct PaneHeader: View {
     }
 }
 
-/// A titled group: its section label, then its rows. No card: the panel is already the box, and a
-/// card per group made a box in a box on panes with one or two groups (operator, 2026-10-07).
-/// Cards appear only where a pane has many groups - the Shortcuts section.
+/// A group: its title, a box holding its rows (put a `SettingsDivider` between two rows), and an
+/// optional note under the box. Every pane is built from these, Shortcuts included.
 struct SettingsGroup<Content: View>: View {
-    let title: String
+    var title: String? = nil
+    var footer: String? = nil
     @ViewBuilder let content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Spacing.sm) {
-            SectionLabel(text: title)
-            content
+        VStack(alignment: .leading, spacing: 6) {
+            if let title {
+                // Flush with the box's edge, on the pane title's line: a pane can mix boxed groups
+                // with unboxed ones (the frame guide), and an inset title there gave two left
+                // edges (operator, 2026-10-31).
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(Theme.textPrimary)
+            }
+            VStack(alignment: .leading, spacing: 0) { content }
+                .padding(.horizontal, SettingsMetric.boxInset)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: Radius.tile, style: .continuous)
+                                .fill(Theme.bgPanel))
+                .overlay(RoundedRectangle(cornerRadius: Radius.tile, style: .continuous)
+                            .stroke(Theme.stroke, lineWidth: 1))
+            if let footer {
+                SettingsNote(text: footer)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.bottom, Spacing.xl)
     }
 }
 
-/// A row: title (and an optional line under it) on the left, the control on the right.
+/// The hairline between two rows of a group's box, inset like the rows' content.
+struct SettingsDivider: View {
+    var body: some View {
+        Rectangle().fill(Theme.stroke).frame(height: 1)
+    }
+}
+
+/// The row's title line: the control is centred on the TITLE, not on title + the lines under it
+/// (operator, 2026-10-31: the title is the row, the note is extra) - as in the system's settings.
+extension VerticalAlignment {
+    private enum SettingsTitle: AlignmentID {
+        static func defaultValue(in d: ViewDimensions) -> CGFloat { d[VerticalAlignment.center] }
+    }
+    static let settingsTitle = VerticalAlignment(SettingsTitle.self)
+}
+
+/// A row: title on the left, the control on the right. Under the title either a `subtitle` (a
+/// value: a path, a port, a device name) or a `note` (what the setting does, with the ⓘ mark).
 struct SettingsRow<Control: View>: View {
     let title: String
     var subtitle: String? = nil
+    var note: String? = nil
     @ViewBuilder let control: Control
 
     var body: some View {
-        HStack(alignment: .center, spacing: Spacing.md) {
-            VStack(alignment: .leading, spacing: 2) {
+        HStack(alignment: .settingsTitle, spacing: Spacing.md) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(title)
                     .font(.system(size: 13))
                     .foregroundColor(Theme.textPrimary)
+                    .alignmentGuide(.settingsTitle) { $0[VerticalAlignment.center] }
                 if let subtitle {
                     Text(subtitle)
                         .font(.system(size: 11))
                         .foregroundColor(Theme.textFaint)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                if let note { SettingsNote(text: note) }
             }
             Spacer(minLength: Spacing.sm)
             control
         }
-        .frame(minHeight: ControlMetrics.segmentHeight)
+        .settingsCell()
+    }
+}
+
+/// A short explanation, written out under its title the way the system's settings do (no popover
+/// to open). The ⓘ mark is part of the TEXT, so a second line starts under the mark, not under the
+/// first word (operator, 2026-10-31).
+struct SettingsNote: View {
+    let text: String
+
+    var body: some View {
+        (Text(Image(systemName: "info.circle")) + Text(" " + text))
+            .font(.system(size: 11))
+            .foregroundColor(Theme.textFaint)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 

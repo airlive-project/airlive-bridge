@@ -490,19 +490,8 @@ final class BridgeModel: ObservableObject {
         programOutputs = defaults
     }
 
-    /// Wire output-kind-specific hooks (currently: the relay's keyframe request).
+    /// Wire output-kind-specific hooks (SRT's keyframe request and connection status, and the like).
     private func configureOutput(_ output: VideoOutput) {
-        if let relay = output as? AirliveRelayOutput {
-            // onReady fires on main once OBS is actually connected — force one IDR
-            // even if the program source didn't change (the fresh relay needs it).
-            relay.onReady = { [weak self] in self?.requestKeyframeForProgram(force: true) }
-            // Live Connected/Waiting status on the OBS card.
-            relay.onConnectionChanged = { [weak self] in self?.objectWillChange.send() }
-            // ALWAYS ON — no toggle: the plugin receives, the Bridge sends, period.  Same-machine
-            // loopback: when OBS (with the source) is up it connects within ~1 s, otherwise the
-            // relay just keeps retrying — zero operator action, nothing to mis-toggle.
-            relay.start()
-        }
         if let srt = output as? SRTOutput {
             srt.onReady = { [weak self] in self?.requestKeyframeForProgram(force: true) }
             // Spinner → green on the card the moment the caller actually connects (and back on drop).
@@ -629,8 +618,8 @@ final class BridgeModel: ObservableObject {
             switch wire {
             case .camera:
                 // Ask the phone. Forcing (not the lastKeyframeProgramID dedup) is essential:
-                // after A→AirPlay→A the dedup sees A unchanged and skips, leaving the relay gated
-                // with no keyframe → OBS frozen for a GOP.
+                // after A→AirPlay→A the dedup sees A unchanged and skips, leaving the passthrough
+                // outputs (SRT / RTSP) gated with no keyframe → frozen for a GOP.
                 requestKeyframeForProgram(force: true)
             case .encoder:
                 // Ask ourselves - the encoder is right here, so this costs a frame, not a round trip.
@@ -651,7 +640,7 @@ final class BridgeModel: ObservableObject {
     /// Last program we asked an IDR for — so routine re-routes (mode toggle, channel
     /// add/remove, re-selecting the SAME source, staging to Preview) never re-poke the
     /// camera.  We force a keyframe only when the program SOURCE actually changes (a
-    /// real CUT) or when a relay first connects (`force`).
+    /// real CUT) or when a passthrough output first connects (`force`).
     private var lastKeyframeProgramID: UUID?
     private var keyframeDebounce: DispatchWorkItem?
     /// Coalesce window for forced IDRs.  It protects the phone from a director hammering CUT
@@ -660,19 +649,19 @@ final class BridgeModel: ObservableObject {
     /// It fires on the LEADING edge.  It used to fire only on the trailing one, which meant a
     /// single, isolated cut - the normal case, the one that happens in every service - sat here
     /// for the full window before the request was even SENT, while `awaitFormat` had already
-    /// shut the passthrough outputs. OBS/RTSP/SRT held the outgoing camera's last frame for
+    /// shut the passthrough outputs. RTSP/SRT held the outgoing camera's last frame for
     /// 300 ms of pure self-harm on top of the unavoidable round trip. The window still coalesces
     /// a burst; it just no longer taxes the cut that isn't one.
     private let keyframeDebounceSeconds = 0.3
 
-    /// Ask the on-air camera for a fresh keyframe — but ONLY when an OBS relay is
-    /// ACTUALLY connected and receiving, AND the program source genuinely changed (or
-    /// `force` for a fresh relay connect).  Gated tightly so the phone emits at most
+    /// Ask the on-air camera for a fresh keyframe — but ONLY when a passthrough output is
+    /// ACTUALLY serving, AND the program source genuinely changed (or `force` for a fresh
+    /// connect).  Gated tightly so the phone emits at most
     /// one extra I-frame per real CUT and never for routine UI churn or for NDI, and
     /// DEBOUNCED so rapid CUTs collapse to a single IDR on the settled program.
-    /// Any LIVE passthrough consumer that needs a clean IDR after a CUT — the OBS relay (connected),
-    /// or an RTSP/SRT output that's serving.  RTSP/SRT are gated on the same awaitFormat() as the OBS
-    /// relay now, so they too need the forced keyframe or they freeze/corrupt for a whole GOP on a cut.
+    /// Any LIVE passthrough consumer that needs a clean IDR after a CUT — an RTSP/SRT output that's
+    /// serving. Both are gated on awaitFormat(), so without the forced keyframe they freeze or
+    /// corrupt for a whole GOP on a cut.
     private func hasLivePassthroughConsumer() -> Bool { programBus.hasLivePassthroughConsumer }
 
     private func requestKeyframeForProgram(force: Bool = false) {
@@ -1009,7 +998,7 @@ final class BridgeModel: ObservableObject {
             // A SINGLETON kind restores at most once (OutputKind.isSingleton).  The "+" menu
             // stops offering a second, but a profile does not come from that menu: it can be
             // hand-edited, shared, or written by a build from before the guard existed.  Two
-            // OBS relays would both hammer the one loopback slot; two Virtual Cameras would
+            // Virtual Cameras would
             // fight over the single device macOS publishes, one silently dropping its frames
             // while switching either off killed the other's picture.
             if let kind = OutputKind(rawValue: cfg.kind), kind.isSingleton,
@@ -1337,7 +1326,7 @@ final class BridgeModel: ObservableObject {
                     let alert = NSAlert()
                     alert.alertStyle = .warning
                     alert.messageText = "Couldn’t open your last session"
-                    alert.informativeText = "Airlive Bridge started with default settings because the saved session file couldn’t be read. Your channels and outputs have NOT been deleted — try Profiles ▸ Open to load a saved profile.\n\n" + detail
+                    alert.informativeText = "Airlive Bridge started with default settings because the saved session file couldn’t be read. Your channels and outputs have NOT been deleted - try Profiles ▸ Open to load a saved profile.\n\n" + detail
                     alert.addButton(withTitle: "OK")
                     alert.runModal()
                 }
@@ -1351,13 +1340,16 @@ final class BridgeModel: ObservableObject {
         return !isFirstLaunch
     }
 
-    /// First launch: open with the three source kinds already created, so a new
-    /// operator sees a working room instead of an empty rail (the no-onboarding
-    /// decision — the UI explains itself, the starter channels show the options).
+    /// First launch: open with three Airlive Camera channels, so a new operator sees a working
+    /// room instead of an empty rail (the no-onboarding decision).  All three the SAME kind
+    /// (operator, 2026-10-25): with one of each, a second phone landed on the Screen Mirroring
+    /// channel and "had no signal" - nobody reads the kind.  The other kinds stay one click away
+    /// in Add channel.  Runs ONLY when no session file exists (`restoreLastSession`), so an
+    /// existing setup is never touched.
+    private static let firstLaunchChannelCount = 3
+
     private func seedFirstLaunchChannels() {
-        addChannel()                                    // Cam 1 — Airlive Camera
-        addChannel(kind: .airplay)                      // Cam 2 — Screen Mirroring
-        addChannel(kind: .screenMirroringPlusControl)   // Cam 3 (Control)
+        for _ in 0 ..< Self.firstLaunchChannelCount { addChannel() }   // Cam 1, Cam 2, Cam 3
         selectedID = channels.first?.id
         previewID = channels.first?.id
         clearUndoHistory()   // the seed isn't an operator action — ⌘Z must not strip the defaults
@@ -1369,7 +1361,6 @@ final class BridgeModel: ObservableObject {
         guard let kind = OutputKind(rawValue: cfg.kind) else { return nil }
         let output: VideoOutput?
         switch kind {
-        case .obs:  output = AirliveRelayOutput(label: cfg.label)
         case .ndi:  output = NDIOutput(label: cfg.label)
         case .rtsp: output = RTSPOutput(label: cfg.label, port: cfg.port.map { UInt16($0) } ?? RTSPOutput.defaultPort)
         case .hdmi: output = HDMIOutput(label: cfg.label)

@@ -44,6 +44,10 @@ struct MultiviewGrid: View {
     }
 
     // MARK: Top bar - lenses (over Preview, left) · CUT (center) · AUTO · Fullscreen (right)
+    //
+    // Every control is a 40 pt tile, the height of the collapsed rails' tiles, with its shortcut
+    // UNDER the label instead of beside it - so a hint never changes a button's width and nothing
+    // shifts (operator, 2026-10-25). Shortcuts are shown on the lenses and CUT only.
 
     private var topBar: some View {
         // CUT sits on the TRUE center (the PVW/PGM seam) with AUTO on its right, whatever the
@@ -71,6 +75,7 @@ struct MultiviewGrid: View {
         } else {
             Text("Stage a camera to pick its lens")
                 .font(.system(size: 11)).foregroundColor(Theme.textFaint)
+                .frame(height: ControlMetrics.tileHeight)   // the bar keeps its height either way
         }
     }
 
@@ -87,6 +92,7 @@ struct MultiviewGrid: View {
     private struct LensQuickRow: View {
         @ObservedObject var channel: BridgeChannel
         @EnvironmentObject var shortcuts: ShortcutCenter
+        private static let lensTileWidth: CGFloat = 44
 
         var body: some View {
             if let lenses = channel.remote?.availableLenses, !lenses.isEmpty {
@@ -94,22 +100,23 @@ struct MultiviewGrid: View {
                     ForEach(Array(lenses.prefix(6).enumerated()), id: \.element) { pair in
                         let isSel = channel.selectedLens == pair.element
                         Button { channel.selectLens(pair.element) } label: {
-                            HStack(spacing: 3) {
+                            VStack(spacing: 1) {
                                 Text(pair.element)
-                                    .font(.system(size: 11, weight: .medium))
+                                    .font(.system(size: 12, weight: .medium))
                                 if shortcuts.showHints {
                                     Text(shortcuts.bindings.chord(
                                             for: ShortcutAction(kind: .lens, index: pair.offset)).display)
-                                        .font(.system(size: 9, weight: .medium))
-                                        // White-on-fill so the key hint stays legible on the BLUE
-                                        // selected tile (textFaint vanished there); brighter when active.
-                                        .foregroundColor(.white.opacity(isSel ? 0.85 : 0.45))
+                                        .font(.system(size: 10, weight: .medium))
+                                        .opacity(0.6)          // the chip's own colour, quieter
                                 }
                             }
-                            .frame(height: 22)
-                            .padding(.horizontal, Spacing.sm)
+                            // One width for every lens, sized to fit "0.5×" - the widest - with
+                            // room to spare, so the row is a set of equal tiles (operator, 2026-10-25).
+                            .frame(width: Self.lensTileWidth, height: ControlMetrics.tileHeight)
+                            .cameraChip(active: isSel, corner: Radius.button)
+                            .contentShape(Rectangle())
                         }
-                        .bridgeButton(selected: isSel)
+                        .buttonStyle(.plain)
                         .disabled(!channel.remoteControlConnected || !channel.remoteControlAllowed)
                     }
                 }
@@ -117,6 +124,7 @@ struct MultiviewGrid: View {
             } else {
                 Text("Stage a camera to pick its lens")
                     .font(.system(size: 11)).foregroundColor(Theme.textFaint)
+                    .frame(height: ControlMetrics.tileHeight)
             }
         }
     }
@@ -129,22 +137,23 @@ struct MultiviewGrid: View {
         // like an empty input on a real switcher.  Only disabled when nothing is staged at all.
         let canCut = model.previewID != nil
         return Button { model.take() } label: {
-            HStack(spacing: 4) {
+            VStack(spacing: 1) {
                 Text("CUT")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: 12, weight: .medium))
                 if shortcuts.showHints {
                     Text(shortcuts.bindings.chord(for: ShortcutAction(kind: .cut, index: 0)).display)
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundColor(Theme.textFaint.opacity(0.7))
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(Theme.textFaint)
                 }
             }
-            .frame(height: 22)
-            .padding(.horizontal, Spacing.sm)
+            .frame(width: 72, height: ControlMetrics.tileHeight)   // fits "Space" under "CUT"
+            .cameraChip(active: false, corner: Radius.button)   // the same chip as the lenses
+            .contentShape(Rectangle())
         }
-        .bridgeButton()
+        .buttonStyle(.plain)
         .disabled(!canCut)
         .opacity(canCut ? 1 : 0.5)
-        .help(canCut ? "Cut the Preview channel to Program (Space) — no signal airs black"
+        .help(canCut ? "Cut the Preview channel to Program (Space). No signal airs black."
                      : "Stage a channel in Preview first")
     }
 
@@ -158,28 +167,28 @@ struct MultiviewGrid: View {
             model.wallFullscreenRequested = true
             openWindow(id: MultiviewWall.windowID)
         } label: {
-            HStack(spacing: Spacing.xs) {
-                Image(systemName: "arrow.up.left.and.arrow.down.right")
-                Text("Full-Screen").font(.system(size: 11, weight: .medium))
-            }
-            .frame(height: 22)
-            .padding(.horizontal, Spacing.sm)
+            secondaryIcon("arrow.up.left.and.arrow.down.right")
         }
-        .bridgeButton()
+        .buttonStyle(.plain)
         .help("Full-screen the multiview (clean wall)")
+    }
+
+    /// Full-Screen and Detach as square icon tiles: they are the bar's secondary actions and were
+    /// its widest buttons (operator, 2026-10-25). Their names live in the hover help.
+    private func secondaryIcon(_ system: String) -> some View {
+        Image(systemName: system)
+            .font(.system(size: 14))
+            .frame(width: ControlMetrics.tileHeight, height: ControlMetrics.tileHeight)
+            .cameraChip(active: false, corner: Radius.button)
+            .contentShape(Rectangle())
     }
 
     /// Detach: pop the multiview into its own window (drag to a second screen).
     private var detachButton: some View {
         Button { openWindow(id: MultiviewWall.windowID) } label: {
-            HStack(spacing: Spacing.xs) {
-                Image(systemName: "rectangle.on.rectangle")
-                Text("Detach").font(.system(size: 11, weight: .medium))
-            }
-            .frame(height: 22)
-            .padding(.horizontal, Spacing.sm)
+            secondaryIcon("rectangle.on.rectangle")
         }
-        .bridgeButton()
+        .buttonStyle(.plain)
         .help("Open the multiview in its own window")
     }
 
@@ -241,10 +250,7 @@ struct MultiviewGrid: View {
             .fill(Color.black)
             .aspectRatio(16.0 / 9.0, contentMode: .fit)
             .multiviewTile(accent: nil)
-            .overlay(
-                Image(systemName: "plus").font(.system(size: 13))
-                    .foregroundColor(Theme.textFaint.opacity(0.3))
-            )
+        // Plain and empty: a "+" here looked like a button and did nothing (operator, 2026-10-30).
     }
 }
 
@@ -302,19 +308,15 @@ private struct BigPane: View {
     }
 
     private var placeholder: some View {
-        VStack(spacing: Spacing.xs) {
-            Image(systemName: "rectangle.dashed")
-                .font(.system(size: 22)).foregroundColor(Theme.textFaint)
-            Text("No source").font(.system(size: 11)).foregroundColor(Theme.textFaint)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        Text("No source").font(.system(size: 11)).foregroundColor(Theme.textFaint)   // words only (operator, 2026-10-30)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
 /// A small dark semi-transparent label chip pinned to the bottom of a tile.
 private func bottomChip(_ text: String, color: Color = .white) -> some View {
     Text(text)
-        .font(.system(size: 10, weight: .bold))
+        .font(.system(size: 10, weight: .regular))   // one weight for every label in the grid (operator, 2026-10-30)
         .tracking(0.5)
         .foregroundColor(color)
         .padding(.horizontal, Spacing.sm)
@@ -356,10 +358,9 @@ private struct LivePane: View {
             }
             .overlay(alignment: .bottom) {
             if showName {
-                HStack(spacing: Spacing.xs) {
-                    ConnectionDot(connected: channel.anyConnected)   // combined: control link counts too
-                    Text(channel.name).font(.system(size: 10, weight: .semibold)).foregroundColor(.white)
-                }
+                // The name alone, regular weight like PREVIEW / PROGRAM: the tile itself already
+                // says whether the camera is there ("No camera"), so the dot repeated it.
+                Text(channel.name).font(.system(size: 10, weight: .regular)).foregroundColor(.white)
                 .padding(.horizontal, Spacing.sm)
                 .padding(.vertical, 2)
                 .background(RoundedRectangle(cornerRadius: Radius.control, style: .continuous).fill(Color.black.opacity(0.5)))

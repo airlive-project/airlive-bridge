@@ -300,9 +300,9 @@ final class BridgeChannel: ObservableObject, Identifiable {
     var anyConnected: Bool { isConnected || controlConnected }
 
     /// Only an ARLV (Airlive Camera) channel emits raw H.264 access units that the PASSTHROUGH
-    /// outputs (OBS relay / RTSP / SRT) re-publish without transcoding.  AirPlay, combined
+    /// outputs (RTSP / SRT) re-publish without transcoding.  AirPlay, combined
     /// (its video is AirPlay), and capture (BGRA) produce only DECODED frames — they can feed
-    /// NDI but NOT the passthrough relays.  The model warns the operator when the program lacks
+    /// NDI but NOT the passthrough outputs.  The model warns the operator when the program lacks
     /// this so those outputs don't go silently black.
     var producesRawH264: Bool { kind == .airlive }
 
@@ -312,17 +312,16 @@ final class BridgeChannel: ObservableObject, Identifiable {
     ///
     /// `onProgramFrame` — the DECODED frame, for buffer outputs (NDI).
     /// `onProgramSample` / `onProgramFormat` — the RAW H.264 ARLV payloads, for
-    /// the passthrough relay to OBS (forward the camera's existing encode, no
-    /// transcode).  `onProgramFormat` carries the length-prefixed SPS/PPS the
+    /// the passthrough outputs (forward the camera's existing encode, no transcode).  `onProgramFormat` carries the length-prefixed SPS/PPS the
     /// camera sends once per connection and again with each keyframe a receiver asks for.
     // ALL THREE taps are written on MAIN (BridgeModel, on a program switch) and read on the
     // receiver's network queue, once per encoded frame.  They are lock-guarded so the receiver can
     // call them DIRECTLY from that queue.  Previously the receiver hopped every packet through
-    // `DispatchQueue.main.async` just to read these safely — which put the outgoing video for OBS /
+    // `DispatchQueue.main.async` just to read these safely — which put the outgoing video for
     // RTSP / SRT in the same queue as SwiftUI's rendering of the multiview, previews and controls.
     // The operator saw exactly that: a picture that was perfectly smooth INSIDE the Bridge (its
-    // preview is paced off-main from the decoded ring) but juddered once relayed to OBS, because the
-    // relay inherited the UI thread's scheduling.  The taps only hand a payload to an output that
+    // preview is paced off-main from the decoded ring) but juddered once sent out, because the
+    // outgoing path inherited the UI thread's scheduling.  The taps only hand a payload to an output that
     // immediately re-dispatches to its own queue, so nothing here needs the main thread at all.
     //
     // `onProgramFrame` was left on main in that first pass, because NDI / HDMI / the virtual

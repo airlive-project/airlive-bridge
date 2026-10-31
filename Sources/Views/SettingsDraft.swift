@@ -9,9 +9,9 @@
 // like the rail's row), Shortcuts (a key is recorded when it is pressed) and the
 // Stream Deck switch.
 //
-// The frame guide is held like everything else but SHOWN at once: while a guide change is pending,
-// the Preview / Program panes draw it (FrameGuidePreview), so the operator sees what they pick;
-// Cancel or closing takes it back off the panes.
+// The frame guide is held like everything else. A pending guide is shown only on the sample in
+// Settings, never on the Preview / Program panes: a guide appearing over the live picture before
+// Apply looked like it was going to air (operator, 2026-10-31).
 
 import SwiftUI
 
@@ -22,12 +22,8 @@ final class SettingsDraft: ObservableObject {
     @Published var recordFolder: URL?
     @Published var vcamResolution: VirtualCameraResolution?
     @Published var previewClickCuts: Bool?
-    @Published var frameGuide: FrameGuide? {
-        didSet { FrameGuidePreview.shared.guide = frameGuide }
-    }
-    @Published var frameGuideStyle: FrameGuideStyle? {
-        didSet { FrameGuidePreview.shared.style = frameGuideStyle }
-    }
+    @Published var frameGuide: FrameGuide?
+    @Published var frameGuideStyle: FrameGuideStyle?
 
     struct AutoCutRange: Equatable {
         var lo: Int
@@ -74,7 +70,6 @@ final class SettingsDraft: ObservableObject {
             }
         }
         if let previewClickCuts { defaults.set(previewClickCuts, forKey: Self.previewClickCutsKey) }
-        // Stored before `discard` clears the preview, so the panes never flash the old guide.
         if let frameGuide { defaults.set(frameGuide.rawValue, forKey: FrameGuide.storageKey) }
         if let frameGuideStyle { defaults.set(frameGuideStyle.rawValue, forKey: FrameGuideStyle.storageKey) }
         discard()

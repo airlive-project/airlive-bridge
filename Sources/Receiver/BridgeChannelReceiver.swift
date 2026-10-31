@@ -485,7 +485,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
         }
         l.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
-            LocalNetworkAccess.shared.note(state)   // a refusal is said in the title bar
+            LocalNetworkAccess.shared.note(state)   // a refusal is said in the Mac connection row
             switch state {
             case .ready:
                 let port = self.listener?.port?.rawValue ?? 0
@@ -902,7 +902,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
         guard isProgramSource else { return }   // H1: no main hop for a non-program channel
         forwardDelayed { [weak self] in self?.channel?.onProgramSample?(payload, timestampMicros) }
     }
-    /// Hand a passthrough payload (raw SPS/PPS or H.264) to the relay taps (OBS / RTSP / SRT)
+    /// Hand a passthrough payload (raw SPS/PPS or H.264) to the relay taps (RTSP / SRT)
     /// ON THIS QUEUE — never main — DELAYED by the SAME `bufferSeconds` the decoded jitter ring
     /// uses — so the passthrough outputs stay aligned with the preview + NDI/HDMI the
     /// operator sees (the whole point of the per-channel delay, which previously only

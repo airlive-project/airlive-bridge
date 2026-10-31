@@ -22,7 +22,6 @@ import CoreVideo
 /// kind without a hand-maintained array that could drift from this enum.
 enum OutputKind: String, CaseIterable, Identifiable {
     case ndi
-    case obs    // OBS via our ARLV protocol (passthrough relay of the program H.264)
     case hdmi   // fullscreen program on an external display (HDMI / any second screen)
     case srt
     case rtsp
@@ -35,7 +34,6 @@ enum OutputKind: String, CaseIterable, Identifiable {
     var displayName: String {
         switch self {
         case .ndi:  return "NDI"
-        case .obs:  return "OBS Airlive Bridge"
         case .hdmi: return "HDMI Out"
         case .srt:  return "SRT"
         case .rtsp: return "RTSP"
@@ -44,7 +42,7 @@ enum OutputKind: String, CaseIterable, Identifiable {
     }
 
     /// Short tag for the compact output-card badge.  `displayName` can be long
-    /// ("OBS Airlive Bridge") and overflows the fixed badge slot — the long name
+    /// ("Virtual Camera") and overflows the fixed badge slot — the long name
     /// lives in the card's name field; the badge stays a tight code.
     var badgeLabel: String {
         switch self {
@@ -52,9 +50,14 @@ enum OutputKind: String, CaseIterable, Identifiable {
         // "VCAM" is a made-up abbreviation nobody has seen before; the kind has a short
         // real name, so it is used as-is.
         case .vcam: return "Virtual Camera"
-        default:    return rawValue.uppercased()   // ndi → "NDI", obs → "OBS", …
+        default:    return rawValue.uppercased()   // ndi → "NDI", srt → "SRT", …
         }
     }
+
+    /// The tag in the collapsed Outputs strip, which is 48 pt wide: "Virtual Camera" wrapped and
+    /// squeezed there (operator, 2026-10-25), so it is "VC" in the strip only - the card keeps the
+    /// full name.
+    var stripLabel: String { self == .vcam ? "VC" : badgeLabel }
 
     /// SF Symbol for the kind badge / add menu.  All chosen names exist on
     /// macOS 13 (no SF5 / macOS-14-only glyphs, no gen-numbered variants) so they
@@ -62,7 +65,6 @@ enum OutputKind: String, CaseIterable, Identifiable {
     var symbolName: String {
         switch self {
         case .ndi:  return "antenna.radiowaves.left.and.right"
-        case .obs:  return "tv"
         case .hdmi: return "display"
         case .srt:  return "dot.radiowaves.right"
         case .rtsp: return "network"
@@ -76,24 +78,13 @@ enum OutputKind: String, CaseIterable, Identifiable {
     /// kinds are real.
     var isImplemented: Bool { true }   // every kind ships now — Virtual Camera was the last placeholder
 
-    /// Kinds there can only ever be ONE of, so the "+" menu stops offering a second.
+    /// Kinds there can only ever be ONE of, so the "Add output" menu stops offering a second.
     ///
-    /// OBS: one local plugin to feed (a single loopback slot).
     /// Virtual Camera: macOS publishes exactly ONE camera device, and the extension keeps one
     /// set of books for it — two cards would fight over the same sink, the second one's frames
     /// would be silently dropped, and switching either card off would kill the other's picture
     /// while its own card still read "on".
-    var isSingleton: Bool { self == .obs || self == .vcam }
-
-    /// On its way out, and said so wherever it can be chosen or seen.
-    ///
-    /// The OBS plugin relay carries a compressed stream, which belongs to the camera that
-    /// produced it - so switching cameras made the receiver resynchronise and the picture held
-    /// for a moment. The virtual camera carries frames and cuts instantly, needs no plugin, and
-    /// cannot take OBS down with it (it runs in its own process). Both paths are kept for now so
-    /// the camera can prove itself in the field; this flag is what tells the operator which one
-    /// has a future.
-    var isRetiring: Bool { self == .obs }
+    var isSingleton: Bool { self == .vcam }
 }
 
 /// One downstream re-publishing sink.  Reference type (`AnyObject`) because an
@@ -128,18 +119,18 @@ protocol VideoOutput: AnyObject {
     /// nanoseconds.  No-op when not live.
     func send(_ pixelBuffer: CVPixelBuffer, timeNs: UInt64)
 
-    /// Raw-H.264 passthrough hooks — used ONLY by the OBS relay (it forwards the
-    /// program camera's existing encode, no transcode).  Buffer outputs (NDI)
+    /// Raw-H.264 passthrough hooks — used by RTSP and SRT (they forward the program
+    /// camera's existing encode, no transcode).  Buffer outputs (NDI, HDMI, virtual camera)
     /// ignore them via the default no-op below.  `relayFormat` carries the
     /// length-prefixed SPS/PPS the camera sends once per connection and again with each keyframe
     /// a receiver asks for.
     func relayFormat(_ payload: Data)
     func relaySample(_ payload: Data, timestampMicros: Int64)
 
-    /// Passthrough-CUT gating — implemented by EVERY raw-H.264 relay (OBS / RTSP / SRT), no-op for
-    /// buffer outputs (NDI).  `awaitFormat` drops forwarded samples until the new source's SPS/PPS
+    /// Passthrough-CUT gating — implemented by every raw-H.264 output (RTSP / SRT), no-op for
+    /// buffer outputs (NDI, HDMI, virtual camera).  `awaitFormat` drops forwarded samples until the new source's SPS/PPS
     /// arrives after a program CUT, so the new camera's H.264 is never decoded against the previous
-    /// camera's parameter sets (#20 — was relay-only, now covers RTSP/SRT too).  `clearLastFormat`
+    /// camera's parameter sets (#20).  `clearLastFormat`
     /// forgets the cached format when the program moves to a source with no raw H.264.
     func awaitFormat()
     func clearLastFormat()

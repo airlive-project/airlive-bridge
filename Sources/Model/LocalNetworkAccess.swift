@@ -7,7 +7,8 @@
 //
 // Apple's documented signal for a refusal is the DNS-SD error kDNSServiceErr_PolicyDenied on the
 // Bonjour side of a listener or browser (TN3179, "Understanding local network privacy"). Every
-// channel's listener reports here; the title bar shows it in red, with a click to the setting.
+// channel's listener reports here; the Mac connection row at the foot of the Channels rail shows it in
+// red, with a button to the setting.
 
 import Foundation
 import Network

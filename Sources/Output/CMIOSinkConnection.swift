@@ -61,14 +61,14 @@ final class CMIOSinkConnection {
     /// act on (approve the extension, update the app).
     func open(deviceUUID: String) -> String? {
         guard let dev = findDevice(uuid: deviceUUID) else {
-            return "Virtual camera not found — approve “\(kVCamDeviceName)” in System Settings → General → Login Items & Extensions."
+            return "Virtual camera not found. Approve “\(kVCamDeviceName)” in System Settings → General → Login Items & Extensions."
         }
         deviceID = dev
         sinkLog.notice("found virtual camera device \(dev)")
         guard let sink = findSinkStream(device: dev) else {
             // The device exists but exposes no inbound stream: an older extension build is
             // still the one macOS has staged.
-            return "The installed virtual camera is an older version — quit every app using it, then relaunch Airlive Bridge."
+            return "The installed virtual camera is an older version - quit every app using it, then relaunch Airlive Bridge."
         }
         streamID = sink
 
@@ -114,7 +114,7 @@ final class CMIOSinkConnection {
             // and holds the placeholder back, so the camera freezes on its last picture with
             // nothing said anywhere.
             sinkLog.error("CMIODeviceStopStream failed (\(st)) — the extension still thinks we are pushing")
-            return "Couldn't stop sending to the virtual camera — quit apps using it, then try again."
+            return "Couldn't stop sending to the virtual camera - quit apps using it, then try again."
         }
         sinkLog.notice("sink closed cleanly after \(total) frames")
         return nil

@@ -1,7 +1,7 @@
 // RTSPOutput.swift — PROGRAM → RTSP server, passthrough (no transcode).
 //
 // A minimal RTSP/1.0 server that re-publishes the program camera's ORIGINAL H.264
-// over RTP (RFC 6184).  Like the OBS relay it consumes the raw H.264 taps
+// over RTP (RFC 6184).  Like SRT it consumes the raw H.264 taps
 // (`relayFormat` = SPS/PPS, `relaySample` = AVCC access units) — zero decode, zero
 // encode — and packetizes the NAL units into RTP.  Clients (VLC, ffmpeg, vMix,
 // Resolume…) connect to `rtsp://<mac-ip>:<port>/program`.
@@ -66,7 +66,7 @@ final class RTSPOutput: VideoOutput {
     private var pps: [UInt8]?
     private var seq: UInt16 = 0
     private let ssrc: UInt32 = 0x4152_4C56   // "ARLV"
-    /// Passthrough-CUT gating (mirrors AirliveRelayOutput): drop forwarded samples until the new
+    /// Passthrough-CUT gating (as in SRTOutput): drop forwarded samples until the new
     /// source's SPS/PPS arrives after a program CUT, so RTP/RTSP clients don't packetize the new
     /// camera's NALs against the previous camera's sprop-parameter-sets (#20). awaitToken
     /// invalidates a stale safety-timeout when a newer await/format lands.
@@ -177,7 +177,7 @@ final class RTSPOutput: VideoOutput {
             l = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!)
         } catch {
             print("[RTSP \(label)] ❌ listen on \(port) failed: \(error)")
-            reportError("Port \(port) is busy — quit the app holding it, then toggle again")
+            reportError("Port \(port) is busy - quit the app holding it, then toggle again")
             isLive = false
             return
         }

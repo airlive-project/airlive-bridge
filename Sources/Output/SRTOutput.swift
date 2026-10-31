@@ -152,7 +152,7 @@ final class SRTOutput: VideoOutput {
     /// Last destination we logged as invalid — the toggle/retry path re-hits connect(), and
     /// re-printing the same complaint every attempt flooded the console (seen live).
     private var lastInvalidDestLogged: String?
-    /// Passthrough-CUT gating (mirrors AirliveRelayOutput): drop forwarded samples until the new
+    /// Passthrough-CUT gating (as in RTSPOutput): drop forwarded samples until the new
     /// source's SPS/PPS arrives after a program CUT, so SRT/TS receivers don't decode the new
     /// camera's deltas against the previous camera's muxer parameter sets (#20).
     private var awaitingFormat = false
@@ -162,7 +162,7 @@ final class SRTOutput: VideoOutput {
 
     func start() {
         guard !isLive else { return }
-        isLive = true                 // optimistic (matches NDI/relay); cleared if connect fails
+        isLive = true                 // optimistic (matches NDI); cleared if connect fails
         let dest = config
         queue.async { [weak self] in self?.connect(to: dest) }
     }
@@ -281,7 +281,7 @@ final class SRTOutput: VideoOutput {
 
     private func connect(to dest: String) {
         guard SRTRuntime.shared.loadIfNeeded() else {   // RETRIES the dlopen — picks up libsrt installed since launch
-            reportError("SRT runtime isn't available — install it with `brew install srt`")
+            reportError("SRT runtime isn't available - install it with `brew install srt`")
             isLive = false; return
         }
         guard let (host, port) = Self.parse(dest) else {
@@ -289,7 +289,7 @@ final class SRTOutput: VideoOutput {
                 lastInvalidDestLogged = dest
                 print("[SRTOutput \(label)] ❌ invalid destination '\(dest)' — expected srt://host:port")
             }
-            reportError("Invalid destination — expected srt://host:port")
+            reportError("Invalid destination - expected srt://host:port")
             isLive = false; return
         }
         lastInvalidDestLogged = nil

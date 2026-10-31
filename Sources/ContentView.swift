@@ -19,14 +19,15 @@ struct ContentView: View {
     /// the column they want for more multiview room.
     @State private var leftCollapsed = false
     @State private var rightCollapsed = false
-    /// This Mac's network link, shown at the right of the title bar.
+    /// This Mac's network link, shown as the Network row at the foot of the Channels rail. Owned
+    /// here, not by the row, so collapsing the rail does not restart the monitor.
     @StateObject private var network = NetworkStatus()
 
     var body: some View {
         HStack(spacing: 0) {
             // No explicit dividers between zones — the rails carry faint edge
             // hairlines (see ChannelsRail / OutputsRail).
-            ChannelsRail(model: model, collapsed: leftCollapsed,
+            ChannelsRail(model: model, network: network, collapsed: leftCollapsed,
                          onToggleCollapse: { withAnimation(.easeInOut(duration: 0.2)) { leftCollapsed.toggle() } })
             CenterPane(model: model)
             OutputsRail(model: model, collapsed: rightCollapsed,
@@ -41,7 +42,6 @@ struct ContentView: View {
         // Our own dropdown lists render here (window root) so they sit above everything and use OUR
         // corner radius / shadow — not the system `.popover` chrome.  One host for the whole app.
         .overlay(DropdownOverlay())
-        .background(TitlebarNetworkStatus(status: network))
         .preferredColorScheme(.dark)
         // No toolbar items: the Solo ⇄ Multiview switch was REMOVED for launch
         // (2026-07-03) — Multiview is the only mode; Solo needs a real per-channel

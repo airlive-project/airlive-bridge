@@ -113,6 +113,9 @@ enum ControlMetrics {
     static let chipWidth: CGFloat     = 44
     static let segmentHeight: CGFloat = 30
     static let tileHeight: CGFloat    = 40
+    /// One tile size for both collapsed rails' strips (channel numbers, output tags, the "+"),
+    /// so the two strips read as one set (operator, 2026-10-25).
+    static let stripTileWidth: CGFloat = 48
     static let sliderKnob: CGFloat    = 14
     static let sliderTrack: CGFloat   = 4
 }

@@ -66,7 +66,7 @@ final class AirPlayReceiver: ChannelReceiver {
                 // Program tap right here: the tap is lock-guarded and the outputs come from the
                 // lock-guarded ProgramBus, so it never needs main.  Routing it through main put
                 // NDI / HDMI / the virtual camera behind SwiftUI's rendering — the same defect
-                // that made the OBS relay judder.
+                // that once made the passthrough outputs judder.
                 if isPgm { channel.onProgramFrame?(pixelBuffer, ptsNs) }
                 // The published connect / no-signal gate IS main-isolated — and flips once.
                 // Channel captured WEAKLY so a late hop can't resurrect a stopped channel.

@@ -465,7 +465,7 @@ final class NDIOutput: VideoOutput {
         let rt = NDIRuntime.shared
         guard rt.loadIfNeeded() else {   // RETRIES the dlopen — picks up a runtime installed since launch
             print("[NDIOutput] start('\(label)') skipped — NDI runtime not installed.")
-            reportError("NDI runtime isn\u{2019}t installed — get it from ndi.video")
+            reportError("NDI runtime isn\u{2019}t installed - get it from ndi.video")
             _isLive = false
             return
         }
