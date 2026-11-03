@@ -106,7 +106,9 @@ final class BridgeModel: ObservableObject {
     /// Send one camera its cue and log what became of it. A cue is never queued for later: with no
     /// connection it is dropped, and the reconnect sends the current one (`handleConnectivityChange`),
     /// so a phone that was away never receives a backlog of stale cues.
-    private func sendCue(_ state: TallyState, to ch: BridgeChannel) {
+    /// `logged: false` for the answer to a camera state: it repeats the current cue about once a
+    /// second while a camera is being worked, and the camera drops an unchanged cue anyway.
+    private func sendCue(_ state: TallyState, to ch: BridgeChannel, logged: Bool = true) {
         // Only an Airlive Camera has a tally light; AirPlay and capture sources have no way back.
         guard ch.kind == .airlive || ch.kind == .screenMirroringPlusControl else { return }
         let outcome: String
@@ -120,6 +122,7 @@ final class BridgeModel: ObservableObject {
             ch.send(.setCue(state.rawValue))
             outcome = "sent"
         }
+        guard logged else { return }
         tallyLog.notice("[Tally] \(ch.name, privacy: .public) → \(state.rawValue, privacy: .public) (\(outcome, privacy: .public))")
     }
 
@@ -139,12 +142,12 @@ final class BridgeModel: ObservableObject {
         sendCue(state, to: channel)
     }
 
-    /// The camera came back on the same connection after going silent. It darkened its lamp when
-    /// it lost its route and waits for a cue (camera 52d2c7b), so it gets exactly one: the current
-    /// one. Nothing is replayed - cues sent into the silence, if any, already arrived in order.
-    private func resendTallyAfterSilence(_ channel: BridgeChannel) {
+    /// The camera sent its state. After a route drop that state is how it says it is back with a
+    /// dark lamp (camera `handleLinkViability`), so it gets the current cue. Nothing is replayed -
+    /// cues sent into the silence, if any, already arrived in order.
+    private func answerStateWithTally(_ channel: BridgeChannel) {
         guard mode == .multiview else { return }
-        sendCue(busTally(of: channel), to: channel)
+        sendCue(busTally(of: channel), to: channel, logged: false)
     }
 
     /// The camera switched its own tally back on: send it the current cue now, not at the next cut.
@@ -253,6 +256,8 @@ final class BridgeModel: ObservableObject {
     }
 
     private var blackTimer: DispatchSourceTimer?
+    /// The no-signal black runs at the program's 30 (CLAUDE.md: the live wire is always 30).
+    private static let blackFrameRate = 30
     private lazy var programEncoder: ProgramEncoder = {
         let enc = ProgramEncoder()
         // Guarded by the CURRENT mode ON MAIN: a VT callback already in flight when the operator
@@ -293,8 +298,12 @@ final class BridgeModel: ObservableObject {
             programEncoder.start()
             if blackTimer == nil {
                 pushBlackFrame()                        // immediate — don't wait a frame interval
-                let t = DispatchSource.makeTimerSource(queue: .main)
-                t.schedule(deadline: .now() + .milliseconds(33), repeating: .milliseconds(33))
+                // Exactly 30 per second, strict. It was 33 ms (30.30 fps) with the default slack:
+                // the virtual camera's 30.000 Hz tick then had one black frame too many every
+                // ~3 s and dropped it (counted as "skipped" while no signal, 2026-11-02).
+                let t = DispatchSource.makeTimerSource(flags: .strict, queue: .main)
+                let interval = DispatchTimeInterval.nanoseconds(1_000_000_000 / Self.blackFrameRate)
+                t.schedule(deadline: .now() + interval, repeating: interval, leeway: .nanoseconds(0))
                 t.setEventHandler { [weak self] in self?.pushBlackFrame() }
                 t.resume()
                 blackTimer = t
@@ -369,9 +378,9 @@ final class BridgeModel: ObservableObject {
             // camera's format, ask it for a keyframe - exactly as on a cut.
             self.routeProgram()
         }
-        channel.onLinkResumed = { [weak self, weak channel] in
+        channel.onStateReceived = { [weak self, weak channel] in
             guard let self, let channel else { return }
-            self.resendTallyAfterSilence(channel)
+            self.answerStateWithTally(channel)
         }
         // Keyed by channel id (NOT stored in the grow-forever set): the entry dies
         // with the channel in removeChannel / the profile teardown, so a long session

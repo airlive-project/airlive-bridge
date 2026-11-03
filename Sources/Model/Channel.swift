@@ -69,9 +69,11 @@ final class BridgeChannel: ObservableObject, Identifiable {
     /// Fired on main when `linkSilent` flips. Set by `BridgeModel` at channel creation.
     var onSignalLostChanged: (() -> Void)?
 
-    /// Fired on main when a silent camera speaks again on the same connection. Its lamp went dark
-    /// while it was cut off, so the model sends it the current tally. Set by `BridgeModel`.
-    var onLinkResumed: (() -> Void)?
+    /// Fired on main for each state snapshot the camera sends (coalesced to ~1 Hz). A camera whose
+    /// route dropped darkens its lamp and sends its state when the route returns (camera
+    /// `handleLinkViability`), so the model answers every state with the current tally; the camera
+    /// ignores an unchanged cue. Set by `BridgeModel`.
+    var onStateReceived: (() -> Void)?
 
     /// Fired on main when the camera's own Tally switch flips (`tallyAllowed`). Tally is sent only
     /// when a bus changes, so a camera that turns tally back ON would otherwise stay dark until the

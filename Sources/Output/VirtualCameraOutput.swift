@@ -239,7 +239,7 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     //
     // The same tick holds the shot through a short gap: the extension puts up its "No Video"
     // picture a quarter-second after frames stop (AirliveDeviceSource.realFrameGrace), and the
-    // Bridge only turns a silent camera into black after one second
+    // Bridge only turns a silent camera into black after one and a half seconds
     // (BridgeChannelReceiver.silenceThreshold) - in between, the last frame is simply repeated.
 
     /// Frames waiting for their tick (camera-ready or not yet converted), oldest first, and the
@@ -255,9 +255,12 @@ final class VirtualCameraOutput: NSObject, VideoOutput {
     /// arrives early is gone from the surplus at the next tick; the phone gaining on the Mac
     /// keeps it there.
     private static let surplusPersistence = 15
-    /// Past the Bridge's own switch to black (1.0-1.25 s) the program is flowing again as black;
-    /// if nothing comes even then, the placeholder is the truth and is let through.
-    private static let holdLimit: CFTimeInterval = 1.5
+    /// Past the Bridge's own switch to black the program is flowing again as black; if nothing
+    /// comes even then, the placeholder is the truth and is let through. Derived from the
+    /// threshold, not a copy of it: when that went 1.0 -> 1.5 s a fixed 1.5 here ran out BEFORE
+    /// the black arrived and "No Video" could flash (camera-chat review, 2026-11-03). The
+    /// half-second covers the 250 ms silence check, the hop to main and the black's first tick.
+    private static let holdLimit: CFTimeInterval = BridgeChannelReceiver.silenceThreshold + 0.5
     /// The camera's declared rate (VirtualCameraContract), as an exact integer tick count.
     private static let ticksPerSecond = Int64(kVCamFrameRate)
     private static let nsPerSecond: Int64 = 1_000_000_000

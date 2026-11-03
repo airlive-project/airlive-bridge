@@ -99,14 +99,21 @@ final class BridgeChannelReceiver: ChannelReceiver {
     /// 2026-10-16). A camera that loses its route sends nothing until it is back (camera 52d2c7b:
     /// encoder paused, state blocked); a Wi-Fi stall that keeps the route, or a camera pausing its
     /// encoder (a 4K record bump, a lens change), can be quiet that long too. Either way no
-    /// picture is arriving, which is exactly what "No signal" says.
-    static let silenceThreshold: CFTimeInterval = 1.0
-    /// How often the silence is checked while a camera is connected: a quarter of the threshold,
-    /// so a lost signal shows within 1.0-1.25 s. Runs only while a connection is authorised.
+    /// picture is arriving, which is exactly what "No signal" says. 1.5 s, not 1.0 (operator +
+    /// camera chat, 2026-11-03): a 5x lens switch keeps the camera quiet for up to ~1.0 s between
+    /// packets and cannot be made faster, so 1.0 flashed "No signal" on a healthy switch.
+    static let silenceThreshold: CFTimeInterval = 1.5
+    /// One frame at the wire's 30 fps (CLAUDE.md: the live wire is always 30).
+    private static let resumeSlack: Double = 1.0 / 30.0
+    /// After a silence, how far the fastest arrival of one second may differ from the second
+    /// before for the path to count as settled (two frames: Wi-Fi's clumps move single arrivals
+    /// by ~100 ms, never the fastest one). A drain makes it fall by seconds, TCP restarting
+    /// after the outage makes it rise; only a settled path that is still late is a slower path.
+    private static let resumeSettleTolerance: Double = 2.0 / 30.0
+    private static let resumeBucketSeconds: Double = 1.0
+    /// How often the silence is checked while a camera is connected, so a lost signal shows
+    /// within 1.5-1.75 s. Runs only while a connection is authorised.
     private static let silenceCheckInterval: DispatchTimeInterval = .milliseconds(250)
-    /// A gap after which the current tally is re-sent even though "No signal" never showed
-    /// (operator, 2026-10-20). Ten frames at 30 fps: ordinary jitter stays under it.
-    private static let tallyGap: CFTimeInterval = 0.3
     /// When the committed connection last delivered bytes. On `queue`.
     private var lastInboundAt: CFTimeInterval = 0
     /// The link has been silent past the threshold and no byte has come since. On `queue`.
@@ -125,6 +132,31 @@ final class BridgeChannelReceiver: ChannelReceiver {
     /// When the camera spoke again after a silence - for the "picture back after N ms" log line,
     /// which shows how long the wait for its keyframe took. On `queue`.
     private var resumedAt: CFTimeInterval = 0
+    /// The camera's capture PTS of the last sample before a silence and of the first after it,
+    /// printed with the silence lines so the camera side can match them against what its socket
+    /// accepted (where a backlog sat: our queue or the kernel's). On `queue`.
+    private var lastSamplePTSMicros: Int64 = -1
+    private var logFirstSampleAfterSilence = false
+    /// While the picture waits: the least late arrival of the current second, of the second
+    /// before, and whether the last two completed seconds agreed (`resumeSettleTolerance`).
+    /// On `queue`.
+    private var resumeBucketStart: CFTimeInterval = 0
+    private var resumeBucketFloor = Double.infinity
+    private var resumePreviousFloor = Double.infinity
+    private var resumePathSettled = false
+    /// When the picture started waiting (the FIRST silence of a run: a link that drops again
+    /// before the picture is back does not restart it), and the last keyframe this wait asked for.
+    /// On `queue`.
+    private var resumeWaitStartedAt: CFTimeInterval = 0
+    private var lastResumeKeyframeRequestAt: CFTimeInterval = 0
+    /// Keyframes asked for while the picture waits: at most one a second. A keyframe is the
+    /// heaviest frame, and this is exactly when the link is weak - asking ~3 a second (the
+    /// spacing the camera allows) loaded the shared Wi-Fi of every camera (reviews, 2026-11-03).
+    private static let resumeKeyframeInterval: CFTimeInterval = 1.0
+    /// After this long waiting, the next keyframe brings the picture back even if the path never
+    /// settled (a weak link may never), on a new timeline, logged. Safe since the camera keeps at
+    /// most ~1 s of backlog: no stale keyframe can still be draining this late.
+    private static let resumeGiveUpSeconds: CFTimeInterval = 4.0
 
     // ── Remote-snapshot coalescer (H2) ────────────────────────────────────
     /// Coalesce the camera's `state` snapshots to ~1 Hz before touching the main-isolated
@@ -148,10 +180,6 @@ final class BridgeChannelReceiver: ChannelReceiver {
     private let queue: DispatchQueue
 
     // ── Jitter buffer (operator-chosen playout delay) ─────────────────────
-    // Ported verbatim from CamSlotReceiver: lower-envelope minimum-delay skew
-    // tracking keeps the playout deadline pinned at `bufferSeconds` despite
-    // iPhone↔Mac crystal drift over a long show.  See CamSlotReceiver for the
-    // full prose; the math below is unchanged.
 
     /// EFFECTIVE playout depth (seconds) = `basePresetSeconds` + `extraDelaySeconds`.
     /// 0 (Lowest, no extra) = promote on decode; >0 = hold frames in `frameRing` until
@@ -163,25 +191,73 @@ final class BridgeChannelReceiver: ChannelReceiver {
     /// seconds (set by `updateExtraDelay`).  Added on top of the preset base.
     private var extraDelaySeconds: Double = 0
 
-    private var anchorMacTime: TimeInterval = 0
-    private var anchorIphonePTS: TimeInterval = 0
+    // ── Fixed playout delay (operator, 2026-11-02: a delay that can grow mid-show is why
+    // Screen Mirroring was not enough) ─────────────────────────────────────────────────────
+    // A frame plays at: its capture time on the phone + the fastest network path + `bufferSeconds`.
+    // The fastest path is MEASURED once, in the first `calibrationSeconds` after (re)anchoring, and
+    // then held: afterwards it may move only as fast as two crystals can drift apart
+    // (`maxDriftRate`, in either direction), never with the network. So a slower Wi-Fi spell makes
+    // frames late - they go out at once and the outputs repeat the last picture - but never
+    // stretches the delay, and a faster one only makes frames wait longer in the ring (more margin)
+    // instead of shrinking the delay with a jump (operator, 2026-11-03: the delay stays what it
+    // locked at for the whole show). Every 20 ms the schedule drifts from the lock is logged.
+    // Re-anchored only on a real break - a new stream, a delay-setting change, a picture that
+    // comes back after silence on a slower path, or a path proven faster than the margin the ring
+    // holds (`aheadReanchorThreshold`) - each one logged. A silence alone keeps the timeline: same
+    // connection, same clocks.
+    private var anchorMacTime: TimeInterval = 0       // arrival of the anchor frame
+    private var anchorIphonePTS: TimeInterval = 0     // its capture time on the phone
     private var anchorSet = false
-
+    /// Why the next anchor is taken: printed with it.
+    private var anchorReason = "new stream"
+    /// The fastest path, relative to the anchor frame's own trip (negative = faster than it).
     private var skewOffset: Double = 0
+    private var calibratingUntil: TimeInterval = 0
+    private var playoutLocked = false
+    private var lastSkewUpdate: TimeInterval = 0
+    /// The current spell of frames missing their slot (`noteTimeliness`): when it began (0 = none),
+    /// the last late frame, and the worst lateness. On `queue`.
+    private var lateSpellStart: TimeInterval = 0
+    private var lateSpellLastLate: TimeInterval = 0
+    private var lateSpellWorst: Double = 0
+    private var lateSpellFrames = 0
+    /// On-time frames for this long close a late spell: two of the once-a-second Wi-Fi pauses,
+    /// so one spell is one pair of lines, not a pair per pause.
+    private static let onTimeConfirmSeconds: TimeInterval = 2.0
+    /// `skewOffset` at the lock, and where it was at the last "schedule moved" line.
+    private var lockedSkew: Double = 0
+    private var lastLoggedSkew: Double = 0
+    /// The drift a "schedule moved" line is printed for: under one frame at 30 fps, and at most
+    /// one line per 100 s even at the full `maxDriftRate`.
+    private static let skewLogStep: Double = 0.020
     private var skewWindow: [(t: TimeInterval, delta: Double)] = []
-    private let skewWindowSeconds: Double = 3.0
-    private let skewSlewGain: Double = 0.01
-    private let skewJumpThreshold: Double = 2.0
+    /// Long enough to see the fastest path through the once-a-second Wi-Fi pauses.
+    private static let calibrationSeconds: Double = 2.0
+    /// The window the drift follower looks at once locked.
+    private static let driftWindowSeconds: Double = 10.0
+    /// 200 ppm = 0.2 ms per second: several times any real phone-vs-Mac crystal drift (tens of
+    /// ppm), far below any network change, so the delay cannot follow the network.
+    private static let maxDriftRate: Double = 200e-6
+    /// Once locked, a frame up to this much EARLIER than the schedule just waits longer in the
+    /// ring. More than this and the calibration missed the real path (or the phone's clock moved):
+    /// the frames would pile up past the ring, so the timeline is taken again, logged. Late frames
+    /// need nothing: they play at once.
+    private static let aheadReanchorThreshold: Double = 0.25
 
     /// PTS-ordered pending frames awaiting their playout deadline (ascending by
-    /// `playout`).  Guarded by `pixelBufferLock`; bounded by `maxRingFrames`.
+    /// `playout`).  Guarded by `pixelBufferLock`; bounded by `ringCapacity`.
     private var frameRing: [(buffer: CVPixelBuffer, playout: TimeInterval)] = []
+    /// See `ringCapacity(for:)`. Guarded by `pixelBufferLock`: the VT callback reads it.
+    private var ringCapacity = 2
     private let pixelBufferLock = NSLock()
 
     // ── Decode ────────────────────────────────────────────────────────────
     private var decompressionSession: VTDecompressionSession?
     private var decompressionFormat: CMVideoFormatDescription?
     private var lastDecodeErrorLog: TimeInterval = 0
+    /// Decode failures not printed since `lastDecodeErrorLog` (rate limit). On `queue`.
+    private var suppressedDecodeErrors = 0
+    private static let decodeErrorLogInterval: TimeInterval = 1.0
     private var didLogFirstFrame = false // one-shot preview diagnostic
     private var didLogFirstState = false // one-shot control-state diagnostic (lens list arrival)
 
@@ -244,6 +320,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
         self.basePresetSeconds = channel.delay.seconds
         self.extraDelaySeconds = Swift.max(0, Double(channel.extraDelayMs) / 1000.0)
         self.bufferSeconds = self.basePresetSeconds + self.extraDelaySeconds
+        self.ringCapacity = Self.ringCapacity(for: self.bufferSeconds)
         self.queue        = DispatchQueue(label: "studio.airlive.bridge.channel.\(channel.id.uuidString)",
                                           qos: .userInteractive)
     }
@@ -307,7 +384,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
             self.pixelBufferLock.lock()
             self.frameRing.removeAll(keepingCapacity: false)
             self.pixelBufferLock.unlock()
-            self.anchorSet = false
+            self.reanchor("new stream")
             self.formatDescription = nil
         }
     }
@@ -339,6 +416,15 @@ final class BridgeChannelReceiver: ChannelReceiver {
     private static let keyframeRequestSpacing: CFTimeInterval = 0.35
     private var lastKeyframeRequestAt: CFTimeInterval = 0   // on `queue`
     private var keyframeRequestPending = false               // on `queue`
+
+    /// While the picture waits after a silence: `requestKeyframe`, at most once per
+    /// `resumeKeyframeInterval`. On `queue`.
+    private func requestResumeKeyframe() {
+        let now = CACurrentMediaTime()
+        guard now - lastResumeKeyframeRequestAt >= Self.resumeKeyframeInterval else { return }
+        lastResumeKeyframeRequestAt = now
+        requestKeyframe()
+    }
 
     /// On `queue`.
     private func requestKeyframe() {
@@ -407,14 +493,32 @@ final class BridgeChannelReceiver: ChannelReceiver {
 
     /// On `queue`: set `bufferSeconds = base + extra`; if it really changed, re-anchor and
     /// drop frames queued under the old depth (cleaner than re-timing them).
+    ///
+    /// The decoder is drained FIRST: a frame still decoding carries its old-delay playout time
+    /// and would land at the front of the emptied ring, holding every new frame behind it - a
+    /// 5 s -> 0.5 s change froze the picture for 4.5 s (swift review, 2026-11-03). Waiting here
+    /// is safe: the decode callback never blocks on `queue` (it only takes `pixelBufferLock`).
     private func applyEffectiveBufferLocked() {
         let newValue = basePresetSeconds + extraDelaySeconds
-        guard abs(newValue - bufferSeconds) > 0.0005 else { return }
+        guard abs(newValue - bufferSeconds) > Self.delayChangeEpsilon else { return }
         bufferSeconds = newValue
-        anchorSet = false
+        reanchor("delay setting changed")
+        if let session = decompressionSession {
+            VTDecompressionSessionWaitForAsynchronousFrames(session)
+        }
         pixelBufferLock.lock()
         frameRing.removeAll(keepingCapacity: true)
+        ringCapacity = Self.ringCapacity(for: newValue)
         pixelBufferLock.unlock()
+    }
+
+    /// Half a millisecond: below the 1 ms step of the delay field, so only a real change counts.
+    private static let delayChangeEpsilon: Double = 0.0005
+
+    /// `bufferSeconds` plus the margin a faster-than-locked path may add (`aheadReanchorThreshold`),
+    /// at 60 fps (the most a camera sends), plus one decode in flight and one being promoted.
+    private static func ringCapacity(for bufferSeconds: Double) -> Int {
+        Int(((bufferSeconds + aheadReanchorThreshold) * 60.0).rounded(.up)) + 2
     }
 
     /// Apply the receiver-password auth config live.  Snapshots the toggle +
@@ -661,7 +765,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
         }
         connection = conn
         committedAtNs = DispatchTime.now().uptimeNanoseconds
-        anchorSet = false                         // fresh stream → re-anchor PTS
+        reanchor("new stream")
         resetAuthState()                          // clean slate for this connection
         let siblings = pendingConnections.filter { $0 !== conn }
         print("[BridgeReceiver \(src)] ✔︎ took \(conn.endpoint) (first ready)\(siblings.isEmpty ? "" : ", closing \(siblings.map { "\($0.endpoint)" }.joined(separator: ", "))")")
@@ -713,7 +817,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
         pixelBufferLock.lock()
         frameRing.removeAll(keepingCapacity: true)
         pixelBufferLock.unlock()
-        anchorSet = false
+        reanchor("new stream")
         formatDescription = nil
         didFlipSignalGate = false                 // re-flip the no-signal gate on reconnect (H1)
         pendingRemote = nil                        // drop any coalesced snapshot (H2) so a
@@ -778,9 +882,42 @@ final class BridgeChannelReceiver: ChannelReceiver {
             }
 
         case .sample:
+            if logFirstSampleAfterSilence {
+                logFirstSampleAfterSilence = false
+                let jumpMs = lastSamplePTSMicros < 0 ? 0 : (packet.timestampMicros - lastSamplePTSMicros) / 1_000
+                print("[BridgeReceiver \(src)] 📶 first frame after the silence: PTS \(Self.ptsText(packet.timestampMicros)) s (+\(jumpMs) ms after the last one before it)")
+            }
+            lastSamplePTSMicros = packet.timestampMicros
             if awaitingResumeKeyframe {
-                guard H264NAL.containsIDR(avcc: packet.payload) else { return }   // the pre-silence tail
-                awaitingResumeKeyframe = false   // its keyframe: live video again
+                // After a silence the network delivers what it held first: the pre-silence tail,
+                // then a drain of frames that queued up - keyframes included. None of it can play
+                // in its slot. The picture comes back at the first keyframe that CAN, on the SAME
+                // timeline (same connection, same clocks), so the delay is what it was and nothing
+                // is fast-forwarded (2026-11-02: re-anchoring on a keyframe still ~1 s late made the
+                // drain play at arrival speed and overflow the ring). A fixed wait for the drain
+                // failed too: a 10 s outage left ~8 s queued on the phone, still arriving after 3 s.
+                // The camera now caps that backlog at ~1 s, so `resumeGiveUpSeconds` is only the
+                // safety net for a link that never settles, not the rule.
+                let late = lateness(iphonePTS: Double(packet.timestampMicros) / 1_000_000,
+                                    at: CACurrentMediaTime())
+                noteResumeArrival(lateness: late)
+                guard H264NAL.containsIDR(avcc: packet.payload) else {
+                    // Frames flow but no keyframe: the request may have landed inside the camera's
+                    // spacing window and been ignored. Ask again, at most once a second.
+                    return requestResumeKeyframe()
+                }
+                if late > bufferSeconds + Self.resumeSlack {
+                    let waited = CACurrentMediaTime() - resumeWaitStartedAt
+                    if resumePathSettled {
+                        // The drain is over and frames still come this late: the path got slower.
+                        reanchor("picture back on a slower path, +\(Int(late * 1000)) ms")
+                    } else if waited >= Self.resumeGiveUpSeconds {
+                        reanchor("picture back after \(Int(waited * 1000)) ms waiting, path never settled, +\(Int(late * 1000)) ms")
+                    } else {
+                        return requestResumeKeyframe()   // the one asked for queued behind the drain
+                    }
+                }
+                awaitingResumeKeyframe = false
                 publishSignalLost(false)
                 print("[BridgeReceiver \(src)] 🎬 picture back \(Int((CACurrentMediaTime() - resumedAt) * 1000)) ms after the camera came back")
             }
@@ -902,11 +1039,10 @@ final class BridgeChannelReceiver: ChannelReceiver {
         guard isProgramSource else { return }   // H1: no main hop for a non-program channel
         forwardDelayed { [weak self] in self?.channel?.onProgramSample?(payload, timestampMicros) }
     }
-    /// Hand a passthrough payload (raw SPS/PPS or H.264) to the relay taps (RTSP / SRT)
+    /// Hand a passthrough payload (raw SPS/PPS or H.264) to the relay taps (RTSP / SRT / OBS)
     /// ON THIS QUEUE — never main — DELAYED by the SAME `bufferSeconds` the decoded jitter ring
-    /// uses — so the passthrough outputs stay aligned with the preview + NDI/HDMI the
-    /// operator sees (the whole point of the per-channel delay, which previously only
-    /// reached the DECODED path).  bufferSeconds == 0 (the default "Lowest" preset with
+    /// uses, counted from ARRIVAL: roughly in step with the preview, but the network's jitter
+    /// passes through. The far end plays by the camera capture timestamps the samples carry.  bufferSeconds == 0 (the default "Lowest" preset with
     /// no extra ms) → immediate delivery, so default latency to OBS is unchanged.  Order
     /// is preserved (serial `queue`, constant delta); a mid-stream delay change can
     /// briefly reorder until the next IDR — the same tolerance the decoded ring has.
@@ -1072,9 +1208,9 @@ final class BridgeChannelReceiver: ChannelReceiver {
             guard let existing = formatDescription else { return false }
             return !CMFormatDescriptionEqual(fmt, otherFormatDescription: existing)
         }()
+        // The timeline stays: the camera's capture clock does not change with the format.
         if changed {
             pixelBufferLock.lock(); frameRing.removeAll(keepingCapacity: true); pixelBufferLock.unlock()
-            anchorSet = false
         }
         formatDescription = fmt
     }
@@ -1131,54 +1267,22 @@ final class BridgeChannelReceiver: ChannelReceiver {
     // MARK: - Decode + anti-drift PTS anchoring
 
     private func decodeFrame(payload: Data, packetTimestamp: Int64) {
-        guard let fmt = formatDescription else { return }
+        guard let fmt = formatDescription else {
+            return logDecodeFailure("a frame arrived before any usable format description")
+        }
         // A valid H.264 access unit is never empty, but a truncated/corrupt
         // packet can pass the parser's length guard with length 0 and then crash
         // on `baseAddress!` below (`Data.withUnsafeBytes` yields a nil base for
         // an empty buffer).  Drop the empty access unit instead.
         guard !payload.isEmpty else { return }
 
-        // packetTimestamp = microseconds on the iPhone's clock.  Translate to a
-        // Mac-clock playout deadline (anchor + ΔPTS + bufferSeconds), stamp it
-        // as the sample PTS, and let the jitter ring hold the decoded frame
-        // until that time — so network jitter becomes queue depth, not on-screen
-        // lag.  Skew tracking (lower-envelope minimum) corrects crystal drift.
-        let iphonePTS = TimeInterval(packetTimestamp) / 1_000_000.0
-        let macNow    = CACurrentMediaTime()
-        let scheduledMacTime: TimeInterval
-        if anchorSet {
-            let iphoneElapsed = iphonePTS - anchorIphonePTS
-            let macElapsed    = macNow - (anchorMacTime - bufferSeconds)
-            let delta         = macElapsed - iphoneElapsed
-
-            if abs(delta - skewOffset) > skewJumpThreshold {
-                // Discontinuity (iPhone restart / clock jump) — re-anchor.  NOT
-                // mere network lateness (the ring handles that without touching
-                // the anchor; re-anchoring on late frames ratchets latency up).
-                anchorIphonePTS = iphonePTS
-                anchorMacTime   = macNow + bufferSeconds
-                skewOffset      = 0
-                skewWindow.removeAll(keepingCapacity: true)
-                pixelBufferLock.lock(); frameRing.removeAll(keepingCapacity: true); pixelBufferLock.unlock()
-                scheduledMacTime = anchorMacTime
-            } else {
-                skewWindow.append((macNow, delta))
-                let cutoff = macNow - skewWindowSeconds
-                while let first = skewWindow.first, first.t < cutoff {
-                    skewWindow.removeFirst()
-                }
-                let windowMin = skewWindow.min(by: { $0.delta < $1.delta })?.delta ?? delta
-                skewOffset += skewSlewGain * (windowMin - skewOffset)
-                scheduledMacTime = anchorMacTime + iphoneElapsed + skewOffset
-            }
-        } else {
-            anchorIphonePTS  = iphonePTS
-            anchorMacTime    = macNow + bufferSeconds
-            skewOffset       = 0
-            skewWindow.removeAll(keepingCapacity: true)
-            anchorSet        = true
-            scheduledMacTime = anchorMacTime
-        }
+        // packetTimestamp = microseconds on the iPhone's clock (the capture time).  Its Mac-clock
+        // playout deadline goes on the sample as its PTS; the ring holds the decoded frame until
+        // then, so network jitter becomes queue depth, never on-screen lag.
+        let arrival = CACurrentMediaTime()
+        let scheduledMacTime = playoutTime(iphonePTS: TimeInterval(packetTimestamp) / 1_000_000.0,
+                                           arrivedAt: arrival)
+        noteTimeliness(spare: scheduledMacTime - arrival, at: arrival)
 
         // ── Build the compressed sample buffer (carries the playout PTS) ─────
         var blockBuffer: CMBlockBuffer?
@@ -1219,6 +1323,136 @@ final class BridgeChannelReceiver: ChannelReceiver {
         decompress(sampleBuffer: sampleBuffer, format: fmt)
     }
 
+    /// The Mac-clock moment this frame plays: capture time + fastest path + `bufferSeconds`.
+    /// See the "Fixed playout delay" block on the properties for the rules.  On `queue`.
+    private func playoutTime(iphonePTS: TimeInterval, arrivedAt macNow: TimeInterval) -> TimeInterval {
+        if !anchorSet {
+            anchor(iphonePTS: iphonePTS, macNow: macNow)
+        }
+        var delta = tripDelta(iphonePTS: iphonePTS, at: macNow)
+        if playoutLocked && delta - skewOffset < -Self.aheadReanchorThreshold {
+            anchorReason = "path \(Int((skewOffset - delta) * 1000)) ms faster than the locked delay"
+            anchor(iphonePTS: iphonePTS, macNow: macNow)
+            pixelBufferLock.lock(); frameRing.removeAll(keepingCapacity: true); pixelBufferLock.unlock()
+            delta = 0
+        }
+
+        if macNow < calibratingUntil {
+            // Measuring: the fastest frame so far defines the path.  Only ever earlier.
+            skewOffset = Swift.min(skewOffset, delta)
+        } else {
+            if !playoutLocked {
+                playoutLocked = true
+                lockedSkew = skewOffset
+                lastLoggedSkew = skewOffset
+                print("[BridgeReceiver \(src)] ⏱ delay locked: \(Int((bufferSeconds * 1000).rounded())) ms over the fastest path (\(Int((skewOffset * 1000).rounded())) ms vs the first frame)")
+            }
+            followClockDrift(delta: delta, at: macNow)
+        }
+        lastSkewUpdate = macNow
+        return anchorMacTime + bufferSeconds + (iphonePTS - anchorIphonePTS) + skewOffset
+    }
+
+    /// Locked: move the schedule toward the fastest path of the last `driftWindowSeconds`, at most
+    /// `maxDriftRate` either way - the speed two crystals drift apart, not a network change. A
+    /// faster network leaves frames waiting longer (margin), a slower one leaves them late; neither
+    /// moves the delay. Each `skewLogStep` of drift is logged, so a long show can be checked.
+    private func followClockDrift(delta: Double, at macNow: TimeInterval) {
+        skewWindow.append((macNow, delta))
+        let cutoff = macNow - Self.driftWindowSeconds
+        while let first = skewWindow.first, first.t < cutoff { skewWindow.removeFirst() }
+        let target = skewWindow.min(by: { $0.delta < $1.delta })?.delta ?? delta
+        let step = Self.maxDriftRate * Swift.max(0, macNow - lastSkewUpdate)
+        skewOffset += Swift.min(Swift.max(target - skewOffset, -step), step)
+
+        guard abs(skewOffset - lastLoggedSkew) >= Self.skewLogStep else { return }
+        lastLoggedSkew = skewOffset
+        let movedMs = Int(((skewOffset - lockedSkew) * 1000).rounded())
+        print("[BridgeReceiver \(src)] ⏱ schedule \(movedMs >= 0 ? "+" : "")\(movedMs) ms since the delay locked (clock drift)")
+    }
+
+    /// How much longer than the anchor frame's own trip this frame took to arrive.
+    private func tripDelta(iphonePTS: TimeInterval, at macNow: TimeInterval) -> Double {
+        (macNow - anchorMacTime) - (iphonePTS - anchorIphonePTS)
+    }
+
+    /// How much longer than the fastest path this frame took. It can still play in its slot while
+    /// this fits in the buffer, give or take a frame (`resumeSlack`, so Lowest's 0 ms buffer is
+    /// not held to an exact match). No timeline yet: nothing to judge by, so 0.
+    private func lateness(iphonePTS: TimeInterval, at macNow: TimeInterval) -> Double {
+        guard anchorSet else { return 0 }
+        return tripDelta(iphonePTS: iphonePTS, at: macNow) - skewOffset
+    }
+
+    /// Track the fastest arrival per second while the picture waits after a silence; the path is
+    /// settled when two completed seconds agree. On `queue`.
+    private func noteResumeArrival(lateness late: Double) {
+        let now = CACurrentMediaTime()
+        if resumeBucketStart == 0 { resumeBucketStart = now }
+        if now - resumeBucketStart >= Self.resumeBucketSeconds {
+            resumePathSettled = abs(resumeBucketFloor - resumePreviousFloor) <= Self.resumeSettleTolerance
+            resumePreviousFloor = resumeBucketFloor
+            resumeBucketFloor = .infinity
+            resumeBucketStart = now
+        }
+        resumeBucketFloor = Swift.min(resumeBucketFloor, late)
+    }
+
+    /// A capture PTS (phone uptime, µs) as seconds with millisecond precision, as the camera logs it.
+    private static func ptsText(_ micros: Int64) -> String {
+        micros < 0 ? "-" : String(format: "%.3f", Double(micros) / 1_000_000)
+    }
+
+    /// Drop the timeline; the next frame starts a new one (logged with `reason`).
+    private func reanchor(_ reason: String) {
+        anchorSet = false
+        anchorReason = reason
+    }
+
+    /// Frames that miss their slot play at once (late, uneven) and the delay stays what it locked
+    /// at - so a network slower than the delay is never hidden by stretching it, and never silent
+    /// either (operator + camera chat, 2026-11-03): one line when frames start missing their slot
+    /// by more than a frame, one when they have been on time for `onTimeConfirmSeconds` again,
+    /// with how long and how late. Whether to raise the delay is the operator's call. On `queue`.
+    private func noteTimeliness(spare: Double, at now: TimeInterval) {
+        if spare < -Self.resumeSlack {
+            if lateSpellStart == 0 {
+                lateSpellStart = now
+                lateSpellWorst = 0
+                lateSpellFrames = 0
+                print("[BridgeReceiver \(src)] ⚠️ network slower than the delay: frames are missing their slot (\(Int(-spare * 1000)) ms late)")
+            }
+            lateSpellWorst = Swift.max(lateSpellWorst, -spare)
+            lateSpellFrames += 1
+            lateSpellLastLate = now
+        } else if lateSpellStart != 0, now - lateSpellLastLate >= Self.onTimeConfirmSeconds {
+            closeLateSpell("on time again")
+        }
+    }
+
+    /// End an open late spell with its summary line. On `queue`.
+    private func closeLateSpell(_ how: String) {
+        guard lateSpellStart != 0 else { return }
+        let lasted = String(format: "%.1f", lateSpellLastLate - lateSpellStart)
+        print("[BridgeReceiver \(src)] ✅ frames \(how) - \(lateSpellFrames) missed their slot over \(lasted) s, up to \(Int(lateSpellWorst * 1000)) ms late")
+        lateSpellStart = 0
+    }
+
+    /// Start a new timeline at this frame and measure the fastest path for `calibrationSeconds`.
+    private func anchor(iphonePTS: TimeInterval, macNow: TimeInterval) {
+        closeLateSpell("on a new timeline")
+        anchorIphonePTS  = iphonePTS
+        anchorMacTime    = macNow
+        anchorSet        = true
+        skewOffset       = 0
+        skewWindow.removeAll(keepingCapacity: true)
+        calibratingUntil = macNow + Self.calibrationSeconds
+        playoutLocked    = false
+        lastSkewUpdate   = macNow
+        print("[BridgeReceiver \(src)] ⏱ delay re-anchored (\(anchorReason))")
+        anchorReason = "new stream"
+    }
+
     /// Decompress one sample buffer to a BGRA `CVPixelBuffer`.  BGRA + IOSurface
     /// is the cheapest handoff for downstream encoders (NDI / SRT / RTSP) and
     /// renders directly in the SwiftUI preview.  Session rebuilt on format change.
@@ -1255,8 +1489,18 @@ final class BridgeChannelReceiver: ChannelReceiver {
             ]
             var callback = VTDecompressionOutputCallbackRecord(
                 decompressionOutputCallback: { (refCon, _, status, _, imageBuffer, pts, _) in
-                    guard status == noErr, let imageBuffer, let refCon else { return }
+                    guard let refCon else { return }
                     let receiver = Unmanaged<BridgeChannelReceiver>.fromOpaque(refCon).takeUnretainedValue()
+                    guard status == noErr, let imageBuffer else {
+                        // Hop to `queue` (never block it): the rate limit's state lives there.
+                        // Weak, like `ingestDecoded`'s hop: deinit drains frames, and a strong
+                        // capture of a receiver being freed would crash.
+                        receiver.queue.async { [weak receiver] in
+                            receiver?.logDecodeFailure(status == noErr ? "the decoder dropped a frame"
+                                                                      : "a frame failed to decode: \(status)")
+                        }
+                        return
+                    }
                     receiver.ingestDecoded(imageBuffer, playout: CMTimeGetSeconds(pts))
                 },
                 decompressionOutputRefCon: Unmanaged.passUnretained(self).toOpaque()
@@ -1271,8 +1515,8 @@ final class BridgeChannelReceiver: ChannelReceiver {
                 decompressionSessionOut: &newSession
             )
             guard status == noErr, let newSession else {
-                print("[BridgeReceiver \(src)] VTDecompressionSessionCreate failed: \(status)")
-                return
+                // Retried on the next frame (a later keyframe may succeed); logged at most 1/s.
+                return logDecodeFailure("VTDecompressionSessionCreate failed: \(status)")
             }
             decompressionSession = newSession
             decompressionFormat  = format
@@ -1291,15 +1535,26 @@ final class BridgeChannelReceiver: ChannelReceiver {
             frameRefcon: nil,
             infoFlagsOut: nil
         )
-        // Loud-fail (rate-limited) — a non-noErr submit means a corrupt NAL or a
-        // wedged session; without the log the operator just sees a frozen tile.
+        // A non-noErr submit means a corrupt NAL or a wedged session; without the log the
+        // operator just sees a frozen tile.
         if status != noErr {
-            let now = CACurrentMediaTime()
-            if now - lastDecodeErrorLog > 1.0 {
-                lastDecodeErrorLog = now
-                print("[BridgeReceiver \(src)] ⚠️ VTDecompressionSessionDecodeFrame failed: \(status)")
-            }
+            logDecodeFailure("VTDecompressionSessionDecodeFrame failed: \(status)")
         }
+    }
+
+    /// Every decode failure is logged, never dropped silently - but at most one line per second,
+    /// carrying how many more happened since, so a broken stream cannot flood the log at 30-60
+    /// lines a second. On `queue`.
+    private func logDecodeFailure(_ what: String) {
+        let now = CACurrentMediaTime()
+        guard now - lastDecodeErrorLog >= Self.decodeErrorLogInterval else {
+            suppressedDecodeErrors += 1
+            return
+        }
+        let more = suppressedDecodeErrors > 0 ? " (+\(suppressedDecodeErrors) more since the last line)" : ""
+        print("[BridgeReceiver \(src)] ⚠️ \(what)\(more)")
+        lastDecodeErrorLog = now
+        suppressedDecodeErrors = 0
     }
 
     private func teardownDecodeSession() {
@@ -1313,12 +1568,6 @@ final class BridgeChannelReceiver: ChannelReceiver {
     }
 
     // MARK: - Jitter ring (playout-deadline scheduling)
-
-    /// Ring cap in frames — `bufferSeconds` worth at 60 fps plus a small margin,
-    /// floored at 2 so even Lowest (0 ms) tolerates one decode in flight.
-    private var maxRingFrames: Int {
-        Swift.max(2, Int((bufferSeconds * 60.0).rounded(.up)) + 2)
-    }
 
     /// Enqueue a decoded frame and schedule its promotion at the playout
     /// deadline.  Lowest (0 ms) promotes inline (the fast baseline — no timer
@@ -1346,8 +1595,8 @@ final class BridgeChannelReceiver: ChannelReceiver {
                               CGColorSpace(name: CGColorSpace.sRGB)!, .shouldPropagate)
         pixelBufferLock.lock()
         frameRing.append((buffer, playout))
-        if frameRing.count > maxRingFrames {
-            frameRing.removeFirst(frameRing.count - maxRingFrames)   // overrun drop
+        if frameRing.count > ringCapacity {
+            frameRing.removeFirst(frameRing.count - ringCapacity)   // overrun drop
         }
         pixelBufferLock.unlock()
 
@@ -1372,20 +1621,26 @@ final class BridgeChannelReceiver: ChannelReceiver {
         }
     }
 
-    /// Promote the freshest now-due frame: enqueue it into the channel's display
-    /// layer (when `previewEnabled`) and forward it to every output.
+    /// Present the frame whose time has come; a frame whose time passed while a newer one also
+    /// came due is skipped, never played late (operator + camera chat, 2026-11-02).
+    ///
+    /// The playout delay is fixed (`playoutTime`), so in steady state exactly one frame is due per
+    /// tick. Several are due at once only after the network held them past the buffer: playing
+    /// them back to back fast-forwarded the tiles and queued the virtual camera behind real time.
+    /// Now the picture holds on its last frame through the hole and makes one clean step to the
+    /// present, and the delay stays what it was locked at.
     private func promoteDue() {
         let now = CACurrentMediaTime()
-        var promoted: CVPixelBuffer?
+        var newest: (buffer: CVPixelBuffer, playout: TimeInterval)?
         pixelBufferLock.lock()
         while let first = frameRing.first, first.playout <= now {
-            promoted = first.buffer
+            newest = first
             frameRing.removeFirst()
         }
         pixelBufferLock.unlock()
 
-        guard let promoted else { return }
-        present(promoted)
+        guard let frame = newest else { return }
+        present(frame.buffer)
     }
 
     /// Single presentation point.  Two jobs:
@@ -1426,7 +1681,9 @@ final class BridgeChannelReceiver: ChannelReceiver {
         // Program tap: forward to the program output(s) while this is the source — on THIS
         // queue.  The tap is lock-guarded (Channel.swift) and the outputs are read from the
         // lock-guarded ProgramBus, so main is not needed and must not be used.
-        if isPgm { channel?.onProgramFrame?(buffer, timeNs) }
+        if isPgm {
+            channel?.onProgramFrame?(buffer, timeNs)
+        }
 
         guard needGateFlip else { return }
         DispatchQueue.main.async { [weak self] in
@@ -1449,13 +1706,15 @@ final class BridgeChannelReceiver: ChannelReceiver {
     /// on the SAME connection (camera 52d2c7b) - TCP never notices. So the only way to know is to
     /// listen: no bytes for `silenceThreshold` = the link is silent; the first bytes after it = the
     /// link is back. On a video connection silence is a lost picture, shown as "No signal" and
-    /// taken off the program; on any connection the return gets the camera's current tally,
-    /// because the camera darkened its lamp while it was cut off and waits for one.
+    /// taken off the program. The lamp is not this code's business: the camera sends its state
+    /// when its route returns, and every state is answered with the current tally.
     /// On `queue`.
     private func startSilenceWatch() {
         lastInboundAt = CACurrentMediaTime()
         linkSilent = false
         awaitingResumeKeyframe = false
+        lastSamplePTSMicros = -1
+        logFirstSampleAfterSilence = false
         peerSendsVideo = true   // until this connection's first snapshot says otherwise
         guard silenceTimer == nil else { return }
         let t = DispatchSource.makeTimerSource(queue: queue)
@@ -1482,38 +1741,35 @@ final class BridgeChannelReceiver: ChannelReceiver {
         guard !linkSilent, CACurrentMediaTime() - lastInboundAt > Self.silenceThreshold else { return }
         linkSilent = true
         guard carriesPicture else { return }
-        print("[BridgeReceiver \(src)] 📵 nothing from the camera for \(Self.silenceThreshold) s")
+        print("[BridgeReceiver \(src)] 📵 nothing from the camera for \(Self.silenceThreshold) s - last frame PTS \(Self.ptsText(lastSamplePTSMicros)) s")
         publishSignalLost(true)
     }
 
     /// Bytes arrived on the committed connection. On `queue`.
     private func noteInbound() {
-        let gap = CACurrentMediaTime() - lastInboundAt
         lastInboundAt = CACurrentMediaTime()
-        guard linkSilent else {
-            // A gap too short for "No signal" can still be a route flap: the camera darkens its
-            // lamp the instant its route goes, however briefly, and waits for a cue (camera
-            // CaptureEngine handleLinkViability). One current cue after any gap this long; the
-            // camera ignores an unchanged cue, so a gap that was not a flap costs one tiny packet.
-            if authorized, gap >= Self.tallyGap {   // not the handshake's own first bytes
-                DispatchQueue.main.async { [weak self] in self?.channel?.onLinkResumed?() }
-            }
-            return
-        }
+        guard linkSilent else { return }
         linkSilent = false
-        // Tally at once: the lamp needs nothing but the link. The PICTURE is not back until the
-        // camera's keyframe, so "No signal" stays up until it arrives (`.sample` below) - never a
-        // frozen frame passed off as live.
-        DispatchQueue.main.async { [weak self] in self?.channel?.onLinkResumed?() }
+        // The PICTURE is not back until the camera's keyframe, so "No signal" stays up until it
+        // arrives (`.sample` below) - never a frozen frame passed off as live. Tally needs nothing
+        // here: a camera whose route dropped sends its state when the route returns, and every
+        // state is answered with the current cue (`pushRemoteToMain`).
         if carriesPicture {
+            if !awaitingResumeKeyframe { resumeWaitStartedAt = CACurrentMediaTime() }
             awaitingResumeKeyframe = true
             resumedAt = CACurrentMediaTime()
+            resumeBucketStart = 0
+            resumeBucketFloor = .infinity
+            resumePreviousFloor = .infinity
+            resumePathSettled = false
             // ASK for the keyframe. The camera makes one by itself only when iOS reported its route
             // gone and back (camera `handleLinkViability`); a Wi-Fi stall that never lost the route
             // leaves it encoding P-frames, and the next natural keyframe is up to 15 s away (its
             // standard keyframe interval). The same request every cut makes; the camera answers
             // with an IDR and its format, rate-limited on its side.
             send(.forceKeyframe())
+            lastResumeKeyframeRequestAt = CACurrentMediaTime()
+            logFirstSampleAfterSilence = true
             print("[BridgeReceiver \(src)] 📶 camera back on the same connection - asked for a keyframe")
         } else {
             publishSignalLost(false)
@@ -1522,7 +1778,6 @@ final class BridgeChannelReceiver: ChannelReceiver {
 
     /// Whether silence on this connection means a lost picture: not on the control side of a
     /// combined channel (its video is the AirPlay side) and not from a Control-only camera.
-    /// Either way the return still re-sends tally.
     private var carriesPicture: Bool { !controlSide && peerSendsVideo }
 
     private func publishSignalLost(_ lost: Bool) {
@@ -1599,6 +1854,7 @@ final class BridgeChannelReceiver: ChannelReceiver {
             // so the ARLV snapshot's rotation must NOT rotate it — leave outputRotation to the
             // video receiver.  Normal channels apply it as before.
             if !self.controlSide { channel.outputRotation = snapshot.outputRotation }  // mirrors read this off-main
+            channel.onStateReceived?()
         }
     }
 
