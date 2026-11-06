@@ -35,6 +35,23 @@
     <description>Most recent updates to Airlive Bridge</description>
     <language>en</language>
     <item>
+      <title>Airlive Bridge 1.6.1</title>
+      <pubDate>Fri, 06 Nov 2026 22:29:10 +0000</pubDate>
+      <sparkle:version>26</sparkle:version>
+      <sparkle:shortVersionString>1.6.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[<ul>
+<li>Fixed playout delay: the delay you set now holds for the whole show.</li>
+<li>Smoother picture after a network drop.</li>
+<li>No more "No signal" flash on lens changes.</li>
+<li>Bug fixes.</li>
+</ul>]]></description>
+      <enclosure
+        url="https://github.com/airlive-project/airlive-bridge/releases/download/v1.6.1/Airlive-Bridge-1.6.1.dmg"
+        length="11759153"  type="application/octet-stream"
+        sparkle:edSignature="8ZAML1Tv1uGkNQi1nLPgPFF6QQn8y2S0XVAu0GUVjQpw3lDMdsZEyLObYkM/6e8rOB95jd13lxLtMrIPEOVyAw==" />
+    </item>
+    <item>
       <title>Airlive Bridge 1.6.0</title>
       <pubDate>Sat, 31 Oct 2026 11:59:54 +0000</pubDate>
       <sparkle:version>25</sparkle:version>
